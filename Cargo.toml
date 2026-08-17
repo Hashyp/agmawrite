@@ -1,0 +1,10 @@
+[package]
+name = "agmawrite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iced = { version = "0.14.0", features = ["advanced", "canvas", "markdown"] }
+pulldown-cmark = "0.12"
+rfd = "0.15"
+unicode-segmentation = "1"
