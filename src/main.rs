@@ -991,12 +991,17 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     };
 
     // The note popup floats above the editing area; the backdrop closes it
-    // on click and shields the area beneath from events.
-    let editing_area: Element<'_, Message> = if editor.keymap.note_open() {
-        stack![base_area, note_popup(editor)].into()
-    } else {
-        base_area
-    };
+    // on click and shields the area beneath from events. The stack keeps
+    // the editing surface as its base layer whether or not the popup is
+    // open, so toggling the popup never rebuilds the tree beneath it and
+    // the preview keeps its scroll position and caret.
+    let mut editing_stack = stack![base_area];
+
+    if editor.keymap.note_open() {
+        editing_stack = editing_stack.push(note_popup(editor));
+    }
+
+    let editing_area: Element<'_, Message> = editing_stack.into();
 
     let open_button = tooltip(
         button(
@@ -1118,12 +1123,15 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .style(background_style)
     .into();
 
-    // The find popup floats in the top right corner, in any mode.
+    // The find popup floats in the top right corner, in any mode — on a
+    // persistent stack too, for the same reason as the note popup.
+    let mut layers = stack![content];
+
     if editor.keymap.find_open() {
-        stack![content, find_popup(editor)].into()
-    } else {
-        content
+        layers = layers.push(find_popup(editor));
     }
+
+    layers.into()
 }
 
 /// The comments sidebar: a full-height panel with a scrollable list of
