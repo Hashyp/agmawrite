@@ -442,7 +442,28 @@ fn parse(markdown: &str) -> Vec<PreviewElement> {
                     pending_text = false;
                 }
             }
-            Event::End(TagEnd::CodeBlock) => code_block = false,
+            Event::Text(text) | Event::Code(text) if code_block && !metadata => {
+                // The code block's lines, collected as its rendered text —
+                // each event ends with a newline, trimmed when the block
+                // closes.
+                rendered.push_str(text.as_ref());
+            }
+            Event::End(TagEnd::CodeBlock) if !metadata => {
+                code_block = false;
+
+                // A fenced code block is itself a caret element: the caret
+                // moves through its code and comments can anchor on it. Its
+                // source spans the fences; its text is the code between
+                // them, without the trailing newline.
+                rendered.pop();
+                finish(
+                    range,
+                    ElementKind::Text,
+                    &mut elements,
+                    &mut rendered,
+                    &mut last_end,
+                );
+            }
             // Lists and quotes likewise interrupt a paragraph in progress.
             // The pending text lies between the previous element and the
             // interrupting block, so record that span.
@@ -735,12 +756,12 @@ fn main() {}
             .map(|element| &markdown[element.source()])
             .collect();
 
-        // Headings, paragraphs, quotes, table cells, and every list item
-        // (tight, ordered, task, and nested) — but not the code block.
-        assert_eq!(texts.len(), 14);
+        // Headings, paragraphs, quotes, table cells, every list item
+        // (tight, ordered, task, and nested), and fenced code blocks.
+        assert_eq!(texts.len(), 15);
         for (text, expected) in texts.iter().zip([
             "Title", "Intro", "quote", "A", "B", "1", "2", "one", "two", "nested", "first", "todo",
-            "done", "Tail",
+            "done", "Tail", "```rust",
         ]) {
             assert!(text.contains(expected), "expected '{expected}' in '{text}'");
         }
@@ -756,6 +777,38 @@ fn main() {}
                 ElementKind::Cell { row: 1, column: 1 },
             ]
         );
+    }
+
+    /// Fenced code blocks are caret elements like any other: the source
+    /// spans the fences, the text is the code between them (without the
+    /// trailing newline), and `j`/`k` walk into and out of them.
+    #[test]
+    fn fenced_code_blocks_are_elements() {
+        let markdown = "before\n\n```rust\nfn main() {}\n```\n\nafter";
+        let elements = parse(markdown);
+
+        assert_eq!(elements.len(), 3);
+        assert_eq!(&markdown[elements[1].source()], "```rust\nfn main() {}\n```");
+        assert_eq!(elements[1].text(), "fn main() {}");
+        assert_eq!(elements[1].len(), 12);
+
+        // The caret walks the code like any element, character by
+        // character, and `j`/`k` cross its edges.
+        let mut caret = Caret::new();
+        caret.place(at(0, 0));
+        assert!(caret.move_by(&elements, Motion::Down));
+        assert_eq!(caret.position(), at(1, 0));
+        assert!(caret.move_by(&elements, Motion::Right));
+        assert_eq!(caret.position(), at(1, 1));
+        assert!(caret.move_by(&elements, Motion::Down));
+        assert_eq!(caret.position(), at(2, 1));
+
+        // Word motions treat the code's words like any other element's.
+        caret.place(at(1, 0));
+        assert!(caret.move_word(&elements, WordMotion::NextStart));
+        assert_eq!(caret.position(), at(1, 3)); // → main
+        assert!(caret.move_word(&elements, WordMotion::NextStart));
+        assert_eq!(caret.position(), at(1, 7)); // → (
     }
 
     /// `j`/`k` navigate tables as a grid: they move between rows of the same

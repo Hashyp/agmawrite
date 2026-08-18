@@ -58,6 +58,38 @@ pub fn paragraph<'a, M: 'a>(
     })
 }
 
+/// A fenced code block in the preview: the same interactive decorations
+/// as a text element — caret, selection, comment marks, find matches —
+/// over monospace code.
+#[allow(clippy::too_many_arguments)]
+pub fn code<'a, M: 'a>(
+    settings: markdown::Settings,
+    code: &str,
+    selection: Option<std::ops::Range<usize>>,
+    caret: Option<usize>,
+    id: Option<Id>,
+    commented: bool,
+    active_comment: bool,
+    matches: Vec<std::ops::Range<usize>>,
+) -> Element<'a, M> {
+    let span: text::Span<'static, markdown::Uri, Font> = text::Span::new(code.to_owned())
+        .font(settings.style.code_block_font);
+
+    Element::new(InteractiveText {
+        spans: vec![span],
+        selection,
+        caret,
+        id,
+        commented,
+        active_comment,
+        matches,
+        size: settings.code_size,
+        line_height: iced::advanced::text::LineHeight::default(),
+        font: settings.style.code_block_font,
+        _message: std::marker::PhantomData,
+    })
+}
+
 struct InteractiveText<M> {
     spans: Vec<text::Span<'static, markdown::Uri, Font>>,
     /// The grapheme columns of a visual-mode selection within this element.

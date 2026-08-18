@@ -16,6 +16,7 @@ use iced::widget::{
     operation::focus_next, operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack,
     text, text_editor, text_input, tooltip, Id, Space,
 };
+use iced::widget::markdown::Catalog as _;
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
     Point, Rectangle, Renderer, Subscription, Task, Theme, Vector,
@@ -926,9 +927,68 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
     ) -> Element<'a, Message> {
         self.text_element(settings, text)
     }
+
+    fn code_block(
+        &self,
+        settings: markdown::Settings,
+        _language: Option<&'a str>,
+        _code: &'a str,
+        lines: &'a [markdown::Text],
+    ) -> Element<'a, Message> {
+        // The map numbers code blocks like any element; if they ever
+        // disagree, fall back to the plain, non-interactive look.
+        let Some((element, preview_element)) = self.claims.claim() else {
+            return markdown::code_block(settings, lines, Message::LinkClicked);
+        };
+
+        let decorations = self.decorations(element, preview_element);
+
+        // The code block keeps the default look — dark surface, inset —
+        // with the interactive code inside instead of the plain lines.
+        container(interactive_text::code(
+            settings,
+            preview_element.text(),
+            decorations.selection,
+            decorations.caret,
+            decorations.id,
+            decorations.commented,
+            decorations.active_comment,
+            decorations.matches,
+        ))
+        .width(Length::Fill)
+        .padding(settings.code_size / 4.0)
+        .class(Theme::code_block())
+        .into()
+    }
 }
 
 impl<'a> PreviewViewer<'a> {
+    /// The decorations the claimed `element` carries: its slice of the
+    /// visual selection, the caret when focused, its comment mark, and
+    /// its find matches.
+    fn decorations(
+        &self,
+        element: usize,
+        preview_element: &preview::PreviewElement,
+    ) -> Decorations {
+        let focused = self.focused_element == element;
+
+        Decorations {
+            selection: self.visual.and_then(|(anchor, caret)| {
+                preview::element_selection(anchor, caret, element, preview_element.len())
+            }),
+            caret: focused.then_some(self.caret_column),
+            id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
+            commented: matches!(self.comments.mark_for(element), Mark::Commented | Mark::Active),
+            active_comment: self.comments.mark_for(element) == Mark::Active,
+            matches: if self.find_query.is_empty() {
+                Vec::new()
+            } else {
+                editing::matches_in(preview_element.text(), self.find_query)
+            },
+        }
+    }
+
     fn text_element(
         &self,
         settings: markdown::Settings,
@@ -950,30 +1010,31 @@ impl<'a> PreviewViewer<'a> {
             );
         };
 
-        let focused = self.focused_element == element;
-        let selection = self.visual.and_then(|(anchor, caret)| {
-            preview::element_selection(anchor, caret, element, preview_element.len())
-        });
-        let mark = self.comments.mark_for(element);
-        let commented = matches!(mark, Mark::Commented | Mark::Active);
-        let active_comment = mark == Mark::Active;
-        let search_matches = if self.find_query.is_empty() {
-            Vec::new()
-        } else {
-            editing::matches_in(preview_element.text(), self.find_query)
-        };
+        let decorations = self.decorations(element, preview_element);
 
         interactive_text::paragraph(
             settings,
             text,
-            selection,
-            focused.then_some(self.caret_column),
-            focused.then(|| Id::new(PREVIEW_CARET_ID)),
-            commented,
-            active_comment,
-            search_matches,
+            decorations.selection,
+            decorations.caret,
+            decorations.id,
+            decorations.commented,
+            decorations.active_comment,
+            decorations.matches,
         )
     }
+}
+
+/// The interactive decorations of one preview element: its slice of the
+/// visual-mode selection, the caret when it is the focused element, its
+/// comment mark, and its find matches.
+struct Decorations {
+    selection: Option<std::ops::Range<usize>>,
+    caret: Option<usize>,
+    id: Option<Id>,
+    commented: bool,
+    active_comment: bool,
+    matches: Vec<std::ops::Range<usize>>,
 }
 
 fn view(editor: &Editor) -> Element<'_, Message> {
@@ -1712,6 +1773,29 @@ mod tests {
         let _ = update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.keymap.note_open());
+    }
+
+    /// A note saved while the caret is inside a fenced code block anchors
+    /// on the code element: it carries the comment mark and its card
+    /// quotes the fenced source.
+    #[test]
+    fn comments_anchor_on_code_blocks() {
+        let markdown = "text\n\n```\ncode line\n```\n\nafter";
+        let mut editor = editor_at(
+            markdown,
+            CaretPosition {
+                element: 1,
+                column: 4,
+            },
+        );
+        editor.note_text = iced::widget::text_editor::Content::with_text("about the code");
+        editor.keymap.note(&Message::OpenNotePopup);
+
+        let _ = update(&mut editor, Message::SaveNote);
+
+        assert_eq!(editor.comments.mark_for(1), Mark::Active);
+        let cards = editor.comments.cards(markdown, editor.preview_elements.elements());
+        assert!(cards[0].quote.contains("```"));
     }
 
     /// Clicking a comment card activates its comment and moves the cursor
