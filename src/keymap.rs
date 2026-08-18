@@ -217,6 +217,10 @@ impl Keymap {
                 }
                 // Show or hide the comments sidebar.
                 keyboard::Key::Character("b" | "B") => Some(Message::ToggleSidebar),
+                // Save the document, asking for a path if it was never
+                // saved. With the note popup open, Ctrl+S saves the note
+                // instead — the popup guard above took that path already.
+                keyboard::Key::Character("s" | "S") => Some(Message::SaveFile),
                 // Find in the document, in any mode.
                 keyboard::Key::Character("f" | "F") => Some(Message::OpenFind),
                 // Browse the saved comments in the preview.
@@ -527,6 +531,25 @@ mod tests {
             keymap.note(&Message::CloseFind);
             assert!(keymap.mode() != Mode::Find);
         }
+    }
+
+    /// Ctrl+S saves the document in write and view mode; with the note
+    /// popup open it saves the note instead.
+    #[test]
+    fn ctrl_s_saves_the_file_unless_a_note_is_open() {
+        for mut keymap in [Keymap::new(false), viewing()] {
+            assert!(matches!(
+                keymap.handle(key_press_with("s", Modifiers::CTRL, false)),
+                Some(Message::SaveFile)
+            ));
+        }
+
+        let mut keymap = viewing();
+        keymap.note(&Message::OpenNotePopup);
+        assert!(matches!(
+            keymap.handle(key_press_with("s", Modifiers::CTRL, false)),
+            Some(Message::SaveNote)
+        ));
     }
 
     /// Ctrl+B toggles the comments sidebar in any mode.
