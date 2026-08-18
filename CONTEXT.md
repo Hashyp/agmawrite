@@ -6,8 +6,8 @@ preview and anchored comments.
 ## Terms
 
 - **Preview element** — a Markdown block the preview numbers as a caret
-  position: headings, paragraphs, quotes, list items, and non-empty table
-  cells. Code blocks, images, and rules produce no element.
+  position: headings, paragraphs, quotes, list items, non-empty table
+  cells, and fenced code blocks. Images and rules produce no element.
   (`PreviewElement`)
 - **Caret position** — an `(element, column)` position in the preview: the
   element index plus a grapheme column within its rendered text. Where the
@@ -24,12 +24,20 @@ preview and anchored comments.
   anchored to. (`Mark`, via `Comments::mark_for`)
 - **Active comment** — the comment highlighted in the preview and the
   sidebar. `Ctrl+N` cycles it forward through the anchored comments,
-  wrapping around.
+  wrapping around; clicking a card activates that comment and moves the
+  cursor to its anchor.
 - **Note popup** — the modal text field over the preview whose text becomes
-  a comment on save.
+  a comment on save. Dismissing it (Escape, the Close button, a backdrop
+  click) discards the draft, so the next note starts fresh.
 - **Find popup** — the small search field in the top right corner
-  (`Ctrl+F`). Each keystroke selects the first match: a real selection in
-  write mode, a caret jump plus amber highlights in the preview.
+  (`Ctrl+F`). The query matches case-insensitively; each keystroke
+  restarts at the first match, and the counter reads `n/m` (or "no
+  match"). Enter, `Ctrl+G`, and the ▼ button step to the next match,
+  Shift+Enter and ▲ to the previous one, wrapping around. Every match
+  highlights amber with the current one brighter; in write mode the
+  current match is the editor's selection and the others tint amber
+  through the syntax highlighter. The query and the current-match index
+  live in the find module (`Find`).
 - **Publish draft** — the text of the sidebar publish field, owned by the
   comments module (`Comments::draft`). The Add button files it as a global
   comment.
