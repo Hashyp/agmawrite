@@ -23,6 +23,9 @@ const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
+/// The id of the source text editor, refocused when switching back to
+/// write mode so the cursor reappears where it was left.
+const SOURCE_EDITOR_ID: &str = "source-editor";
 /// Margin kept between the preview caret and the viewport edges while scrolling.
 const CARET_MARGIN: f32 = 8.0;
 
@@ -194,6 +197,10 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
                     return reveal_preview_caret();
                 }
+
+                // Switching back to write mode: the editor content kept its
+                // cursor, it only needs focus for the caret to show again.
+                return focus(Id::new(SOURCE_EDITOR_ID));
             }
         }
         Message::LinkClicked(_uri) => {
@@ -497,6 +504,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         .into()
     } else {
         text_editor(&editor.content)
+            .id(Id::new(SOURCE_EDITOR_ID))
             .on_action(Message::Edit)
             .font(EDITOR_FONT)
             .size(20)
