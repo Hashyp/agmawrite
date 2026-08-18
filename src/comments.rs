@@ -180,7 +180,7 @@ fn quote(source: &str, elements: &[PreviewElement], index: usize, max_chars: usi
 #[cfg(test)]
 mod tests {
     use super::{CaretPosition, Comments, Mark};
-    use crate::preview::parse;
+    use crate::preview::ElementMap;
 
     fn at(element: usize) -> CaretPosition {
         CaretPosition { element, column: 0 }
@@ -243,24 +243,24 @@ mod tests {
     #[test]
     fn cards_quote_the_anchored_source() {
         let markdown = "# Some rather long heading text here\n\nshort";
-        let elements = parse(markdown);
+        let elements = ElementMap::parse(markdown);
 
         let mut comments = Comments::new();
         comments.save("note", at(1));
         comments.save("another", at(9));
 
-        let cards = comments.cards(markdown, &elements);
+        let cards = comments.cards(markdown, elements.elements());
         assert_eq!(cards[0].quote, "short");
         assert_eq!(cards[1].quote, "");
 
         // Sources longer than the quote limit are cut off with an ellipsis.
         let long = format!("# {}\n\nbody", "a".repeat(80));
-        let elements = parse(&long);
+        let elements = ElementMap::parse(&long);
 
         let mut comments = Comments::new();
         comments.save("note", at(0));
 
-        let cards = comments.cards(&long, &elements);
+        let cards = comments.cards(&long, elements.elements());
         assert_eq!(cards[0].quote, format!("# {}…", "a".repeat(58)));
     }
 }

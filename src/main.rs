@@ -2,10 +2,8 @@ mod comments;
 mod interactive_text;
 mod preview;
 
-use std::cell::Cell;
-
 use comments::{Comments, Mark};
-use preview::{Caret, CaretPosition, Jump, Motion, PreviewElement, WordMotion};
+use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, WordMotion};
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
 use iced::advanced::widget::Operation;
@@ -34,7 +32,8 @@ struct Editor {
     /// The preview caret: element, grapheme column, and sticky target
     /// column, owned by the preview module.
     caret: Caret,
-    preview_elements: Vec<PreviewElement>,
+    /// The numbered preview elements, owned by the preview module.
+    preview_elements: ElementMap,
     /// Whether a lone `g` is awaiting its second key of a `gg`/`ge` sequence.
     pending_g: bool,
     /// The fixed end of the visual-mode selection, as a caret position.
@@ -269,7 +268,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::Edit(action) => editor.content.perform(action),
         Message::OpenFile => return Task::perform(open_file(), Message::FileLoaded),
         Message::FileLoaded(Some(contents)) => {
-            editor.preview_elements = preview::parse(&contents);
+            editor.preview_elements = ElementMap::parse(&contents);
             editor.caret = Caret::new();
             editor.note_open = false;
             editor.visual_anchor = None;
@@ -287,10 +286,10 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
                 if editor.preview {
                     let contents = editor.content.text();
-                    editor.preview_elements = preview::parse(&contents);
+                    editor.preview_elements = ElementMap::parse(&contents);
                     editor
                         .caret
-                        .move_to_source_cursor(&editor.content, &editor.preview_elements);
+                        .move_to_source_cursor(&editor.content, editor.preview_elements.elements());
                     editor.markdown = markdown::Content::parse(&contents);
 
                     return reveal_preview_caret();
@@ -303,17 +302,23 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::MovePreviewCursor(motion) => {
             // The caret always advances; the page only scrolls as much as
             // needed to keep the caret visible.
-            if editor.caret.move_by(&editor.preview_elements, motion) {
+            if editor
+                .caret
+                .move_by(editor.preview_elements.elements(), motion)
+            {
                 return reveal_preview_caret();
             }
         }
         Message::MovePreviewWord(motion) => {
-            if editor.caret.move_word(&editor.preview_elements, motion) {
+            if editor
+                .caret
+                .move_word(editor.preview_elements.elements(), motion)
+            {
                 return reveal_preview_caret();
             }
         }
         Message::MovePreviewJump(jump) => {
-            if editor.caret.jump(&editor.preview_elements, jump) {
+            if editor.caret.jump(editor.preview_elements.elements(), jump) {
                 return reveal_preview_caret();
             }
         }
@@ -496,13 +501,14 @@ fn tooltip_style(_theme: &Theme) -> container::Style {
 }
 
 struct PreviewViewer<'a> {
-    next_paragraph: Cell<usize>,
+    /// Claims the next numbered element per rendered item from the map —
+    /// the viewer never counts itself, so the numbering parity between the
+    /// parse walk and the viewer lives in the preview module alone.
+    claims: preview::Claims<'a>,
     focused_element: usize,
     caret_column: usize,
     /// The `(anchor, caret)` endpoints of the visual-mode selection.
     visual: Option<(CaretPosition, CaretPosition)>,
-    /// Per-element lengths for visual-mode selections.
-    elements: &'a [PreviewElement],
     /// Saved comments, to know which elements carry one.
     comments: &'a Comments,
 }
@@ -545,14 +551,17 @@ impl<'a> PreviewViewer<'a> {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        let element = self.next_paragraph.get();
-        self.next_paragraph.set(element + 1);
+        // The map numbers elements exactly like the viewer numbers items;
+        // if they ever disagree the item renders plainly, without caret,
+        // selection, or comment mark.
+        let Some((element, preview_element)) = self.claims.claim() else {
+            return interactive_text::paragraph(settings, text, None, None, None, false, false);
+        };
 
         let focused = self.focused_element == element;
-        let len = self.elements.get(element).map_or(0, PreviewElement::len);
-        let selection = self
-            .visual
-            .and_then(|(anchor, caret)| preview::element_selection(anchor, caret, element, len));
+        let selection = self.visual.and_then(|(anchor, caret)| {
+            preview::element_selection(anchor, caret, element, preview_element.len())
+        });
         let mark = self.comments.mark_for(element);
         let commented = matches!(mark, Mark::Commented | Mark::Active);
         let active_comment = mark == Mark::Active;
@@ -579,11 +588,10 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 editor.markdown.items(),
                 markdown::Settings::with_text_size(20.0, markdown_style()),
                 &PreviewViewer {
-                    next_paragraph: Cell::new(0),
+                    claims: editor.preview_elements.claims(),
                     focused_element: position.element,
                     caret_column: position.column,
                     visual,
-                    elements: &editor.preview_elements,
                     comments: &editor.comments,
                 },
             ))
@@ -736,7 +744,7 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
 
     let cards: Vec<Element<'_, Message>> = editor
         .comments
-        .cards(&source, &editor.preview_elements)
+        .cards(&source, editor.preview_elements.elements())
         .into_iter()
         .map(|card| {
             let active = card.active;
@@ -1118,7 +1126,10 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             }
         });
 
-    let preview_elements = contents.as_deref().map(preview::parse).unwrap_or_default();
+    let preview_elements = contents
+        .as_deref()
+        .map(ElementMap::parse)
+        .unwrap_or_default();
 
     let editor = Editor {
         content: contents
@@ -1183,7 +1194,7 @@ fn main() -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::comments::{Comments, Mark};
-    use super::preview::{Caret, CaretPosition, Motion, WordMotion};
+    use super::preview::{Caret, CaretPosition, ElementMap, Motion, WordMotion};
     use super::{editor_mode, handle_key_press, save_note, Editor, Message, Mode};
     use iced::keyboard::{self, key, Modifiers};
 
@@ -1287,7 +1298,7 @@ mod tests {
             preview: false,
             preview_only: false,
             caret: Caret::new(),
-            preview_elements: Vec::new(),
+            preview_elements: ElementMap::default(),
             pending_g: false,
             visual_anchor: None,
             note_open: false,
@@ -1327,7 +1338,7 @@ mod tests {
             preview: true,
             preview_only: false,
             caret,
-            preview_elements: crate::preview::parse("# Title\n\nbody"),
+            preview_elements: ElementMap::parse("# Title\n\nbody"),
             pending_g: false,
             visual_anchor: None,
             note_open: true,
@@ -1343,7 +1354,7 @@ mod tests {
         assert_eq!(
             editor
                 .comments
-                .cards("# Title\n\nbody", &editor.preview_elements)[0]
+                .cards("# Title\n\nbody", editor.preview_elements.elements())[0]
                 .text,
             "fix this"
         );

@@ -9,6 +9,8 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use std::cell::Cell;
+
 use iced::widget::text_editor;
 
 /// A caret position in the preview: an element index plus a grapheme column
@@ -84,6 +86,62 @@ impl PreviewElement {
     /// The number of graphemes in the rendered text.
     pub fn len(&self) -> usize {
         self.len
+    }
+}
+
+/// The parsed preview elements, owned as one list with one numbering.
+///
+/// The map owns both sides of the numbering seam: the `pulldown-cmark`
+/// walk that mirrors how `iced` itemizes Markdown, and the [`Claims`]
+/// protocol the Markdown viewer uses to fetch its element per rendered
+/// item — the viewer claims, it never counts. The parity invariant between
+/// the two lives here and nowhere else.
+#[derive(Debug, Default)]
+pub struct ElementMap {
+    elements: Vec<PreviewElement>,
+}
+
+impl ElementMap {
+    /// Parses the Markdown source into the numbered element list.
+    pub fn parse(markdown: &str) -> Self {
+        Self {
+            elements: parse(markdown),
+        }
+    }
+
+    /// The numbered elements, in document order — the list all caret
+    /// motion runs against.
+    pub fn elements(&self) -> &[PreviewElement] {
+        &self.elements
+    }
+
+    /// Starts a claim run for the viewer: each [`Claims::claim`] hands out
+    /// the next numbered element in document order, mirroring how `iced`
+    /// numbers Markdown items.
+    pub fn claims(&self) -> Claims<'_> {
+        Claims {
+            map: self,
+            next: Cell::new(0),
+        }
+    }
+}
+
+/// A claim run over an [`ElementMap`]: the viewer claims the next numbered
+/// element per item it renders, so the numbering lives in the map rather
+/// than in a counter the viewer carries.
+pub struct Claims<'a> {
+    map: &'a ElementMap,
+    next: Cell<usize>,
+}
+
+impl<'a> Claims<'a> {
+    /// Claims the next numbered element, returning its index and the
+    /// element itself. `None` once every element has been claimed.
+    pub fn claim(&self) -> Option<(usize, &'a PreviewElement)> {
+        let index = self.next.get();
+        let element = self.map.elements.get(index)?;
+        self.next.set(index + 1);
+        Some((index, element))
     }
 }
 
@@ -295,7 +353,7 @@ impl Caret {
 /// paragraph item is only produced while there is pending inline text. Lists,
 /// quotes, tables, code blocks, images, and rules are containers or unnumbered
 /// items — but their contents still produce numbered elements.
-pub fn parse(markdown: &str) -> Vec<PreviewElement> {
+fn parse(markdown: &str) -> Vec<PreviewElement> {
     use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
     let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
@@ -608,11 +666,29 @@ pub fn element_selection(
 #[cfg(test)]
 mod tests {
     use super::{
-        element_selection, parse, Caret, CaretPosition, ElementKind, Jump, Motion, WordMotion,
+        element_selection, parse, Caret, CaretPosition, ElementKind, ElementMap, Jump, Motion,
+        WordMotion,
     };
 
     fn at(element: usize, column: usize) -> CaretPosition {
         CaretPosition { element, column }
+    }
+
+    /// Claiming hands out every element in document order, then stops —
+    /// the viewer's numbering is the map's numbering.
+    #[test]
+    fn claims_walk_the_elements_in_order() {
+        let map = ElementMap::parse("# Title\n\nbody\n\nmore");
+        let claims = map.claims();
+
+        for index in 0..map.elements().len() {
+            let (claimed, element) = claims.claim().expect("element not claimed");
+            assert_eq!(claimed, index);
+            assert!(std::ptr::eq(element, &map.elements()[index]));
+        }
+
+        assert!(claims.claim().is_none());
+        assert!(map.claims().claim().is_some_and(|(index, _)| index == 0));
     }
 
     /// The preview caret stops early when the parsed elements disagree with
