@@ -838,31 +838,17 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     );
 
     // The main column: top margin, the writing area, and the bottom
-    // controls. With comments saved, the comments sidebar sits beside it
-    // and spans the whole window height.
+    // controls. It fills the space between the window's 5% side margins.
     let main = column![
         Space::new()
             .width(Length::Fill)
             .height(Length::FillPortion(1)),
-        row![
-            Space::new()
-                .width(Length::FillPortion(1))
-                .height(Length::Fill),
-            container(editing_area)
-                .width(Length::FillPortion(9))
-                .height(Length::Fill),
-        ]
-        .width(Length::Fill)
-        .height(Length::FillPortion(8)),
+        container(editing_area)
+            .width(Length::Fill)
+            .height(Length::FillPortion(8)),
         {
-            let mut controls: Vec<Element<'_, Message>> = vec![
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill)
-                    .into(),
-                open_button.into(),
-                save_button.into(),
-            ];
+            let mut controls: Vec<Element<'_, Message>> =
+                vec![open_button.into(), save_button.into()];
 
             if !editor.keymap.preview_only() {
                 controls.push(preview_button.into());
@@ -870,12 +856,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
             controls.push(mode_badge(editor));
 
-            controls.push(
-                Space::new()
-                    .width(Length::FillPortion(9))
-                    .height(Length::Fill)
-                    .into(),
-            );
+            controls.push(Space::new().width(Length::Fill).height(Length::Fill).into());
 
             row(controls)
                 .width(Length::Fill)
@@ -887,32 +868,43 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let content: Element<'_, Message> = if editor.comments.is_empty() {
-        container(main)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(background_style)
-            .into()
-    } else {
-        container(
-            row![
-                container(main)
-                    .width(Length::FillPortion(9))
-                    .height(Length::Fill),
-                container(comments_sidebar(editor))
-                    .width(Length::FillPortion(2))
-                    .height(Length::Fill),
-            ]
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(background_style)
-        .into()
-    };
+    // With comments saved, the comments sidebar sits beside the main
+    // column and spans the whole window height.
+    let mut inner = row![container(main)
+        .width(Length::FillPortion(9))
+        .height(Length::Fill)]
+    .width(Length::Fill)
+    .height(Length::Fill);
 
-    content
+    if !editor.comments.is_empty() {
+        inner = inner.push(
+            container(comments_sidebar(editor))
+                .width(Length::FillPortion(2))
+                .height(Length::Fill),
+        );
+    }
+
+    // The side margins frame the whole window — 5% left and right whether
+    // or not the sidebar is showing.
+    container(
+        row![
+            Space::new()
+                .width(Length::FillPortion(5))
+                .height(Length::Fill),
+            container(inner)
+                .width(Length::FillPortion(90))
+                .height(Length::Fill),
+            Space::new()
+                .width(Length::FillPortion(5))
+                .height(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(background_style)
+    .into()
 }
 
 /// The comments sidebar: a full-height panel with a scrollable list of
