@@ -1,0 +1,14 @@
+# TODO list
+- comments lenght trimming in comments side bar so all comments have maximum the same length, so there is no situation whhere some comments occupy a lot of vertical space and other less, every comment should occupy the same vertical space in sidebar
+- switching between write and preview mode should remember cursor position, right now when I am writing md document and switch to preview mode and then back to write mode cursor disappears
+- grey color for markdown markers like #, or slightly dimmer to distinguish between my text and markdown syntax
+- when I am writing a list and just created one list item pressing enter should automatically not only move to another line but also to start new line with - character
+- either align write/preview mode text, just push it up a little bit a few pixel because it is way below the icons are placed or replace write and preview mode with icon
+- make all icons bigger: open, preview, potentially write and view also, about 150% of current size
+- there is no save button in application and it should save what I have just written
+- opened file should be in watch mode so whenever there are external changes they should be immediate in editor in any mode it is right now 
+- make left and right margins set to 5% even when comments sidebars is displayed
+- show/hide bar triggered by Ctrl + b shortcut, works as toggle
+- add Add button to comments sidebar just by the Publish button so if I enter any text to the free text field in sidebar and press Add it should be added as a comment to comments list with a label Global
+- add Ctrl + F to search text in editor no matter which mode it is on, when pressed it should display small popup in top right corner with ability to insert text, pressing character should immediately select it in editor with some color of choice, 
+- Ctrl + S when in editor in write or view mode should open save dialog if the file has not been saved so far or just save it if it already exists on a disk
