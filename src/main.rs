@@ -530,7 +530,11 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::OpenNotePopup => {
             return focus(Id::new(NOTE_EDITOR_ID));
         }
-        Message::CloseNotePopup => {}
+        Message::CloseNotePopup => {
+            // Dismissing the popup discards the draft, so the next note
+            // starts fresh instead of inheriting the escaped one.
+            editor.note_text = text_editor::Content::new();
+        }
         Message::EditNote(action) => editor.note_text.perform(action),
         Message::EditPublish(action) => editor.comments.edit_draft(action),
         Message::AddGlobalComment => editor.comments.add_draft_as_global(),
@@ -1667,6 +1671,27 @@ mod tests {
         let _ = update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.keymap.note_open());
+    }
+
+    /// Escaping the note popup discards the draft: the next `c` opens a
+    /// fresh popup instead of the half-written note.
+    #[test]
+    fn dismissing_the_note_popup_resets_its_text() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.keymap.note(&Message::OpenNotePopup);
+        editor.note_text = iced::widget::text_editor::Content::with_text("half-written");
+
+        let _ = update(&mut editor, Message::CloseNotePopup);
+
+        assert!(!editor.keymap.note_open());
+        assert_eq!(editor.note_text.text(), "");
+        assert!(editor.comments.is_empty());
     }
 
     /// `Ctrl+S` with the popup closed saves no note.
