@@ -121,6 +121,8 @@ struct Editor {
     note_text: text_editor::Content,
     /// Saved comments, oldest first.
     comments: Vec<Comment>,
+    /// The text of the sidebar publish field.
+    publish_text: text_editor::Content,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +146,8 @@ enum Message {
     EditNote(text_editor::Action),
     SaveNote,
     NoteCardPressed,
+    EditPublish(text_editor::Action),
+    PublishPressed,
 }
 
 struct OpenFileIcon;
@@ -347,6 +351,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
             editor.comments.clear();
+            editor.publish_text = text_editor::Content::new();
             editor.content = text_editor::Content::with_text(&contents);
             editor.markdown = markdown::Content::parse(&contents);
         }
@@ -447,6 +452,10 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.note_open = false;
         }
         Message::EditNote(action) => editor.note_text.perform(action),
+        Message::EditPublish(action) => editor.publish_text.perform(action),
+        Message::PublishPressed => {
+            // TODO: publish the comments
+        }
         Message::SaveNote => {
             if editor.note_open {
                 save_note(editor);
@@ -1235,66 +1244,17 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         iced::widget::tooltip::Position::Top,
     );
 
-    container(
-        column![
-            Space::new()
-                .width(Length::Fill)
-                .height(Length::FillPortion(1)),
-            row![
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill),
-                comments_area(editor, editing_area),
-            ]
+    // The main column: top margin, the writing area, and the bottom
+    // controls. With comments saved, the comments sidebar sits beside it
+    // and spans the whole window height.
+    let main = column![
+        Space::new()
             .width(Length::Fill)
-            .height(Length::FillPortion(8)),
-            {
-                let mut controls: Vec<Element<'_, Message>> = vec![
-                    Space::new()
-                        .width(Length::FillPortion(1))
-                        .height(Length::Fill)
-                        .into(),
-                    open_button.into(),
-                ];
-
-                if !editor.preview_only {
-                    controls.push(preview_button.into());
-                }
-
-                controls.push(mode_badge(editor));
-
-                controls.push(
-                    Space::new()
-                        .width(Length::FillPortion(9))
-                        .height(Length::Fill)
-                        .into(),
-                );
-
-                row(controls)
-                    .width(Length::Fill)
-                    .height(Length::FillPortion(1))
-                    .spacing(4)
-                    .align_y(alignment::Vertical::Bottom)
-            },
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(background_style)
-    .into()
-}
-
-/// The main row: the editing area, plus the comments sidebar on the right
-/// once any comment has been saved. The sidebar takes over the right
-/// margin; without comments the layout stays symmetric.
-fn comments_area<'a>(
-    editor: &'a Editor,
-    editing_area: Element<'a, Message>,
-) -> Element<'a, Message> {
-    if editor.comments.is_empty() {
-        return row![
+            .height(Length::FillPortion(1)),
+        row![
+            Space::new()
+                .width(Length::FillPortion(1))
+                .height(Length::Fill),
             container(editing_area)
                 .width(Length::FillPortion(8))
                 .height(Length::Fill),
@@ -1302,21 +1262,72 @@ fn comments_area<'a>(
                 .width(Length::FillPortion(1))
                 .height(Length::Fill),
         ]
-        .into();
-    }
+        .width(Length::Fill)
+        .height(Length::FillPortion(8)),
+        {
+            let mut controls: Vec<Element<'_, Message>> = vec![
+                Space::new()
+                    .width(Length::FillPortion(1))
+                    .height(Length::Fill)
+                    .into(),
+                open_button.into(),
+            ];
 
-    row![
-        container(editing_area)
-            .width(Length::FillPortion(7))
-            .height(Length::Fill),
-        comments_sidebar(editor),
+            if !editor.preview_only {
+                controls.push(preview_button.into());
+            }
+
+            controls.push(mode_badge(editor));
+
+            controls.push(
+                Space::new()
+                    .width(Length::FillPortion(9))
+                    .height(Length::Fill)
+                    .into(),
+            );
+
+            row(controls)
+                .width(Length::Fill)
+                .height(Length::FillPortion(1))
+                .spacing(4)
+                .align_y(alignment::Vertical::Bottom)
+        },
     ]
-    .into()
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    let content: Element<'_, Message> = if editor.comments.is_empty() {
+        container(main)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(background_style)
+            .into()
+    } else {
+        container(
+            row![
+                container(main)
+                    .width(Length::FillPortion(8))
+                    .height(Length::Fill),
+                container(comments_sidebar(editor))
+                    .width(Length::FillPortion(2))
+                    .height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(background_style)
+        .into()
+    };
+
+    content
 }
 
-/// The comments sidebar: a scrollable list of saved comments, each quoting
-/// the Markdown source it was written for (collapsed to one line and
-/// trimmed) above the comment text.
+/// The comments sidebar: a full-height panel with a scrollable list of
+/// saved comments (each quoting the Markdown source it was written for,
+/// collapsed to one line and trimmed) and a free text field with a Publish
+/// button at the bottom.
 fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
     let source = editor.content.text();
 
@@ -1354,27 +1365,59 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
 
     container(
         column![
-            text(format!("COMMENTS ({})", editor.comments.len()))
-                .font(EDITOR_FONT)
-                .size(11)
-                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+            container(
+                text(format!("COMMENTS ({})", editor.comments.len()))
+                    .font(EDITOR_FONT)
+                    .size(11)
+                    .color(Color::from_rgb(0.6, 0.6, 0.6)),
+            )
+            .padding(iced::Padding {
+                top: 4.0,
+                ..iced::Padding::new(0.0)
+            }),
             scrollable(column(cards).spacing(8).width(Length::Fill))
                 .width(Length::Fill)
                 .height(Length::Fill),
+            text_editor(&editor.publish_text)
+                .on_action(Message::EditPublish)
+                .font(EDITOR_FONT)
+                .size(14)
+                .height(Length::Fixed(72.0))
+                .padding(6)
+                .style(editor_style),
+            row![
+                Space::new().width(Length::Fill),
+                button(
+                    text("Publish")
+                        .font(EDITOR_FONT)
+                        .size(13)
+                        .color(Color::WHITE),
+                )
+                .on_press(Message::PublishPressed)
+                .padding([5, 12])
+                .style(popup_button_style),
+            ]
+            .width(Length::Fill),
         ]
         .spacing(8)
         .width(Length::Fill)
         .height(Length::Fill),
     )
-    .width(Length::FillPortion(2))
+    .width(Length::Fill)
     .height(Length::Fill)
-    .padding([0, 8])
+    .padding(iced::Padding {
+        top: 8.0,
+        bottom: 8.0,
+        left: 8.0,
+        right: 8.0,
+    })
     .style(sidebar_style)
     .into()
 }
 
 fn sidebar_style(_theme: &Theme) -> container::Style {
     container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.03, 0.03, 0.03))),
         border: Border {
             color: Color::from_rgb(0.2, 0.2, 0.2),
             width: 1.0,
@@ -1628,6 +1671,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         note_open: false,
         note_text: text_editor::Content::new(),
         comments: Vec::new(),
+        publish_text: text_editor::Content::new(),
     };
 
     let task = if args.preview {
@@ -1818,6 +1862,7 @@ mod tests {
             note_open: false,
             note_text: iced::widget::text_editor::Content::new(),
             comments: Vec::new(),
+            publish_text: iced::widget::text_editor::Content::new(),
         };
 
         assert_eq!(editor_mode(&editor), Mode::Write);
@@ -1853,6 +1898,7 @@ mod tests {
             note_open: true,
             note_text: iced::widget::text_editor::Content::with_text("  fix this  \n"),
             comments: Vec::new(),
+            publish_text: iced::widget::text_editor::Content::new(),
         };
 
         save_note(&mut editor);
