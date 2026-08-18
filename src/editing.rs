@@ -72,7 +72,7 @@ pub fn continuation(before: &str) -> Continuation {
 /// The byte ranges of all occurrences of `query` in `text`,
 /// ASCII-case-insensitively. (Non-ASCII bytes compare exactly, which keeps
 /// matching byte-index exact.)
-fn byte_matches(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn byte_matches(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let haystack = text.as_bytes();
     let needle = query.as_bytes();
     let mut ranges = Vec::new();
@@ -108,18 +108,33 @@ pub fn matches_in(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-/// The first occurrence of `query` in `text` as `(line, start column, end
-/// column)`, the columns counted in characters — the units the source
-/// editor's cursor uses. Single-line queries only match within a line.
-pub fn first_match(text: &str, query: &str) -> Option<(usize, usize, usize)> {
-    let range = byte_matches(text, query).into_iter().next()?;
+/// A match in the source text: the line it lives on and the character
+/// columns it spans — the units the source editor's cursor uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMatch {
+    pub line: usize,
+    pub columns: std::ops::Range<usize>,
+}
 
-    let line = text[..range.start].matches('\n').count();
-    let line_start = text[..range.start].rfind('\n').map_or(0, |index| index + 1);
-    let start_column = text[line_start..range.start].chars().count();
-    let end_column = start_column + text[range].chars().count();
+/// All occurrences of `query` in the source `text`, in document order,
+/// as line and character-column pairs.
+pub fn source_matches(text: &str, query: &str) -> Vec<SourceMatch> {
+    byte_matches(text, query)
+        .into_iter()
+        .map(|range| {
+            let line = text[..range.start].matches('\n').count();
+            let line_start = text[..range.start]
+                .rfind('\n')
+                .map_or(0, |index| index + 1);
+            let start = text[line_start..range.start].chars().count();
+            let end = start + text[range].chars().count();
 
-    Some((line, start_column, end_column))
+            SourceMatch {
+                line,
+                columns: start..end,
+            }
+        })
+        .collect()
 }
 
 /// The source editor position of a byte `offset`: its line and its
@@ -137,7 +152,7 @@ pub fn position_at(text: &str, offset: usize) -> Position {
 #[cfg(test)]
 mod tests {
     use super::Continuation::{Break, Continue, Outdent};
-    use super::{continuation, first_match, matches_in, position_at};
+    use super::{continuation, matches_in, position_at, source_matches, SourceMatch};
     use iced::widget::text_editor::Position;
 
     #[test]
@@ -193,12 +208,26 @@ mod tests {
         assert_eq!(matches_in("ONE one", "one"), vec![0..3, 4..7]);
     }
 
+    /// Source matches enumerate as line and character-column pairs —
+    /// the units the source editor's cursor uses.
     #[test]
-    fn finds_the_first_match_as_char_positions() {
-        assert_eq!(first_match("hello world", "wor"), Some((0, 6, 9)));
-        assert_eq!(first_match("one\ntwo\nthree", "t"), Some((1, 0, 1)));
-        assert_eq!(first_match("nothing here", "zzz"), None);
-        assert_eq!(first_match("abc", ""), None);
+    fn lists_source_matches_by_line_and_column() {
+        assert_eq!(
+            source_matches("one two\nthree one\n", "one"),
+            vec![
+                SourceMatch {
+                    line: 0,
+                    columns: 0..3,
+                },
+                SourceMatch {
+                    line: 1,
+                    columns: 6..9,
+                },
+            ]
+        );
+        assert_eq!(source_matches("hello world", "wor").len(), 1);
+        assert!(source_matches("nothing here", "zzz").is_empty());
+        assert!(source_matches("abc", "").is_empty());
     }
 
     /// Byte offsets map onto the line and character column the source

@@ -11,46 +11,114 @@ use iced::{Color, Font, Theme};
 /// The dimmed grey Markdown syntax markers render in.
 const MARKER_COLOR: Color = Color::from_rgb(0.45, 0.45, 0.45);
 
-/// A Markdown syntax marker in the source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Marker;
+/// The amber find matches tint in — the same amber the preview paints
+/// them with.
+const FIND_MATCH_COLOR: Color = Color::from_rgb(0.95, 0.72, 0.25);
 
-/// Turns a marker into its text format: dimmed grey, default font.
-pub fn format(_marker: &Marker, _theme: &Theme) -> Format<Font> {
+/// A highlighted stretch of a source line: a Markdown syntax marker, or
+/// a find match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Highlight {
+    Marker,
+    FindMatch,
+}
+
+/// Turns a highlight into its text format: Markdown markers dim to grey,
+/// find matches glow amber.
+pub fn format(highlight: &Highlight, _theme: &Theme) -> Format<Font> {
     Format {
-        color: Some(MARKER_COLOR),
+        color: match highlight {
+            Highlight::Marker => MARKER_COLOR,
+            Highlight::FindMatch => FIND_MATCH_COLOR,
+        }
+        .into(),
         font: None,
     }
 }
 
-/// The write-mode highlighter. Stateless like `PlainText`: every line is
-/// scanned fresh, so no cache invalidation is needed.
-pub struct MarkdownMarkers;
+/// The write-mode highlighter, driven by the find query: Markdown markers
+/// dim, and every match of the query tints amber. Stateless like
+/// `PlainText`: every line is scanned fresh, so no cache invalidation is
+/// needed.
+pub struct MarkdownMarkers {
+    query: String,
+}
 
 impl Highlighter for MarkdownMarkers {
-    type Settings = ();
-    type Highlight = Marker;
-    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Marker)>;
+    type Settings = String;
+    type Highlight = Highlight;
+    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Highlight)>;
 
-    fn new(_settings: &Self::Settings) -> Self {
-        Self
+    fn new(settings: &Self::Settings) -> Self {
+        Self {
+            query: settings.clone(),
+        }
     }
 
-    fn update(&mut self, _new_settings: &Self::Settings) {}
+    fn update(&mut self, new_settings: &Self::Settings) {
+        self.query = new_settings.clone();
+    }
 
     fn change_line(&mut self, _line: usize) {}
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        marker_ranges(line)
-            .into_iter()
-            .map(|range| (range, Marker))
-            .collect::<Vec<_>>()
-            .into_iter()
+        line_highlights(line, &self.query).into_iter()
     }
 
     fn current_line(&self) -> usize {
         usize::MAX
     }
+}
+
+/// The highlights of a source line: the byte ranges holding Markdown
+/// markers and find matches, sorted by position. A match overlapping a
+/// marker wins the stretch they share — the match is what the eye is
+/// looking for.
+fn line_highlights(line: &str, query: &str) -> Vec<(Range<usize>, Highlight)> {
+    let matches = crate::editing::byte_matches(line, query);
+
+    let mut markers: Vec<(Range<usize>, Highlight)> = marker_ranges(line)
+        .into_iter()
+        .flat_map(|range| {
+            subtract(range, &matches)
+                .into_iter()
+                .map(|range| (range, Highlight::Marker))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    markers.extend(
+        matches
+            .into_iter()
+            .map(|range| (range, Highlight::FindMatch)),
+    );
+    markers.sort_by_key(|(range, _)| range.start);
+    markers
+}
+
+/// Removes `cuts` from `range`, returning the leftover sub-ranges in
+/// order.
+fn subtract(range: Range<usize>, cuts: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut leftovers = Vec::new();
+    let mut start = range.start;
+
+    for cut in cuts {
+        if cut.end <= start || cut.start >= range.end {
+            continue;
+        }
+
+        if cut.start > start {
+            leftovers.push(start..cut.start);
+        }
+
+        start = start.max(cut.end);
+    }
+
+    if start < range.end {
+        leftovers.push(start..range.end);
+    }
+
+    leftovers
 }
 
 /// The byte ranges of a source line that hold Markdown syntax markers
@@ -147,7 +215,8 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::marker_ranges;
+    use super::Highlight::{FindMatch, Marker};
+    use super::{line_highlights, marker_ranges};
 
     /// The byte ranges of `line` that dim, as slices for readability.
     fn dimmed(line: &str) -> Vec<&str> {
@@ -212,5 +281,57 @@ mod tests {
         assert_eq!(dimmed("").len(), 0);
         assert_eq!(dimmed("   ").len(), 0);
         assert_eq!(dimmed("text with # hash inside").len(), 0);
+    }
+
+    /// Find matches tint their range amber, and a match overlapping a
+    /// marker wins the stretch they share; the leftover markers stay
+    /// dimmed. Everything comes out sorted by position.
+    #[test]
+    fn find_matches_tint_and_win_over_markers() {
+        let highlights = |line, query| {
+            line_highlights(line, query)
+                .into_iter()
+                .map(|(range, kind)| (line[range].to_owned(), kind))
+                .collect::<Vec<_>>()
+        };
+
+        // A match alone tints.
+        assert_eq!(
+            highlights("plain text", "text"),
+            vec![("text".to_owned(), FindMatch)]
+        );
+
+        // A match covering the marker wins outright.
+        assert_eq!(
+            highlights("# heading", "#"),
+            vec![("#".to_owned(), FindMatch)]
+        );
+
+        // A marker beside a match: both survive, in order.
+        assert_eq!(
+            highlights("- item", "item"),
+            vec![
+                ("-".to_owned(), Marker),
+                ("item".to_owned(), FindMatch),
+            ]
+        );
+
+        // A match slicing through the middle of a marker range leaves the
+        // marker's leftover stretches dimmed around it.
+        assert_eq!(
+            highlights("- [x] done", "x"),
+            vec![
+                ("-".to_owned(), Marker),
+                ("[".to_owned(), Marker),
+                ("x".to_owned(), FindMatch),
+                ("]".to_owned(), Marker),
+            ]
+        );
+
+        // No query: markers only, exactly as before find existed.
+        assert_eq!(
+            highlights("- item", ""),
+            vec![("-".to_owned(), Marker)]
+        );
     }
 }

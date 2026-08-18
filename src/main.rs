@@ -1,5 +1,6 @@
 mod comments;
 mod editing;
+mod find;
 mod highlight;
 mod interactive_text;
 mod keymap;
@@ -64,8 +65,8 @@ struct Editor {
     /// Manual override for the comments sidebar's visibility (`Ctrl+B`):
     /// `None` follows the default — shown once there are comments.
     sidebar_override: Option<bool>,
-    /// The find popup's query (`Ctrl+F`).
-    find_query: String,
+    /// The find popup's state: the query and the current match.
+    find: find::Find,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,8 @@ enum Message {
     OpenFind,
     CloseFind,
     FindQueryChanged(String),
+    FindNext,
+    FindPrevious,
 }
 
 struct OpenFileIcon;
@@ -571,10 +574,12 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             }
         }
         Message::FindQueryChanged(query) => {
-            editor.find_query = query;
+            editor.find.set_query(&query);
 
-            return find_select_first_match(editor);
+            return select_find_match(editor, find::Way::First);
         }
+        Message::FindNext => return select_find_match(editor, find::Way::Next),
+        Message::FindPrevious => return select_find_match(editor, find::Way::Previous),
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
@@ -609,72 +614,87 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Selects the first match of the find query, live as it is typed: in
-/// write mode the match becomes the editor's selection, in the preview the
-/// caret jumps to the match's element and the matches paint as highlights.
-fn find_select_first_match(editor: &mut Editor) -> Task<Message> {
-    let query = editor.find_query.clone();
-
-    if query.is_empty() {
+/// Selects the current find match, live as the query is typed and as
+/// navigation steps through the matches: in write mode the match becomes
+/// the editor's selection, in the preview the caret jumps to the match's
+/// element and the matches paint as highlights with the current one
+/// distinct.
+fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
+    if !editor.find.is_active() {
         return Task::none();
     }
 
     if editor.keymap.preview() {
-        let position = editor
-            .preview_elements
-            .elements()
-            .iter()
-            .enumerate()
-            .find_map(|(index, element)| {
-                editing::matches_in(element.text(), &query)
-                    .first()
-                    .map(|range| CaretPosition {
-                        element: index,
-                        column: range.start,
-                    })
-            });
+        let matches = find::preview_matches(
+            editor.preview_elements.elements(),
+            editor.find.query(),
+        );
+        let Some(index) = editor.find.select(way, matches.len()) else {
+            return Task::none();
+        };
 
-        if let Some(position) = position {
-            editor.caret.place(position);
+        let (element, range) = matches[index].clone();
+        editor.caret.place(CaretPosition {
+            element,
+            column: range.start,
+        });
 
-            return reveal_preview_caret();
-        }
-
-        return Task::none();
+        return reveal_preview_caret();
     }
 
     let source = editor.content.text();
+    let matches = editing::source_matches(&source, editor.find.query());
+    let Some(index) = editor.find.select(way, matches.len()) else {
+        return Task::none();
+    };
 
-    if let Some((line, start, end)) = editing::first_match(&source, &query) {
-        editor.content.move_to(text_editor::Cursor {
-            position: text_editor::Position {
-                line,
-                column: start,
-            },
-            selection: Some(text_editor::Position { line, column: end }),
-        });
-    }
+    let editing::SourceMatch { line, columns } = matches[index].clone();
+    editor.content.move_to(text_editor::Cursor {
+        position: text_editor::Position {
+            line,
+            column: columns.start,
+        },
+        selection: Some(text_editor::Position {
+            line,
+            column: columns.end,
+        }),
+    });
 
     Task::none()
 }
 
+/// All find matches of the mode's surface — the preview's elements or
+/// the source text — for the popup's live match counter.
+fn find_match_count(editor: &Editor) -> usize {
+    if !editor.find.is_active() {
+        return 0;
+    }
+
+    if editor.keymap.preview() {
+        find::preview_matches(editor.preview_elements.elements(), editor.find.query()).len()
+    } else {
+        editing::source_matches(&editor.content.text(), editor.find.query()).len()
+    }
+}
+
 /// The find popup: a small card in the top right corner with the query
-/// field and a live match count.
+/// field, a live `n/m` match counter, and ▲/▼ buttons stepping through
+/// the matches.
 fn find_popup(editor: &Editor) -> Element<'_, Message> {
-    let match_count = (!editor.find_query.is_empty()).then(|| {
-        if editor.keymap.preview() {
-            editor
-                .preview_elements
-                .elements()
-                .iter()
-                .map(|element| editing::matches_in(element.text(), &editor.find_query).len())
-                .sum()
+    let total = find_match_count(editor);
+    let counter = editor.find.is_active().then(|| {
+        if total == 0 {
+            (
+                "no match".to_owned(),
+                Color::from_rgb(0.9, 0.45, 0.4),
+            )
         } else {
-            editing::matches_in(&editor.content.text(), &editor.find_query).len()
+            let current = editor.find.current(total).map_or(1, |index| index + 1);
+            (format!("{}/{}", current, total), Color::from_rgb(0.5, 0.5, 0.5))
         }
     });
 
-    let mut card_row = row![text_input("Search…", &editor.find_query)
+    let mut card_row = row![text_input("Search…", editor.find.query())
         .id(Id::new(FIND_INPUT_ID))
         .on_input(Message::FindQueryChanged)
         .font(EDITOR_FONT)
@@ -684,22 +704,40 @@ fn find_popup(editor: &Editor) -> Element<'_, Message> {
     .spacing(8)
     .align_y(alignment::Vertical::Center);
 
-    if let Some(count) = match_count {
+    if let Some((counter, color)) = counter {
         card_row = card_row.push(
-            text(if count == 0 {
-                "no match".to_owned()
-            } else {
-                count.to_string()
-            })
-            .font(EDITOR_FONT)
-            .size(12)
-            .color(if count == 0 {
-                Color::from_rgb(0.9, 0.45, 0.4)
-            } else {
-                Color::from_rgb(0.5, 0.5, 0.5)
-            }),
+            text(counter)
+                .font(EDITOR_FONT)
+                .size(12)
+                .color(color),
         );
     }
+
+    // ▲ steps back, ▼ steps forward — the mouse path of Enter and
+    // Shift+Enter.
+    card_row = card_row
+        .push(
+            button(
+                text("▲")
+                    .font(EDITOR_FONT)
+                    .size(12)
+                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+            )
+            .on_press(Message::FindPrevious)
+            .padding([4, 8])
+            .style(popup_button_style),
+        )
+        .push(
+            button(
+                text("▼")
+                    .font(EDITOR_FONT)
+                    .size(12)
+                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+            )
+            .on_press(Message::FindNext)
+            .padding([4, 8])
+            .style(popup_button_style),
+        );
 
     container(container(card_row).padding(8).style(note_card_style))
         .width(Length::Fill)
@@ -895,6 +933,8 @@ struct PreviewViewer<'a> {
     comments: &'a Comments,
     /// The find popup's query; its matches paint as highlights.
     find_query: &'a str,
+    /// The current find match, as the element and range it lives in.
+    current_match: Option<(usize, std::ops::Range<usize>)>,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -953,7 +993,7 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
             decorations.id,
             decorations.commented,
             decorations.active_comment,
-            decorations.matches,
+            decorations.find,
         ))
         .width(Length::Fill)
         .padding(settings.code_size / 4.0)
@@ -981,10 +1021,18 @@ impl<'a> PreviewViewer<'a> {
             id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
             commented: matches!(self.comments.mark_for(element), Mark::Commented | Mark::Active),
             active_comment: self.comments.mark_for(element) == Mark::Active,
-            matches: if self.find_query.is_empty() {
-                Vec::new()
-            } else {
-                editing::matches_in(preview_element.text(), self.find_query)
+            find: interactive_text::FindHighlights {
+                matches: if self.find_query.is_empty() {
+                    Vec::new()
+                } else {
+                    editing::matches_in(preview_element.text(), self.find_query)
+                },
+                current: match self.current_match {
+                    Some((match_element, ref range)) if match_element == element => {
+                        Some(range.clone())
+                    }
+                    _ => None,
+                },
             },
         }
     }
@@ -1006,7 +1054,7 @@ impl<'a> PreviewViewer<'a> {
                 None,
                 false,
                 false,
-                Vec::new(),
+                interactive_text::FindHighlights::none(),
             );
         };
 
@@ -1020,26 +1068,34 @@ impl<'a> PreviewViewer<'a> {
             decorations.id,
             decorations.commented,
             decorations.active_comment,
-            decorations.matches,
+            decorations.find,
         )
     }
 }
 
 /// The interactive decorations of one preview element: its slice of the
 /// visual-mode selection, the caret when it is the focused element, its
-/// comment mark, and its find matches.
+/// comment mark, and its find highlights.
 struct Decorations {
     selection: Option<std::ops::Range<usize>>,
     caret: Option<usize>,
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
-    matches: Vec<std::ops::Range<usize>>,
+    find: interactive_text::FindHighlights,
 }
 
 fn view(editor: &Editor) -> Element<'_, Message> {
     let position = editor.caret.position();
     let visual = editor.visual_anchor.map(|anchor| (anchor, position));
+
+    // The current find match, resolved against the live elements so the
+    // viewer can paint it in its distinct color.
+    let find_matches = find::preview_matches(editor.preview_elements.elements(), editor.find.query());
+    let current_match = editor
+        .find
+        .current(find_matches.len())
+        .and_then(|index| find_matches.get(index).cloned());
 
     let base_area: Element<'_, Message> = if editor.keymap.preview() {
         scrollable(
@@ -1052,7 +1108,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                     caret_column: position.column,
                     visual,
                     comments: &editor.comments,
-                    find_query: &editor.find_query,
+                    find_query: editor.find.query(),
+                    current_match,
                 },
             ))
             .width(Length::Fill)
@@ -1073,7 +1130,10 @@ fn view(editor: &Editor) -> Element<'_, Message> {
             .height(Length::Fill)
             .padding(0)
             .line_height(1.8)
-            .highlight_with::<highlight::MarkdownMarkers>((), highlight::format)
+            .highlight_with::<highlight::MarkdownMarkers>(
+                editor.find.query().to_owned(),
+                highlight::format,
+            )
             .style(editor_style)
             .into()
     };
@@ -1664,7 +1724,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         note_text: text_editor::Content::new(),
         comments: Comments::new(),
         sidebar_override: None,
-        find_query: String::new(),
+        find: find::Find::new(),
     };
 
     let task = if args.preview {
@@ -1710,6 +1770,7 @@ fn main() -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::comments::{Comments, Mark};
+    use super::find;
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::{
@@ -1734,7 +1795,7 @@ mod tests {
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
             sidebar_override: None,
-            find_query: String::new(),
+            find: find::Find::new(),
         }
     }
 
@@ -1881,8 +1942,10 @@ mod tests {
 
     /// Typing in the find popup selects the first match right away: as an
     /// editor selection in write mode, and as a caret jump in the preview.
+    /// Enter steps through the matches and wraps around; Shift+Enter
+    /// steps back.
     #[test]
-    fn find_selects_the_first_match_as_it_is_typed() {
+    fn find_selects_and_steps_through_matches() {
         use iced::widget::text_editor::Position;
 
         let mut editor = editor_at(
@@ -1905,12 +1968,38 @@ mod tests {
             }
         );
 
-        // In write mode, the match becomes the editor's selection.
+        // A single match: stepping wraps back onto itself.
+        let _ = update(&mut editor, Message::FindNext);
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 2,
+                column: 0
+            }
+        );
+
+        // In write mode, the match becomes the editor's selection and
+        // Enter walks the matches.
         editor.keymap.note(&Message::TogglePreview);
         let _ = update(&mut editor, Message::FindQueryChanged("text".to_owned()));
         let cursor = editor.content.cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
         assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
+
+        let _ = update(&mut editor, Message::FindNext);
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 4, column: 5 });
+        assert_eq!(cursor.selection, Some(Position { line: 4, column: 9 }));
+
+        // Wraps around to the first match.
+        let _ = update(&mut editor, Message::FindNext);
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 2, column: 5 });
+
+        // And Shift+Enter steps back.
+        let _ = update(&mut editor, Message::FindPrevious);
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 4, column: 5 });
     }
 
     /// Opening the watched file to reload it must not trigger another
@@ -1987,7 +2076,7 @@ mod tests {
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
             sidebar_override: None,
-            find_query: String::new(),
+            find: find::Find::new(),
         };
         editor.content.move_to(Cursor {
             position: Position { line: 0, column: 6 },

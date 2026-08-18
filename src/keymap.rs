@@ -145,13 +145,21 @@ impl Keymap {
         }
 
         // The find popup swallows plain keys for its query field; only
-        // Escape closes it. Ctrl combinations still reach the global
-        // shortcuts below.
+        // Escape closes it and Enter steps through the matches.
+        // Ctrl combinations still reach the global shortcuts below.
         if self.find_open && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
             return match modified_key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
                     Some(Message::CloseFind)
                 }
+                // Enter steps to the next match, Shift+Enter back to the
+                // previous one — welcome to repeat, like holding `n` in
+                // vim.
+                keyboard::Key::Named(keyboard::key::Named::Enter) => Some(if modifiers.shift() {
+                    Message::FindPrevious
+                } else {
+                    Message::FindNext
+                }),
                 _ => None,
             };
         }
@@ -223,6 +231,8 @@ impl Keymap {
                 keyboard::Key::Character("s" | "S") => Some(Message::SaveFile),
                 // Find in the document, in any mode.
                 keyboard::Key::Character("f" | "F") => Some(Message::OpenFind),
+                // Step to the next match while the find popup is open.
+                keyboard::Key::Character("g" | "G") if self.find_open => Some(Message::FindNext),
                 // Browse the saved comments in the preview.
                 keyboard::Key::Character("n" | "N") if self.preview() => Some(Message::NextComment),
                 _ => None,
@@ -322,6 +332,20 @@ mod tests {
             physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
             location: keyboard::Location::Standard,
             modifiers: Modifiers::default(),
+            text: None,
+            repeat: false,
+        }
+    }
+
+    fn named(key: keyboard::key::Named, modifiers: Modifiers) -> keyboard::Event {
+        let key = keyboard::Key::Named(key);
+
+        keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
+            location: keyboard::Location::Standard,
+            modifiers,
             text: None,
             repeat: false,
         }
@@ -531,6 +555,36 @@ mod tests {
             keymap.note(&Message::CloseFind);
             assert!(keymap.mode() != Mode::Find);
         }
+    }
+
+    /// While the find popup is open, Enter and Ctrl+G step to the next
+    /// match and Shift+Enter to the previous one; Ctrl+G does nothing
+    /// once the popup is closed.
+    #[test]
+    fn find_navigation_keys_step_through_matches() {
+        let mut keymap = viewing();
+        keymap.note(&Message::OpenFind);
+
+        assert!(matches!(
+            keymap.handle(named(key::Named::Enter, Modifiers::default())),
+            Some(Message::FindNext)
+        ));
+        // Holding Enter keeps stepping, like holding `n` in vim.
+        assert!(matches!(
+            keymap.handle(named(key::Named::Enter, Modifiers::default())),
+            Some(Message::FindNext)
+        ));
+        assert!(matches!(
+            keymap.handle(named(key::Named::Enter, Modifiers::SHIFT)),
+            Some(Message::FindPrevious)
+        ));
+        assert!(matches!(
+            keymap.handle(key_press_with("g", Modifiers::CTRL, false)),
+            Some(Message::FindNext)
+        ));
+
+        keymap.note(&Message::CloseFind);
+        assert!(keymap.handle(key_press_with("g", Modifiers::CTRL, false)).is_none());
     }
 
     /// Ctrl+S saves the document in write and view mode; with the note
