@@ -1,4 +1,5 @@
 mod comments;
+mod highlight;
 mod interactive_text;
 mod keymap;
 mod preview;
@@ -511,6 +512,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
             .height(Length::Fill)
             .padding(0)
             .line_height(1.8)
+            .highlight_with::<highlight::MarkdownMarkers>((), highlight::format)
             .style(editor_style)
             .into()
     };
