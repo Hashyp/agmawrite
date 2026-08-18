@@ -1,7 +1,6 @@
 mod interactive_text;
 
 use std::cell::Cell;
-use std::collections::HashSet;
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -26,15 +25,6 @@ const NOTE_EDITOR_ID: &str = "note-editor";
 const COMMENT_QUOTE_MAX_CHARS: usize = 60;
 /// Margin kept between the preview caret and the viewport edges while scrolling.
 const CARET_MARGIN: f32 = 8.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct WordSelection {
-    paragraph: usize,
-    word: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ParagraphSelection(usize);
 
 /// A saved comment: the note text plus the anchor it was written for, as a
 /// caret `(element, column)` position.
@@ -102,8 +92,6 @@ struct Editor {
     markdown: markdown::Content,
     preview: bool,
     preview_only: bool,
-    selected_words: HashSet<WordSelection>,
-    selected_paragraphs: HashSet<ParagraphSelection>,
     preview_cursor: usize,
     /// The grapheme column of the caret within the current element.
     preview_column: usize,
@@ -121,6 +109,9 @@ struct Editor {
     note_text: text_editor::Content,
     /// Saved comments, oldest first.
     comments: Vec<Comment>,
+    /// The currently active comment, highlighted in the preview and the
+    /// sidebar. `None` while browsing.
+    active_comment: Option<usize>,
     /// The text of the sidebar publish field.
     publish_text: text_editor::Content,
 }
@@ -132,8 +123,6 @@ enum Message {
     FileLoaded(Option<String>),
     TogglePreview,
     LinkClicked(markdown::Uri),
-    SelectWord(WordSelection),
-    SelectParagraph(ParagraphSelection),
     MovePreviewCursor(Motion),
     MovePreviewWord(WordMotion),
     MovePreviewJump(Jump),
@@ -148,6 +137,7 @@ enum Message {
     NoteCardPressed,
     EditPublish(text_editor::Action),
     PublishPressed,
+    NextComment,
 }
 
 struct OpenFileIcon;
@@ -313,6 +303,10 @@ fn handle_key_press(
         match modified_key.as_ref() {
             keyboard::Key::Character("o" | "O") => Some(Message::OpenFile),
             keyboard::Key::Character("p" | "P") if !preview_only => Some(Message::TogglePreview),
+            // Browse the saved comments in the preview.
+            keyboard::Key::Character("n" | "N") if preview && !note_open => {
+                Some(Message::NextComment)
+            }
             _ => None,
         }
     } else {
@@ -351,6 +345,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
             editor.comments.clear();
+            editor.active_comment = None;
             editor.publish_text = text_editor::Content::new();
             editor.content = text_editor::Content::with_text(&contents);
             editor.markdown = markdown::Content::parse(&contents);
@@ -377,12 +372,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::LinkClicked(_uri) => {
             // TODO: open links in the default browser
-        }
-        Message::SelectWord(word) => {
-            editor.selected_words.insert(word);
-        }
-        Message::SelectParagraph(paragraph) => {
-            editor.selected_paragraphs.insert(paragraph);
         }
         Message::MovePreviewCursor(motion) => {
             if let Some((cursor, column, column_target)) = move_caret(
@@ -455,6 +444,21 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::EditPublish(action) => editor.publish_text.perform(action),
         Message::PublishPressed => {
             // TODO: publish the comments
+        }
+        Message::NextComment => {
+            if let Some(index) = next_comment(editor.comments.len(), editor.active_comment) {
+                editor.active_comment = Some(index);
+
+                // Jump the caret to the comment and reveal it, so the mark
+                // is actually in view.
+                editor.visual_anchor = None;
+                let (element, column) = editor.comments[index].anchor;
+                editor.preview_cursor = element;
+                editor.preview_column = column;
+                editor.preview_column_target = column;
+
+                return reveal_preview_caret();
+            }
         }
         Message::SaveNote => {
             if editor.note_open {
@@ -934,6 +938,7 @@ fn save_note(editor: &mut Editor) {
     let text = editor.note_text.text().trim().to_string();
 
     if !text.is_empty() {
+        editor.active_comment = Some(editor.comments.len());
         editor.comments.push(Comment {
             text,
             anchor: (editor.preview_cursor, editor.preview_column),
@@ -942,6 +947,19 @@ fn save_note(editor: &mut Editor) {
 
     editor.note_open = false;
     editor.note_text = text_editor::Content::new();
+}
+
+/// Cycles the active comment forward, wrapping around at the end. With no
+/// comments there is nothing to activate.
+fn next_comment(comments_len: usize, active: Option<usize>) -> Option<usize> {
+    if comments_len == 0 {
+        return None;
+    }
+
+    Some(match active {
+        None => 0,
+        Some(index) => (index + 1) % comments_len,
+    })
 }
 
 /// Returns the Markdown source of the preview element at `index`, trimmed
@@ -1091,14 +1109,16 @@ fn tooltip_style(_theme: &Theme) -> container::Style {
 
 struct PreviewViewer<'a> {
     next_paragraph: Cell<usize>,
-    selected_words: &'a HashSet<WordSelection>,
-    selected_paragraphs: &'a HashSet<ParagraphSelection>,
     focused_element: usize,
     caret_column: usize,
     /// The `(anchor, caret)` endpoints of the visual-mode selection.
     visual: Option<((usize, usize), (usize, usize))>,
     /// Per-element lengths for visual-mode selections.
     elements: &'a [PreviewElement],
+    /// Saved comments, to know which elements carry one.
+    comments: &'a [Comment],
+    /// The currently active comment, if any.
+    active_comment: Option<usize>,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -1139,27 +1159,28 @@ impl<'a> PreviewViewer<'a> {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        let element = ParagraphSelection(self.next_paragraph.get());
-        self.next_paragraph.set(element.0 + 1);
+        let element = self.next_paragraph.get();
+        self.next_paragraph.set(element + 1);
 
-        let focused = self.focused_element == element.0;
-        let len = self
-            .elements
-            .get(element.0)
-            .map_or(0, |element| element.len);
+        let focused = self.focused_element == element;
+        let len = self.elements.get(element).map_or(0, |element| element.len);
         let selection = self
             .visual
-            .and_then(|(anchor, caret)| element_selection(anchor, caret, element.0, len));
+            .and_then(|(anchor, caret)| element_selection(anchor, caret, element, len));
+        let commented = self
+            .comments
+            .iter()
+            .any(|comment| comment.anchor.0 == element);
+        let active_comment = self.active_comment == Some(element);
 
         interactive_text::paragraph(
             settings,
             text,
-            element,
-            self.selected_words,
-            self.selected_paragraphs,
             selection,
             focused.then_some(self.caret_column),
             focused.then(|| Id::new(PREVIEW_CARET_ID)),
+            commented,
+            active_comment,
         )
     }
 }
@@ -1176,12 +1197,12 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 markdown::Settings::with_text_size(20.0, markdown_style()),
                 &PreviewViewer {
                     next_paragraph: Cell::new(0),
-                    selected_words: &editor.selected_words,
-                    selected_paragraphs: &editor.selected_paragraphs,
                     focused_element: editor.preview_cursor,
                     caret_column: editor.preview_column,
                     visual,
                     elements: &editor.preview_elements,
+                    comments: &editor.comments,
+                    active_comment: editor.active_comment,
                 },
             ))
             .width(Length::Fill)
@@ -1334,20 +1355,23 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
     let cards: Vec<Element<'_, Message>> = editor
         .comments
         .iter()
-        .map(|comment| {
+        .enumerate()
+        .map(|(index, comment)| {
             let quoted = trimmed_element_source(
                 &source,
                 &editor.preview_elements,
                 comment.anchor.0,
                 COMMENT_QUOTE_MAX_CHARS,
             );
+            let active = editor.active_comment == Some(index);
 
             container(
                 column![
-                    text(quoted)
-                        .font(EDITOR_FONT)
-                        .size(11)
-                        .color(Color::from_rgb(0.45, 0.45, 0.45)),
+                    text(quoted).font(EDITOR_FONT).size(11).color(if active {
+                        Color::from_rgb(0.4, 0.85, 0.78)
+                    } else {
+                        Color::from_rgb(0.45, 0.45, 0.45)
+                    }),
                     text(comment.text.clone())
                         .font(EDITOR_FONT)
                         .size(13)
@@ -1358,7 +1382,7 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
             )
             .padding(8)
             .width(Length::Fill)
-            .style(comment_card_style)
+            .style(move |_theme| comment_card_style(active))
             .into()
         })
         .collect();
@@ -1440,12 +1464,20 @@ fn sidebar_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn comment_card_style(_theme: &Theme) -> container::Style {
+fn comment_card_style(active: bool) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.08, 0.08, 0.08))),
+        background: Some(if active {
+            Background::Color(Color::from_rgba(0.3, 0.9, 0.8, 0.1))
+        } else {
+            Background::Color(Color::from_rgb(0.08, 0.08, 0.08))
+        }),
         border: Border {
-            color: Color::from_rgb(0.25, 0.25, 0.25),
-            width: 1.0,
+            color: if active {
+                Color::from_rgba(0.3, 0.9, 0.8, 0.9)
+            } else {
+                Color::from_rgb(0.25, 0.25, 0.25)
+            },
+            width: if active { 1.5 } else { 1.0 },
             radius: 4.0.into(),
         },
         ..Default::default()
@@ -1723,8 +1755,6 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             .unwrap_or_default(),
         preview: args.preview,
         preview_only: args.preview,
-        selected_words: HashSet::new(),
-        selected_paragraphs: HashSet::new(),
         preview_cursor: 0,
         preview_column: 0,
         preview_column_target: 0,
@@ -1734,6 +1764,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         note_open: false,
         note_text: text_editor::Content::new(),
         comments: Vec::new(),
+        active_comment: None,
         publish_text: text_editor::Content::new(),
     };
 
@@ -1781,8 +1812,8 @@ fn main() -> iced::Result {
 mod tests {
     use super::{
         editor_mode, element_selection, handle_key_press, jump_caret, move_caret, move_word,
-        preview_element_after, preview_elements, save_note, trimmed_element_source, Editor,
-        ElementKind, Jump, Message, Mode, Motion, WordMotion,
+        next_comment, preview_element_after, preview_elements, save_note, trimmed_element_source,
+        Editor, ElementKind, Jump, Message, Mode, Motion, WordMotion,
     };
     use iced::keyboard::{self, key, Modifiers};
 
@@ -1914,8 +1945,6 @@ mod tests {
             markdown: iced::widget::markdown::Content::parse(""),
             preview: false,
             preview_only: false,
-            selected_words: Default::default(),
-            selected_paragraphs: Default::default(),
             preview_cursor: 0,
             preview_column: 0,
             preview_column_target: 0,
@@ -1925,6 +1954,7 @@ mod tests {
             note_open: false,
             note_text: iced::widget::text_editor::Content::new(),
             comments: Vec::new(),
+            active_comment: None,
             publish_text: iced::widget::text_editor::Content::new(),
         };
 
@@ -1950,8 +1980,6 @@ mod tests {
             markdown: iced::widget::markdown::Content::parse(""),
             preview: true,
             preview_only: false,
-            selected_words: Default::default(),
-            selected_paragraphs: Default::default(),
             preview_cursor: 1,
             preview_column: 2,
             preview_column_target: 2,
@@ -1961,6 +1989,7 @@ mod tests {
             note_open: true,
             note_text: iced::widget::text_editor::Content::with_text("  fix this  \n"),
             comments: Vec::new(),
+            active_comment: None,
             publish_text: iced::widget::text_editor::Content::new(),
         };
 
@@ -1971,6 +2000,8 @@ mod tests {
         assert_eq!(editor.comments.len(), 1);
         assert_eq!(editor.comments[0].text, "fix this");
         assert_eq!(editor.comments[0].anchor, (1, 2));
+        // The freshly saved comment becomes the active one.
+        assert_eq!(editor.active_comment, Some(0));
 
         // An empty note only closes the popup; the first comment stays.
         editor.note_open = true;
@@ -1978,6 +2009,19 @@ mod tests {
         save_note(&mut editor);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.note_open);
+    }
+
+    /// Ctrl+N cycles the active comment: None activates the first, and
+    /// after the last it wraps around. Without comments, nothing activates.
+    #[test]
+    fn ctrl_n_cycles_active_comment() {
+        assert_eq!(next_comment(0, None), None);
+        assert_eq!(next_comment(0, Some(0)), None);
+
+        assert_eq!(next_comment(3, None), Some(0));
+        assert_eq!(next_comment(3, Some(0)), Some(1));
+        assert_eq!(next_comment(3, Some(1)), Some(2));
+        assert_eq!(next_comment(3, Some(2)), Some(0));
     }
 
     /// The sidebar quotes the Markdown source of the commented element,

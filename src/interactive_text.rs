@@ -1,17 +1,14 @@
-use std::borrow::Cow;
-use std::collections::HashSet;
-
 use iced::advanced::text::{Paragraph as _, Renderer as _};
 use iced::advanced::widget::{tree, Operation, Tree};
-use iced::advanced::{layout, mouse, renderer, Clipboard, Layout, Renderer as _, Shell, Widget};
+use iced::advanced::{layout, renderer, Layout, Renderer as _, Widget};
 use iced::widget::{markdown, text, Id};
 use iced::{
-    Background, Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Renderer,
-    Size, Theme, Vector,
+    Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size,
+    Theme, Vector,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{Message, ParagraphSelection, WordSelection};
+use crate::Message;
 
 const PARAGRAPH_PADDING: f32 = 4.0;
 
@@ -19,69 +16,53 @@ const PARAGRAPH_PADDING: f32 = 4.0;
 /// preview text stays clearly readable on top of it.
 const VISUAL_SELECTION_COLOR: Color = Color::from_rgba(0.25, 0.5, 1.0, 0.4);
 
+/// Marks an element carrying a saved comment: a muted amber bar on the left
+/// edge, subtle but unmistakable.
+const COMMENTED_BAR_COLOR: Color = Color::from_rgba(0.85, 0.65, 0.3, 0.75);
+const COMMENTED_BAR_WIDTH: f32 = 3.0;
+
+/// Marks the element of the currently active comment: a distinct cyan bar
+/// plus a faint tint over the whole element, so it is clearly visible which
+/// comment is selected.
+const ACTIVE_COMMENT_BAR_COLOR: Color = Color::from_rgba(0.3, 0.9, 0.8, 1.0);
+const ACTIVE_COMMENT_BAR_WIDTH: f32 = 4.0;
+const ACTIVE_COMMENT_TINT: Color = Color::from_rgba(0.3, 0.9, 0.8, 0.09);
+
 #[allow(clippy::too_many_arguments)]
 pub fn paragraph<'a>(
     settings: markdown::Settings,
     text: &markdown::Text,
-    paragraph: ParagraphSelection,
-    selected_words: &'a HashSet<WordSelection>,
-    selected_paragraphs: &'a HashSet<ParagraphSelection>,
     selection: Option<std::ops::Range<usize>>,
     caret: Option<usize>,
     id: Option<Id>,
+    commented: bool,
+    active_comment: bool,
 ) -> Element<'a, Message> {
-    let mut spans = Vec::new();
-    let mut words = Vec::new();
-    let mut word_index = 0;
-
-    for source in text.spans(settings.style).iter() {
-        for (_, part) in source.text.as_ref().split_word_bound_indices() {
-            if part.is_empty() {
-                continue;
-            }
-
-            let is_word = part.chars().any(char::is_alphanumeric);
-            let mut span = source.clone();
-            span.text = Cow::Owned(part.to_owned());
-            spans.push(span);
-
-            if is_word {
-                words.push(Some(WordSelection {
-                    paragraph: paragraph.0,
-                    word: word_index,
-                }));
-                word_index += 1;
-            } else {
-                words.push(None);
-            }
-        }
-    }
+    let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
 
     Element::new(InteractiveText {
         spans,
-        words,
-        paragraph,
-        selected_words,
-        selected_paragraphs,
         selection,
         caret,
         id,
+        commented,
+        active_comment,
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.font,
     })
 }
 
-struct InteractiveText<'a> {
+struct InteractiveText {
     spans: Vec<text::Span<'static, markdown::Uri, Font>>,
-    words: Vec<Option<WordSelection>>,
-    paragraph: ParagraphSelection,
-    selected_words: &'a HashSet<WordSelection>,
-    selected_paragraphs: &'a HashSet<ParagraphSelection>,
     /// The grapheme columns of a visual-mode selection within this element.
     selection: Option<std::ops::Range<usize>>,
     caret: Option<usize>,
     id: Option<Id>,
+    /// Whether a saved comment is anchored to this element.
+    commented: bool,
+    /// Whether this element belongs to the currently active comment.
+    active_comment: bool,
     size: Pixels,
     line_height: iced::advanced::text::LineHeight,
     font: Font,
@@ -94,7 +75,7 @@ struct State {
     paragraph: RendererParagraph,
 }
 
-impl Widget<Message, Theme, Renderer> for InteractiveText<'_> {
+impl Widget<Message, Theme, Renderer> for InteractiveText {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -173,7 +154,7 @@ impl Widget<Message, Theme, Renderer> for InteractiveText<'_> {
         _theme: &Theme,
         defaults: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: iced::advanced::mouse::Cursor,
         viewport: &Rectangle,
     ) {
         if !layout.bounds().intersects(viewport) {
@@ -198,16 +179,27 @@ impl Widget<Message, Theme, Renderer> for InteractiveText<'_> {
             }
         }
 
-        let hovered = cursor
-            .position_in(layout.bounds())
-            .and_then(|position| state.paragraph.hit_span(position - text_offset))
-            .and_then(|index| self.words.get(index).copied().flatten());
-        let inside = cursor.is_over(layout.bounds());
+        // Comment marks: the active comment tints the whole element and
+        // draws a bright bar, plain comments only the muted bar.
+        let bounds = layout.bounds();
 
-        if self.selected_paragraphs.contains(&self.paragraph) {
-            draw_outline(renderer, layout.bounds(), Color::from_rgb(0.9, 0.1, 0.1));
-        } else if inside && hovered.is_none() {
-            draw_outline(renderer, layout.bounds(), Color::from_rgb(0.0, 0.55, 0.2));
+        if self.active_comment {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    ..Default::default()
+                },
+                ACTIVE_COMMENT_TINT,
+            );
+
+            draw_comment_bar(
+                renderer,
+                bounds,
+                ACTIVE_COMMENT_BAR_WIDTH,
+                ACTIVE_COMMENT_BAR_COLOR,
+            );
+        } else if self.commented {
+            draw_comment_bar(renderer, bounds, COMMENTED_BAR_WIDTH, COMMENTED_BAR_COLOR);
         }
 
         let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
@@ -243,89 +235,12 @@ impl Widget<Message, Theme, Renderer> for InteractiveText<'_> {
             );
         }
 
-        for (index, word) in self.words.iter().enumerate() {
-            let Some(word) = word else { continue };
-            let color = if self.selected_words.contains(word) {
-                Some(Color::from_rgb(0.9, 0.1, 0.1))
-            } else if hovered == Some(*word) {
-                Some(Color::from_rgb(0.05, 0.15, 0.45))
-            } else {
-                None
-            };
-
-            if let Some(color) = color {
-                draw_regions(
-                    renderer,
-                    state.paragraph.span_bounds(index),
-                    translation,
-                    iced::Padding::from(1.0),
-                    Border {
-                        color,
-                        width: 1.5,
-                        radius: 0.0.into(),
-                    },
-                    Background::Color(Color::TRANSPARENT),
-                );
-            }
-        }
-
         renderer.fill_paragraph(
             &state.paragraph,
             layout.position() + text_offset,
             defaults.text_color,
             *viewport,
         );
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        _renderer: &Renderer,
-        _clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
-    ) {
-        if !matches!(
-            event,
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-        ) {
-            return;
-        }
-
-        let Some(position) = cursor.position_in(layout.bounds()) else {
-            return;
-        };
-
-        let state = tree.state.downcast_ref::<State>();
-        let word = state
-            .paragraph
-            .hit_span(position - Vector::new(PARAGRAPH_PADDING, PARAGRAPH_PADDING))
-            .and_then(|index| self.words.get(index).copied().flatten());
-
-        if let Some(word) = word {
-            shell.publish(Message::SelectWord(word));
-        } else {
-            shell.publish(Message::SelectParagraph(self.paragraph));
-        }
-        shell.capture_event();
-    }
-
-    fn mouse_interaction(
-        &self,
-        _tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-        _renderer: &Renderer,
-    ) -> mouse::Interaction {
-        if cursor.is_over(layout.bounds()) {
-            mouse::Interaction::Pointer
-        } else {
-            mouse::Interaction::None
-        }
     }
 
     fn operate(
@@ -339,6 +254,22 @@ impl Widget<Message, Theme, Renderer> for InteractiveText<'_> {
             operation.container(Some(id), layout.bounds());
         }
     }
+}
+
+/// Draws the left-edge marker bar of a commented element.
+fn draw_comment_bar(renderer: &mut Renderer, bounds: Rectangle, width: f32, color: Color) {
+    let bar = Rectangle::new(
+        Point::new(bounds.x, bounds.y + 1.0),
+        Size::new(width, (bounds.height - 2.0).max(2.0)),
+    );
+
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: bar,
+            ..Default::default()
+        },
+        color,
+    );
 }
 
 /// The wrapped lines of a paragraph, as `(line index, byte start, byte
@@ -465,21 +396,6 @@ fn selection_rects(
     }
 
     rects
-}
-
-fn draw_outline(renderer: &mut Renderer, bounds: Rectangle, color: Color) {
-    renderer.fill_quad(
-        renderer::Quad {
-            bounds,
-            border: Border {
-                color,
-                width: 1.5,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        },
-        Color::TRANSPARENT,
-    );
 }
 
 fn draw_regions(
