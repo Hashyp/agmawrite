@@ -1,8 +1,10 @@
 mod comments;
 mod interactive_text;
+mod keymap;
 mod preview;
 
 use comments::{Comments, Mark};
+use keymap::{Keymap, Mode};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, WordMotion};
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
@@ -27,20 +29,17 @@ const CARET_MARGIN: f32 = 8.0;
 struct Editor {
     content: text_editor::Content,
     markdown: markdown::Content,
-    preview: bool,
-    preview_only: bool,
+    /// The input mode stack — write, view, visual, note — owning key
+    /// handling and the mode badge's state.
+    keymap: Keymap,
     /// The preview caret: element, grapheme column, and sticky target
     /// column, owned by the preview module.
     caret: Caret,
     /// The numbered preview elements, owned by the preview module.
     preview_elements: ElementMap,
-    /// Whether a lone `g` is awaiting its second key of a `gg`/`ge` sequence.
-    pending_g: bool,
     /// The fixed end of the visual-mode selection, as a caret position.
     /// `None` outside visual mode.
     visual_anchor: Option<CaretPosition>,
-    /// Whether the note popup is open over the preview.
-    note_open: bool,
     /// The text of the note popup.
     note_text: text_editor::Content,
     /// Saved comments, the active one, and the publish draft.
@@ -155,114 +154,18 @@ async fn open_file() -> Option<String> {
     Some(String::from_utf8_lossy(&file.read().await).into_owned())
 }
 
-fn handle_key_press(
-    event: keyboard::Event,
-    preview: bool,
-    preview_only: bool,
-    pending_g: bool,
-    note_open: bool,
-) -> Option<Message> {
-    let keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        repeat,
-        ..
-    } = event
-    else {
-        return None;
-    };
-
-    // The note popup swallows plain keys for its text area; only Escape
-    // closes it and Ctrl+S saves the comment.
-    if preview && note_open && !modifiers.alt() && !modifiers.logo() {
-        return match modified_key.as_ref() {
-            keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
-                Some(Message::CloseNotePopup)
-            }
-            keyboard::Key::Character("s" | "S") if modifiers.control() && !repeat => {
-                Some(Message::SaveNote)
-            }
-            _ => None,
-        };
-    }
-
-    if preview && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
-        // Auto-repeat is welcome for motions (holding `j`/`k`/`h`/`l`, `w`,
-        // `b`, `e`, or `G` keeps moving), but one-shot actions must not
-        // repeat.
-        return match modified_key.as_ref() {
-            keyboard::Key::Named(keyboard::key::Named::ArrowUp)
-            | keyboard::Key::Character("k" | "K") => Some(Message::MovePreviewCursor(Motion::Up)),
-            keyboard::Key::Named(keyboard::key::Named::ArrowDown)
-            | keyboard::Key::Character("j" | "J") => Some(Message::MovePreviewCursor(Motion::Down)),
-            keyboard::Key::Named(keyboard::key::Named::ArrowLeft)
-            | keyboard::Key::Character("h" | "H") => Some(Message::MovePreviewCursor(Motion::Left)),
-            keyboard::Key::Named(keyboard::key::Named::ArrowRight)
-            | keyboard::Key::Character("l" | "L") => {
-                Some(Message::MovePreviewCursor(Motion::Right))
-            }
-            // `gg` — the second `g` of the sequence is always a fresh press.
-            keyboard::Key::Character("g") if pending_g && !repeat => {
-                Some(Message::MovePreviewJump(Jump::First))
-            }
-            // The first `g` of a `gg`/`ge` sequence.
-            keyboard::Key::Character("g") if !repeat => Some(Message::PreviewGPressed),
-            // `ge` — the `e` of the sequence is always a fresh press.
-            keyboard::Key::Character("e" | "E") if pending_g && !repeat => {
-                Some(Message::MovePreviewWord(WordMotion::PreviousEnd))
-            }
-            keyboard::Key::Character("e" | "E") => {
-                Some(Message::MovePreviewWord(WordMotion::NextEnd))
-            }
-            keyboard::Key::Character("w" | "W") => {
-                Some(Message::MovePreviewWord(WordMotion::NextStart))
-            }
-            keyboard::Key::Character("b" | "B") => {
-                Some(Message::MovePreviewWord(WordMotion::PreviousStart))
-            }
-            keyboard::Key::Character("G") => Some(Message::MovePreviewJump(Jump::Last)),
-            keyboard::Key::Character("v" | "V") if !repeat => Some(Message::ToggleVisualMode),
-            keyboard::Key::Character("c" | "C") if !repeat => Some(Message::OpenNotePopup),
-            keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
-                Some(Message::PreviewCancel)
-            }
-            _ => None,
-        };
-    }
-
-    if modifiers.control() && !repeat {
-        match modified_key.as_ref() {
-            keyboard::Key::Character("o" | "O") => Some(Message::OpenFile),
-            keyboard::Key::Character("p" | "P") if !preview_only => Some(Message::TogglePreview),
-            // Browse the saved comments in the preview.
-            keyboard::Key::Character("n" | "N") if preview && !note_open => {
-                Some(Message::NextComment)
-            }
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
 fn subscription(editor: &Editor) -> Subscription<Message> {
     keyboard::listen()
-        .with((
-            editor.preview,
-            editor.preview_only,
-            editor.pending_g,
-            editor.note_open,
-        ))
-        .filter_map(|((preview, preview_only, pending_g, note_open), event)| {
-            handle_key_press(event, preview, preview_only, pending_g, note_open)
-        })
+        .with(editor.keymap)
+        .filter_map(|(keymap, event)| keymap.handle(event))
 }
 
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
-    // Any key other than a lone `g` ends a pending `gg`/`ge` sequence.
-    if !matches!(message, Message::PreviewGPressed) {
-        editor.pending_g = false;
-    }
+    // The note popup's text area owns the draft until the popup closes; a
+    // save started from the open popup still lands after the keymap has
+    // marked the popup closed.
+    let note_was_open = editor.keymap.note_open();
+    editor.keymap.note(&message);
 
     match message {
         Message::Edit(action) => editor.content.perform(action),
@@ -270,7 +173,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::FileLoaded(Some(contents)) => {
             editor.preview_elements = ElementMap::parse(&contents);
             editor.caret = Caret::new();
-            editor.note_open = false;
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
             editor.comments = Comments::new();
@@ -279,12 +181,10 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::FileLoaded(None) => {}
         Message::TogglePreview => {
-            if !editor.preview_only {
-                editor.preview = !editor.preview;
-                editor.note_open = false;
+            if !editor.keymap.preview_only() {
                 editor.visual_anchor = None;
 
-                if editor.preview {
+                if editor.keymap.preview() {
                     let contents = editor.content.text();
                     editor.preview_elements = ElementMap::parse(&contents);
                     editor
@@ -322,32 +222,24 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 return reveal_preview_caret();
             }
         }
-        Message::PreviewGPressed => {
-            editor.pending_g = true;
-        }
+        Message::PreviewGPressed => {}
         Message::PreviewCancel => {
             editor.visual_anchor = None;
         }
         Message::ToggleVisualMode => {
-            editor.visual_anchor = if editor.visual_anchor.is_some() {
-                None
-            } else {
+            editor.visual_anchor = if editor.keymap.visual() {
                 Some(editor.caret.position())
+            } else {
+                None
             };
         }
         Message::ScrollPreviewBy(y) => {
             return scroll_by(Id::new(PREVIEW_SCROLL_ID), AbsoluteOffset { x: 0.0, y });
         }
         Message::OpenNotePopup => {
-            if !editor.note_open {
-                editor.note_open = true;
-
-                return focus(Id::new(NOTE_EDITOR_ID));
-            }
+            return focus(Id::new(NOTE_EDITOR_ID));
         }
-        Message::CloseNotePopup => {
-            editor.note_open = false;
-        }
+        Message::CloseNotePopup => {}
         Message::EditNote(action) => editor.note_text.perform(action),
         Message::EditPublish(action) => editor.comments.edit_draft(action),
         Message::PublishPressed => {
@@ -364,7 +256,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             }
         }
         Message::SaveNote => {
-            if editor.note_open {
+            if note_was_open {
                 save_note(editor);
             }
         }
@@ -383,7 +275,6 @@ fn save_note(editor: &mut Editor) {
         .comments
         .save(&editor.note_text.text(), editor.caret.position());
 
-    editor.note_open = false;
     editor.note_text = text_editor::Content::new();
 }
 
@@ -582,7 +473,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let position = editor.caret.position();
     let visual = editor.visual_anchor.map(|anchor| (anchor, position));
 
-    let base_area: Element<'_, Message> = if editor.preview {
+    let base_area: Element<'_, Message> = if editor.keymap.preview() {
         scrollable(
             container(markdown::view_with(
                 editor.markdown.items(),
@@ -618,7 +509,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     // The note popup floats above the editing area; the backdrop closes it
     // on click and shields the area beneath from events.
-    let editing_area: Element<'_, Message> = if editor.note_open {
+    let editing_area: Element<'_, Message> = if editor.keymap.note_open() {
         stack![base_area, note_popup(editor)].into()
     } else {
         base_area
@@ -684,7 +575,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 open_button.into(),
             ];
 
-            if !editor.preview_only {
+            if !editor.keymap.preview_only() {
                 controls.push(preview_button.into());
             }
 
@@ -921,35 +812,17 @@ fn publish_button_style(_theme: &Theme, status: button::Status) -> button::Style
     }
 }
 
-/// The bottom-bar mode indicator: which navigation mode the editor is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// Editing the Markdown source.
-    Write,
-    /// Previewing, caret moves without selecting.
-    View,
-    /// Previewing, motions extend the selection.
-    Visual,
-}
-
-fn editor_mode(editor: &Editor) -> Mode {
-    if editor.visual_anchor.is_some() {
-        Mode::Visual
-    } else if editor.preview {
-        Mode::View
-    } else {
-        Mode::Write
-    }
-}
-
 /// A small badge naming the current mode, placed next to the open icon in
 /// the bottom bar. Visual mode is highlighted with the selection blue so
-/// the active selection state is obvious at a glance.
+/// the active selection state is obvious at a glance; the note mode with
+/// the comment amber. Badge and keys read the same representation: the
+/// keymap's mode.
 fn mode_badge(editor: &Editor) -> Element<'_, Message> {
-    let mode = editor_mode(editor);
+    let mode = editor.keymap.mode();
 
     let (label, color) = match mode {
         Mode::Visual => ("VISUAL", Color::from_rgb(0.4, 0.65, 1.0)),
+        Mode::Note => ("NOTE", Color::from_rgb(0.9, 0.7, 0.35)),
         Mode::View => ("VIEW", Color::from_rgb(0.6, 0.6, 0.6)),
         Mode::Write => ("WRITE", Color::from_rgb(0.6, 0.6, 0.6)),
     };
@@ -1140,13 +1013,10 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             .as_deref()
             .map(markdown::Content::parse)
             .unwrap_or_default(),
-        preview: args.preview,
-        preview_only: args.preview,
+        keymap: Keymap::new(args.preview),
         caret: Caret::new(),
         preview_elements,
-        pending_g: false,
         visual_anchor: None,
-        note_open: false,
         note_text: text_editor::Content::new(),
         comments: Comments::new(),
     };
@@ -1194,161 +1064,44 @@ fn main() -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::comments::{Comments, Mark};
-    use super::preview::{Caret, CaretPosition, ElementMap, Motion, WordMotion};
-    use super::{editor_mode, handle_key_press, save_note, Editor, Message, Mode};
-    use iced::keyboard::{self, key, Modifiers};
+    use super::keymap::{Keymap, Mode};
+    use super::preview::{Caret, CaretPosition, ElementMap};
+    use super::{save_note, update, Editor, Message};
 
-    fn key_pressed_with(
-        character: &str,
-        repeat: bool,
-        pending_g: bool,
-        note_open: bool,
-    ) -> Option<Message> {
-        let key = keyboard::Key::Character(character.into());
+    fn editor_at(contents: &str, position: CaretPosition) -> Editor {
+        let mut keymap = Keymap::new(false);
+        keymap.note(&Message::TogglePreview);
 
-        handle_key_press(
-            keyboard::Event::KeyPressed {
-                key: key.clone(),
-                modified_key: key,
-                physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-                location: keyboard::Location::Standard,
-                modifiers: Modifiers::default(),
-                text: None,
-                repeat,
-            },
-            true,
-            false,
-            pending_g,
-            note_open,
-        )
-    }
+        let mut caret = Caret::new();
+        caret.place(position);
 
-    fn key_pressed(character: &str, repeat: bool) -> Option<Message> {
-        key_pressed_with(character, repeat, false, false)
-    }
-
-    /// Holding a motion key auto-repeats the motion, like holding `j` or `k`
-    /// in vim; one-shot actions and the `g`-prefix never repeat.
-    #[test]
-    fn held_motion_keys_repeat() {
-        // Plain presses and repeats both move.
-        assert!(matches!(
-            key_pressed("j", false),
-            Some(Message::MovePreviewCursor(Motion::Down))
-        ));
-        assert!(matches!(
-            key_pressed("j", true),
-            Some(Message::MovePreviewCursor(Motion::Down))
-        ));
-        assert!(matches!(
-            key_pressed("k", true),
-            Some(Message::MovePreviewCursor(Motion::Up))
-        ));
-        assert!(matches!(
-            key_pressed("h", true),
-            Some(Message::MovePreviewCursor(Motion::Left))
-        ));
-        assert!(matches!(
-            key_pressed("l", true),
-            Some(Message::MovePreviewCursor(Motion::Right))
-        ));
-        assert!(matches!(
-            key_pressed("w", true),
-            Some(Message::MovePreviewWord(WordMotion::NextStart))
-        ));
-        assert!(matches!(
-            key_pressed("b", true),
-            Some(Message::MovePreviewWord(WordMotion::PreviousStart))
-        ));
-        assert!(matches!(
-            key_pressed("e", true),
-            Some(Message::MovePreviewWord(WordMotion::NextEnd))
-        ));
-
-        // One-shot actions ignore repeats.
-        assert!(matches!(
-            key_pressed("c", false),
-            Some(Message::OpenNotePopup)
-        ));
-        assert!(key_pressed("c", true).is_none());
-
-        // The `g` prefix never arms or fires on repeat — `gg` and `ge` need
-        // two fresh presses.
-        assert!(matches!(
-            key_pressed("g", false),
-            Some(Message::PreviewGPressed)
-        ));
-        assert!(key_pressed("g", true).is_none());
-
-        // `v` toggles visual mode on fresh presses only.
-        assert!(matches!(
-            key_pressed("v", false),
-            Some(Message::ToggleVisualMode)
-        ));
-        assert!(key_pressed("v", true).is_none());
-    }
-
-    /// The bottom bar names the navigation mode: write when editing, view
-    /// when previewing, and visual while a selection is anchored.
-    #[test]
-    fn mode_badge_reflects_editor_state() {
-        let mut editor = Editor {
-            content: iced::widget::text_editor::Content::new(),
-            markdown: iced::widget::markdown::Content::parse(""),
-            preview: false,
-            preview_only: false,
-            caret: Caret::new(),
-            preview_elements: ElementMap::default(),
-            pending_g: false,
+        Editor {
+            content: iced::widget::text_editor::Content::with_text(contents),
+            markdown: iced::widget::markdown::Content::parse(contents),
+            keymap,
+            caret,
+            preview_elements: ElementMap::parse(contents),
             visual_anchor: None,
-            note_open: false,
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
-        };
-
-        assert_eq!(editor_mode(&editor), Mode::Write);
-
-        editor.preview = true;
-        assert_eq!(editor_mode(&editor), Mode::View);
-
-        editor.visual_anchor = Some(CaretPosition {
-            element: 0,
-            column: 0,
-        });
-        assert_eq!(editor_mode(&editor), Mode::Visual);
-
-        // Leaving visual mode returns to view.
-        editor.visual_anchor = None;
-        assert_eq!(editor_mode(&editor), Mode::View);
+        }
     }
 
     /// Saving the popup note stores a comment anchored at the caret and
     /// resets the popup; empty notes are discarded.
     #[test]
     fn saving_a_note_adds_a_comment() {
-        let mut caret = Caret::new();
-        caret.place(CaretPosition {
+        let position = CaretPosition {
             element: 1,
             column: 2,
-        });
-
-        let mut editor = Editor {
-            content: iced::widget::text_editor::Content::with_text("# Title\n\nbody"),
-            markdown: iced::widget::markdown::Content::parse(""),
-            preview: true,
-            preview_only: false,
-            caret,
-            preview_elements: ElementMap::parse("# Title\n\nbody"),
-            pending_g: false,
-            visual_anchor: None,
-            note_open: true,
-            note_text: iced::widget::text_editor::Content::with_text("  fix this  \n"),
-            comments: Comments::new(),
         };
+        let mut editor = editor_at("# Title\n\nbody", position);
+        editor.note_text = iced::widget::text_editor::Content::with_text("  fix this  \n");
+        editor.keymap.note(&Message::OpenNotePopup);
 
-        save_note(&mut editor);
+        update(&mut editor, Message::SaveNote);
 
-        assert!(!editor.note_open);
+        assert!(!editor.keymap.note_open());
         assert_eq!(editor.note_text.text(), "");
         assert_eq!(editor.comments.len(), 1);
         assert_eq!(
@@ -1358,74 +1111,33 @@ mod tests {
                 .text,
             "fix this"
         );
-        // The freshly saved comment is the active one, anchored at the caret
-        // position (element 1, column 2).
+        // The freshly saved comment is the active one, anchored at the
+        // caret position (element 1, column 2).
         assert_eq!(editor.comments.mark_for(1), Mark::Active);
-        assert_eq!(
-            editor.comments.cycle(),
-            Some(CaretPosition {
-                element: 1,
-                column: 2
-            })
-        );
+        assert_eq!(editor.comments.cycle(), Some(position));
 
         // An empty note only closes the popup; the first comment stays.
-        editor.note_open = true;
+        editor.keymap.note(&Message::OpenNotePopup);
         editor.note_text = iced::widget::text_editor::Content::with_text("   ");
-        save_note(&mut editor);
+        update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
-        assert!(!editor.note_open);
+        assert!(!editor.keymap.note_open());
     }
 
-    /// While the note popup is open, plain keys go to its text area — only
-    /// Escape closes it and Ctrl+S saves the comment.
+    /// `Ctrl+S` with the popup closed saves no note.
     #[test]
-    fn note_popup_swallows_keys() {
-        let escape = || {
-            let key = keyboard::Key::Named(keyboard::key::Named::Escape);
+    fn save_note_without_popup_is_a_no_op() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
 
-            handle_key_press(
-                keyboard::Event::KeyPressed {
-                    key: key.clone(),
-                    modified_key: key,
-                    physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-                    location: keyboard::Location::Standard,
-                    modifiers: Modifiers::default(),
-                    text: None,
-                    repeat: false,
-                },
-                true,
-                false,
-                false,
-                true,
-            )
-        };
+        update(&mut editor, Message::SaveNote);
 
-        assert!(matches!(escape(), Some(Message::CloseNotePopup)));
-
-        // Motions, `c`, and typing characters produce nothing while the
-        // popup is open.
-        for key in ["j", "k", "h", "l", "w", "b", "e", "g", "c", "G", "x"] {
-            assert!(
-                key_pressed_with(key, false, false, true).is_none(),
-                "'{key}' should be swallowed by the note popup"
-            );
-        }
-
-        // Ctrl+S saves the note while the popup is open.
-        let ctrl_s = keyboard::Event::KeyPressed {
-            key: keyboard::Key::Character("s".into()),
-            modified_key: keyboard::Key::Character("s".into()),
-            physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-            location: keyboard::Location::Standard,
-            modifiers: Modifiers::CTRL,
-            text: None,
-            repeat: false,
-        };
-
-        assert!(matches!(
-            handle_key_press(ctrl_s, true, false, false, true),
-            Some(Message::SaveNote)
-        ));
+        assert!(editor.comments.is_empty());
+        assert_eq!(editor.keymap.mode(), Mode::View);
     }
 }
