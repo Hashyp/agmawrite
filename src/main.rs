@@ -880,7 +880,14 @@ fn mode_badge(editor: &Editor) -> Element<'_, Message> {
     };
 
     container(text(label).font(EDITOR_FONT).size(12).color(color))
-        .padding([0, 8])
+        // The extra bottom padding pushes the label a few pixels up, level
+        // with the icon glyphs beside it instead of below them.
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 4.0,
+            left: 8.0,
+        })
         .height(Length::Fixed(28.0))
         .align_y(alignment::Vertical::Center)
         .style(move |_theme| mode_badge_style(color))
