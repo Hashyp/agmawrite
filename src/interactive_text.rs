@@ -8,8 +8,6 @@ use iced::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::Message;
-
 const PARAGRAPH_PADDING: f32 = 4.0;
 
 /// The background of a visual-mode selection. Translucent blue: the white
@@ -29,7 +27,7 @@ const ACTIVE_COMMENT_BAR_WIDTH: f32 = 4.0;
 const ACTIVE_COMMENT_TINT: Color = Color::from_rgba(0.3, 0.9, 0.8, 0.09);
 
 #[allow(clippy::too_many_arguments)]
-pub fn paragraph<'a>(
+pub fn paragraph<'a, M: 'a>(
     settings: markdown::Settings,
     text: &markdown::Text,
     selection: Option<std::ops::Range<usize>>,
@@ -37,7 +35,7 @@ pub fn paragraph<'a>(
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
-) -> Element<'a, Message> {
+) -> Element<'a, M> {
     let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
 
     Element::new(InteractiveText {
@@ -50,10 +48,11 @@ pub fn paragraph<'a>(
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.font,
+        _message: std::marker::PhantomData,
     })
 }
 
-struct InteractiveText {
+struct InteractiveText<M> {
     spans: Vec<text::Span<'static, markdown::Uri, Font>>,
     /// The grapheme columns of a visual-mode selection within this element.
     selection: Option<std::ops::Range<usize>>,
@@ -66,6 +65,9 @@ struct InteractiveText {
     size: Pixels,
     line_height: iced::advanced::text::LineHeight,
     font: Font,
+    /// The widget never emits a message; the type parameter only keeps the
+    /// dependency pointing one way, from the app root to this leaf module.
+    _message: std::marker::PhantomData<M>,
 }
 
 type RendererParagraph = <Renderer as iced::advanced::text::Renderer>::Paragraph;
@@ -75,7 +77,7 @@ struct State {
     paragraph: RendererParagraph,
 }
 
-impl Widget<Message, Theme, Renderer> for InteractiveText {
+impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
