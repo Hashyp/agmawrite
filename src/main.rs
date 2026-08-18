@@ -1,6 +1,9 @@
+mod comments;
 mod interactive_text;
 
 use std::cell::Cell;
+
+use comments::{CaretPosition, Comments, Mark};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -20,19 +23,8 @@ const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
-/// How many characters of an element's Markdown source a comment card
-/// quotes before cutting it off.
-const COMMENT_QUOTE_MAX_CHARS: usize = 60;
 /// Margin kept between the preview caret and the viewport edges while scrolling.
 const CARET_MARGIN: f32 = 8.0;
-
-/// A saved comment: the note text plus the anchor it was written for, as a
-/// caret `(element, column)` position.
-#[derive(Debug, Clone)]
-struct Comment {
-    text: String,
-    anchor: (usize, usize),
-}
 
 /// A caret motion in the preview, usable with the arrow keys or the vim keys
 /// `h`, `j`, `k`, and `l`.
@@ -107,13 +99,8 @@ struct Editor {
     note_open: bool,
     /// The text of the note popup.
     note_text: text_editor::Content,
-    /// Saved comments, oldest first.
-    comments: Vec<Comment>,
-    /// The currently active comment, highlighted in the preview and the
-    /// sidebar. `None` while browsing.
-    active_comment: Option<usize>,
-    /// The text of the sidebar publish field.
-    publish_text: text_editor::Content,
+    /// Saved comments, the active one, and the publish draft.
+    comments: Comments,
 }
 
 #[derive(Debug, Clone)]
@@ -344,9 +331,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.note_open = false;
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
-            editor.comments.clear();
-            editor.active_comment = None;
-            editor.publish_text = text_editor::Content::new();
+            editor.comments = Comments::new();
             editor.content = text_editor::Content::with_text(&contents);
             editor.markdown = markdown::Content::parse(&contents);
         }
@@ -441,21 +426,18 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.note_open = false;
         }
         Message::EditNote(action) => editor.note_text.perform(action),
-        Message::EditPublish(action) => editor.publish_text.perform(action),
+        Message::EditPublish(action) => editor.comments.edit_draft(action),
         Message::PublishPressed => {
             // TODO: publish the comments
         }
         Message::NextComment => {
-            if let Some(index) = next_comment(editor.comments.len(), editor.active_comment) {
-                editor.active_comment = Some(index);
-
+            if let Some(anchor) = editor.comments.cycle() {
                 // Jump the caret to the comment and reveal it, so the mark
                 // is actually in view.
                 editor.visual_anchor = None;
-                let (element, column) = editor.comments[index].anchor;
-                editor.preview_cursor = element;
-                editor.preview_column = column;
-                editor.preview_column_target = column;
+                editor.preview_cursor = anchor.element;
+                editor.preview_column = anchor.column;
+                editor.preview_column_target = anchor.column;
 
                 return reveal_preview_caret();
             }
@@ -935,63 +917,16 @@ fn element_selection(
 /// Saves the note popup text as a comment anchored at the preview caret,
 /// then closes the popup with a fresh note. Empty notes are discarded.
 fn save_note(editor: &mut Editor) {
-    let text = editor.note_text.text().trim().to_string();
-
-    if !text.is_empty() {
-        editor.active_comment = Some(editor.comments.len());
-        editor.comments.push(Comment {
-            text,
-            anchor: (editor.preview_cursor, editor.preview_column),
-        });
-    }
+    editor.comments.save(
+        &editor.note_text.text(),
+        CaretPosition {
+            element: editor.preview_cursor,
+            column: editor.preview_column,
+        },
+    );
 
     editor.note_open = false;
     editor.note_text = text_editor::Content::new();
-}
-
-/// Cycles the active comment forward, wrapping around at the end. With no
-/// comments there is nothing to activate.
-fn next_comment(comments_len: usize, active: Option<usize>) -> Option<usize> {
-    if comments_len == 0 {
-        return None;
-    }
-
-    Some(match active {
-        None => 0,
-        Some(index) => (index + 1) % comments_len,
-    })
-}
-
-/// Returns the Markdown source of the preview element at `index`, trimmed
-/// for display in the comments sidebar: collapsed to one line and cut off
-/// after `max_chars` characters with an ellipsis.
-fn trimmed_element_source(
-    markdown: &str,
-    elements: &[PreviewElement],
-    index: usize,
-    max_chars: usize,
-) -> String {
-    let Some(element) = elements.get(index) else {
-        return String::new();
-    };
-
-    let source = markdown[element.source.clone()].trim();
-    let mut collapsed = String::with_capacity(source.len());
-
-    for word in source.split_whitespace() {
-        if !collapsed.is_empty() {
-            collapsed.push(' ');
-        }
-
-        collapsed.push_str(word);
-    }
-
-    if collapsed.chars().count() > max_chars {
-        let prefix: String = collapsed.chars().take(max_chars).collect();
-        format!("{prefix}…")
-    } else {
-        collapsed
-    }
 }
 
 /// Measures the preview scrollable and the caret element in the widget tree,
@@ -1116,9 +1051,7 @@ struct PreviewViewer<'a> {
     /// Per-element lengths for visual-mode selections.
     elements: &'a [PreviewElement],
     /// Saved comments, to know which elements carry one.
-    comments: &'a [Comment],
-    /// The currently active comment, if any.
-    active_comment: Option<usize>,
+    comments: &'a Comments,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -1167,11 +1100,9 @@ impl<'a> PreviewViewer<'a> {
         let selection = self
             .visual
             .and_then(|(anchor, caret)| element_selection(anchor, caret, element, len));
-        let commented = self
-            .comments
-            .iter()
-            .any(|comment| comment.anchor.0 == element);
-        let active_comment = self.active_comment == Some(element);
+        let mark = self.comments.mark_for(element);
+        let commented = matches!(mark, Mark::Commented | Mark::Active);
+        let active_comment = mark == Mark::Active;
 
         interactive_text::paragraph(
             settings,
@@ -1202,7 +1133,6 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                     visual,
                     elements: &editor.preview_elements,
                     comments: &editor.comments,
-                    active_comment: editor.active_comment,
                 },
             ))
             .width(Length::Fill)
@@ -1354,25 +1284,22 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
 
     let cards: Vec<Element<'_, Message>> = editor
         .comments
-        .iter()
-        .enumerate()
-        .map(|(index, comment)| {
-            let quoted = trimmed_element_source(
-                &source,
-                &editor.preview_elements,
-                comment.anchor.0,
-                COMMENT_QUOTE_MAX_CHARS,
-            );
-            let active = editor.active_comment == Some(index);
+        .cards(&source, &editor.preview_elements)
+        .into_iter()
+        .map(|card| {
+            let active = card.active;
 
             container(
                 column![
-                    text(quoted).font(EDITOR_FONT).size(11).color(if active {
-                        Color::from_rgb(0.4, 0.85, 0.78)
-                    } else {
-                        Color::from_rgb(0.45, 0.45, 0.45)
-                    }),
-                    text(comment.text.clone())
+                    text(card.quote)
+                        .font(EDITOR_FONT)
+                        .size(11)
+                        .color(if active {
+                            Color::from_rgb(0.4, 0.85, 0.78)
+                        } else {
+                            Color::from_rgb(0.45, 0.45, 0.45)
+                        }),
+                    text(card.text.to_owned())
                         .font(EDITOR_FONT)
                         .size(13)
                         .color(Color::WHITE),
@@ -1411,7 +1338,7 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
                         .font(EDITOR_FONT)
                         .size(11)
                         .color(Color::from_rgb(0.5, 0.5, 0.5)),
-                    text_editor(&editor.publish_text)
+                    text_editor(editor.comments.draft())
                         .on_action(Message::EditPublish)
                         .font(EDITOR_FONT)
                         .size(14)
@@ -1763,9 +1690,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         visual_anchor: None,
         note_open: false,
         note_text: text_editor::Content::new(),
-        comments: Vec::new(),
-        active_comment: None,
-        publish_text: text_editor::Content::new(),
+        comments: Comments::new(),
     };
 
     let task = if args.preview {
@@ -1810,10 +1735,11 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests {
+    use super::comments::{CaretPosition, Comments, Mark};
     use super::{
         editor_mode, element_selection, handle_key_press, jump_caret, move_caret, move_word,
-        next_comment, preview_element_after, preview_elements, save_note, trimmed_element_source,
-        Editor, ElementKind, Jump, Message, Mode, Motion, WordMotion,
+        preview_element_after, preview_elements, save_note, Editor, ElementKind, Jump, Message,
+        Mode, Motion, WordMotion,
     };
     use iced::keyboard::{self, key, Modifiers};
 
@@ -1953,9 +1879,7 @@ mod tests {
             visual_anchor: None,
             note_open: false,
             note_text: iced::widget::text_editor::Content::new(),
-            comments: Vec::new(),
-            active_comment: None,
-            publish_text: iced::widget::text_editor::Content::new(),
+            comments: Comments::new(),
         };
 
         assert_eq!(editor_mode(&editor), Mode::Write);
@@ -1988,9 +1912,7 @@ mod tests {
             visual_anchor: None,
             note_open: true,
             note_text: iced::widget::text_editor::Content::with_text("  fix this  \n"),
-            comments: Vec::new(),
-            active_comment: None,
-            publish_text: iced::widget::text_editor::Content::new(),
+            comments: Comments::new(),
         };
 
         save_note(&mut editor);
@@ -1998,10 +1920,23 @@ mod tests {
         assert!(!editor.note_open);
         assert_eq!(editor.note_text.text(), "");
         assert_eq!(editor.comments.len(), 1);
-        assert_eq!(editor.comments[0].text, "fix this");
-        assert_eq!(editor.comments[0].anchor, (1, 2));
-        // The freshly saved comment becomes the active one.
-        assert_eq!(editor.active_comment, Some(0));
+        assert_eq!(
+            editor
+                .comments
+                .cards("# Title\n\nbody", &editor.preview_elements)[0]
+                .text,
+            "fix this"
+        );
+        // The freshly saved comment is the active one, anchored at the caret
+        // position (element 1, column 2).
+        assert_eq!(editor.comments.mark_for(1), Mark::Active);
+        assert_eq!(
+            editor.comments.cycle(),
+            Some(CaretPosition {
+                element: 1,
+                column: 2
+            })
+        );
 
         // An empty note only closes the popup; the first comment stays.
         editor.note_open = true;
@@ -2009,38 +1944,6 @@ mod tests {
         save_note(&mut editor);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.note_open);
-    }
-
-    /// Ctrl+N cycles the active comment: None activates the first, and
-    /// after the last it wraps around. Without comments, nothing activates.
-    #[test]
-    fn ctrl_n_cycles_active_comment() {
-        assert_eq!(next_comment(0, None), None);
-        assert_eq!(next_comment(0, Some(0)), None);
-
-        assert_eq!(next_comment(3, None), Some(0));
-        assert_eq!(next_comment(3, Some(0)), Some(1));
-        assert_eq!(next_comment(3, Some(1)), Some(2));
-        assert_eq!(next_comment(3, Some(2)), Some(0));
-    }
-
-    /// The sidebar quotes the Markdown source of the commented element,
-    /// collapsed to one line and trimmed to the card width.
-    #[test]
-    fn comment_quotes_trimmed_element_source() {
-        let markdown = "# Some rather long heading text here\n\nshort";
-        let elements = preview_elements(markdown);
-
-        // Short elements keep their source, collapsed onto one line.
-        assert_eq!(trimmed_element_source(markdown, &elements, 1, 60), "short");
-
-        // Long element sources are cut off after `max_chars` with an
-        // ellipsis.
-        let quoted = trimmed_element_source(markdown, &elements, 0, 10);
-        assert_eq!(quoted, "# Some rat…");
-
-        // Unknown indices quote nothing.
-        assert_eq!(trimmed_element_source(markdown, &elements, 9, 60), "");
     }
 
     /// While the note popup is open, plain keys go to its text area — only
