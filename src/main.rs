@@ -1378,26 +1378,27 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
             scrollable(column(cards).spacing(8).width(Length::Fill))
                 .width(Length::Fill)
                 .height(Length::Fill),
-            text_editor(&editor.publish_text)
-                .on_action(Message::EditPublish)
-                .font(EDITOR_FONT)
-                .size(14)
-                .height(Length::Fixed(72.0))
-                .padding(6)
-                .style(editor_style),
-            row![
-                Space::new().width(Length::Fill),
-                button(
-                    text("Publish")
-                        .font(EDITOR_FONT)
-                        .size(13)
-                        .color(Color::WHITE),
-                )
-                .on_press(Message::PublishPressed)
-                .padding([5, 12])
-                .style(popup_button_style),
-            ]
-            .width(Length::Fill),
+            container(
+                text_editor(&editor.publish_text)
+                    .on_action(Message::EditPublish)
+                    .font(EDITOR_FONT)
+                    .size(14)
+                    .height(Length::Fixed(72.0))
+                    .padding(6)
+                    .style(editor_style),
+            )
+            .width(Length::Fill)
+            .style(publish_field_style),
+            button(
+                text("Publish")
+                    .font(EDITOR_FONT)
+                    .size(13)
+                    .color(Color::WHITE),
+            )
+            .on_press(Message::PublishPressed)
+            .width(Length::Fill)
+            .padding([6, 12])
+            .style(publish_button_style),
         ]
         .spacing(8)
         .width(Length::Fill)
@@ -1432,6 +1433,44 @@ fn comment_card_style(_theme: &Theme) -> container::Style {
         background: Some(Background::Color(Color::from_rgb(0.08, 0.08, 0.08))),
         border: Border {
             color: Color::from_rgb(0.25, 0.25, 0.25),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The publish text field stands out with a slightly lighter surface than
+/// the comment cards and a clearly visible border.
+fn publish_field_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        border: Border {
+            color: Color::from_rgb(0.4, 0.4, 0.4),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The Publish button spans the sidebar width and reads as the primary
+/// action of the panel.
+fn publish_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => {
+                Some(Background::Color(Color::from_rgb(0.25, 0.5, 1.0)))
+            }
+            _ => Some(Background::Color(Color::from_rgb(0.15, 0.3, 0.7))),
+        },
+        border: Border {
+            color: match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Color::from_rgb(0.55, 0.7, 1.0)
+                }
+                _ => Color::from_rgb(0.35, 0.5, 0.9),
+            },
             width: 1.0,
             radius: 4.0.into(),
         },
