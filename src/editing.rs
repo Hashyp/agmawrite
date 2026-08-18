@@ -1,4 +1,7 @@
-//! Write-mode editing helpers: what Enter means on a list line.
+//! Write-mode editing helpers: what Enter means on a list line, and
+//! finding text in the document.
+
+use unicode_segmentation::UnicodeSegmentation;
 
 /// What pressing Enter does, based on the line before the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,10 +68,63 @@ pub fn continuation(before: &str) -> Continuation {
     }
 }
 
+/// The byte ranges of all occurrences of `query` in `text`,
+/// ASCII-case-insensitively. (Non-ASCII bytes compare exactly, which keeps
+/// matching byte-index exact.)
+fn byte_matches(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let haystack = text.as_bytes();
+    let needle = query.as_bytes();
+    let mut ranges = Vec::new();
+
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return ranges;
+    }
+
+    for start in 0..=haystack.len() - needle.len() {
+        let end = start + needle.len();
+
+        if haystack[start..end].eq_ignore_ascii_case(needle)
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+        {
+            ranges.push(start..end);
+        }
+    }
+
+    ranges
+}
+
+/// All occurrences of `query` in `text` as grapheme column ranges — the
+/// units the preview caret, selection, and match highlighting use.
+pub fn matches_in(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    byte_matches(text, query)
+        .into_iter()
+        .map(|range| {
+            let start = text[..range.start].graphemes(true).count();
+            let end = start + text[range].graphemes(true).count();
+            start..end
+        })
+        .collect()
+}
+
+/// The first occurrence of `query` in `text` as `(line, start column, end
+/// column)`, the columns counted in characters — the units the source
+/// editor's cursor uses. Single-line queries only match within a line.
+pub fn first_match(text: &str, query: &str) -> Option<(usize, usize, usize)> {
+    let range = byte_matches(text, query).into_iter().next()?;
+
+    let line = text[..range.start].matches('\n').count();
+    let line_start = text[..range.start].rfind('\n').map_or(0, |index| index + 1);
+    let start_column = text[line_start..range.start].chars().count();
+    let end_column = start_column + text[range].chars().count();
+
+    Some((line, start_column, end_column))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::continuation;
     use super::Continuation::{Break, Continue, Outdent};
+    use super::{continuation, first_match, matches_in};
 
     #[test]
     fn continues_bullets_with_their_indent() {
@@ -109,5 +165,25 @@ mod tests {
         // Not markers without the trailing space.
         assert_eq!(continuation("-tight"), Break);
         assert_eq!(continuation("1.versioned"), Break);
+    }
+
+    #[test]
+    fn finds_all_matches_as_grapheme_ranges() {
+        assert_eq!(matches_in("one two ONE", "one"), vec![0..3, 8..11]);
+        assert_eq!(matches_in("one two", "three").len(), 0);
+        assert_eq!(matches_in("one", "").len(), 0);
+        assert_eq!(matches_in("one", "one two").len(), 0);
+        // ASCII case folds, multibyte characters compare exactly — their
+        // bytes never false-match ASCII needle bytes.
+        assert_eq!(matches_in("naïve NAÏVE", "naïve"), vec![0..5]);
+        assert_eq!(matches_in("ONE one", "one"), vec![0..3, 4..7]);
+    }
+
+    #[test]
+    fn finds_the_first_match_as_char_positions() {
+        assert_eq!(first_match("hello world", "wor"), Some((0, 6, 9)));
+        assert_eq!(first_match("one\ntwo\nthree", "t"), Some((1, 0, 1)));
+        assert_eq!(first_match("nothing here", "zzz"), None);
+        assert_eq!(first_match("abc", ""), None);
     }
 }

@@ -87,6 +87,11 @@ impl PreviewElement {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    /// The rendered text of the element, without markdown markup.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 /// The parsed preview elements, owned as one list with one numbering.

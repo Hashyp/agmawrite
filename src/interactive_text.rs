@@ -14,6 +14,10 @@ const PARAGRAPH_PADDING: f32 = 4.0;
 /// preview text stays clearly readable on top of it.
 const VISUAL_SELECTION_COLOR: Color = Color::from_rgba(0.25, 0.5, 1.0, 0.4);
 
+/// The background of a find-popup match: translucent amber, distinct from
+/// the selection blue.
+const FIND_MATCH_COLOR: Color = Color::from_rgba(0.95, 0.75, 0.25, 0.4);
+
 /// Marks an element carrying a saved comment: a muted amber bar on the left
 /// edge, subtle but unmistakable.
 const COMMENTED_BAR_COLOR: Color = Color::from_rgba(0.85, 0.65, 0.3, 0.75);
@@ -35,6 +39,7 @@ pub fn paragraph<'a, M: 'a>(
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
+    matches: Vec<std::ops::Range<usize>>,
 ) -> Element<'a, M> {
     let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
 
@@ -45,6 +50,7 @@ pub fn paragraph<'a, M: 'a>(
         id,
         commented,
         active_comment,
+        matches,
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.font,
@@ -62,6 +68,9 @@ struct InteractiveText<M> {
     commented: bool,
     /// Whether this element belongs to the currently active comment.
     active_comment: bool,
+    /// The grapheme column ranges of find-popup matches within this
+    /// element.
+    matches: Vec<std::ops::Range<usize>>,
     size: Pixels,
     line_height: iced::advanced::text::LineHeight,
     font: Font,
@@ -207,6 +216,22 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
         let line_height = self.line_height.to_absolute(self.size).0;
         let width = state.paragraph.min_bounds().width;
+
+        // Find matches paint under the selection, so a selected match stays
+        // visibly selected.
+        for range in &self.matches {
+            for bounds in
+                selection_rects(&state.paragraph, &text, range.clone(), width, line_height)
+            {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: bounds + translation,
+                        ..Default::default()
+                    },
+                    FIND_MATCH_COLOR,
+                );
+            }
+        }
 
         if let Some(selection) = self.selection.clone() {
             for bounds in selection_rects(&state.paragraph, &text, selection, width, line_height) {

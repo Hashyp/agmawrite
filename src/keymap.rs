@@ -24,6 +24,8 @@ pub enum Mode {
     Visual,
     /// The note popup is open over the preview.
     Note,
+    /// The find popup is open.
+    Find,
 }
 
 /// The mode stack without the note popup: write, or preview with an
@@ -45,6 +47,7 @@ enum Layer {
 pub struct Keymap {
     layer: Layer,
     note_open: bool,
+    find_open: bool,
     preview_only: bool,
     /// Whether a lone `g` is awaiting its second key of a `gg`/`ge`
     /// sequence.
@@ -62,15 +65,18 @@ impl Keymap {
                 Layer::Write
             },
             note_open: false,
+            find_open: false,
             preview_only,
             pending_g: false,
         }
     }
 
-    /// The current mode, note popup included — the badge reads this.
+    /// The current mode, popups included — the badge reads this.
     pub fn mode(&self) -> Mode {
         if self.note_open {
             Mode::Note
+        } else if self.find_open {
+            Mode::Find
         } else {
             match self.layer {
                 Layer::Write => Mode::Write,
@@ -95,6 +101,11 @@ impl Keymap {
     /// Whether the note popup is open.
     pub fn note_open(&self) -> bool {
         self.note_open
+    }
+
+    /// Whether the find popup is open.
+    pub fn find_open(&self) -> bool {
+        self.find_open
     }
 
     /// Whether visual mode is active — motions extend the selection.
@@ -128,6 +139,18 @@ impl Keymap {
                 }
                 keyboard::Key::Character("s" | "S") if modifiers.control() && !repeat => {
                     Some(Message::SaveNote)
+                }
+                _ => None,
+            };
+        }
+
+        // The find popup swallows plain keys for its query field; only
+        // Escape closes it. Ctrl combinations still reach the global
+        // shortcuts below.
+        if self.find_open && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+            return match modified_key.as_ref() {
+                keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
+                    Some(Message::CloseFind)
                 }
                 _ => None,
             };
@@ -194,6 +217,8 @@ impl Keymap {
                 }
                 // Show or hide the comments sidebar.
                 keyboard::Key::Character("b" | "B") => Some(Message::ToggleSidebar),
+                // Find in the document, in any mode.
+                keyboard::Key::Character("f" | "F") => Some(Message::OpenFind),
                 // Browse the saved comments in the preview.
                 keyboard::Key::Character("n" | "N") if self.preview() => Some(Message::NextComment),
                 _ => None,
@@ -214,6 +239,7 @@ impl Keymap {
         match message {
             Message::FileLoaded(Some(_)) => {
                 self.note_open = false;
+                self.find_open = false;
 
                 if matches!(self.layer, Layer::Visual) {
                     self.layer = Layer::View;
@@ -236,6 +262,8 @@ impl Keymap {
             }
             Message::OpenNotePopup => self.note_open = true,
             Message::CloseNotePopup | Message::SaveNote => self.note_open = false,
+            Message::OpenFind => self.find_open = true,
+            Message::CloseFind => self.find_open = false,
             Message::PreviewCancel => {
                 if matches!(self.layer, Layer::Visual) {
                     self.layer = Layer::View;
@@ -467,6 +495,38 @@ mod tests {
         assert!(keymap
             .handle(key_press_with("o", Modifiers::CTRL, false))
             .is_none());
+    }
+
+    /// Ctrl+F opens the find popup in any mode; while it is open, plain
+    /// keys type into its query field and only Escape closes it.
+    #[test]
+    fn find_popup_swallows_plain_keys_but_not_ctrl() {
+        for mut keymap in [Keymap::new(false), viewing()] {
+            assert!(matches!(
+                keymap.handle(key_press_with("f", Modifiers::CTRL, false)),
+                Some(Message::OpenFind)
+            ));
+            keymap.note(&Message::OpenFind);
+            assert_eq!(keymap.mode(), Mode::Find);
+
+            // Typing reaches the query field, motions included.
+            for key in ["j", "k", "g", "c", "x"] {
+                assert!(
+                    keymap.handle(key_press(key, false)).is_none(),
+                    "'{key}' should be swallowed by the find popup"
+                );
+            }
+
+            // Global shortcuts still work.
+            assert!(matches!(
+                keymap.handle(key_press_with("b", Modifiers::CTRL, false)),
+                Some(Message::ToggleSidebar)
+            ));
+
+            assert!(matches!(keymap.handle(escape()), Some(Message::CloseFind)));
+            keymap.note(&Message::CloseFind);
+            assert!(keymap.mode() != Mode::Find);
+        }
     }
 
     /// Ctrl+B toggles the comments sidebar in any mode.

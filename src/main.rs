@@ -14,7 +14,7 @@ use iced::advanced::widget::Operation;
 use iced::widget::{
     button, canvas, column, container, markdown, mouse_area, operation::focus,
     operation::focus_next, operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack,
-    text, text_editor, tooltip, Id, Space,
+    text, text_editor, text_input, tooltip, Id, Space,
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
@@ -25,6 +25,8 @@ const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
+/// The id of the find popup's query field, focused when the popup opens.
+const FIND_INPUT_ID: &str = "find-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
 /// canvas size.
 const ICON_DESIGN_SIZE: f32 = 16.0;
@@ -61,6 +63,8 @@ struct Editor {
     /// Manual override for the comments sidebar's visibility (`Ctrl+B`):
     /// `None` follows the default — shown once there are comments.
     sidebar_override: Option<bool>,
+    /// The find popup's query (`Ctrl+F`).
+    find_query: String,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +95,9 @@ enum Message {
     AddGlobalComment,
     NextComment,
     ToggleSidebar,
+    OpenFind,
+    CloseFind,
+    FindQueryChanged(String),
 }
 
 struct OpenFileIcon;
@@ -497,12 +504,127 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::ToggleSidebar => {
             editor.sidebar_override = Some(!sidebar_shown(editor));
         }
+        Message::OpenFind => {
+            return focus(Id::new(FIND_INPUT_ID));
+        }
+        Message::CloseFind => {
+            // Give the source editor its focus back so its caret resumes.
+            if !editor.keymap.preview() {
+                return focus(Id::new(SOURCE_EDITOR_ID));
+            }
+        }
+        Message::FindQueryChanged(query) => {
+            editor.find_query = query;
+
+            return find_select_first_match(editor);
+        }
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
     }
 
     Task::none()
+}
+
+/// Selects the first match of the find query, live as it is typed: in
+/// write mode the match becomes the editor's selection, in the preview the
+/// caret jumps to the match's element and the matches paint as highlights.
+fn find_select_first_match(editor: &mut Editor) -> Task<Message> {
+    let query = editor.find_query.clone();
+
+    if query.is_empty() {
+        return Task::none();
+    }
+
+    if editor.keymap.preview() {
+        let position = editor
+            .preview_elements
+            .elements()
+            .iter()
+            .enumerate()
+            .find_map(|(index, element)| {
+                editing::matches_in(element.text(), &query)
+                    .first()
+                    .map(|range| CaretPosition {
+                        element: index,
+                        column: range.start,
+                    })
+            });
+
+        if let Some(position) = position {
+            editor.caret.place(position);
+
+            return reveal_preview_caret();
+        }
+
+        return Task::none();
+    }
+
+    let source = editor.content.text();
+
+    if let Some((line, start, end)) = editing::first_match(&source, &query) {
+        editor.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line,
+                column: start,
+            },
+            selection: Some(text_editor::Position { line, column: end }),
+        });
+    }
+
+    Task::none()
+}
+
+/// The find popup: a small card in the top right corner with the query
+/// field and a live match count.
+fn find_popup(editor: &Editor) -> Element<'_, Message> {
+    let match_count = (!editor.find_query.is_empty()).then(|| {
+        if editor.keymap.preview() {
+            editor
+                .preview_elements
+                .elements()
+                .iter()
+                .map(|element| editing::matches_in(element.text(), &editor.find_query).len())
+                .sum()
+        } else {
+            editing::matches_in(&editor.content.text(), &editor.find_query).len()
+        }
+    });
+
+    let mut card_row = row![text_input("Search…", &editor.find_query)
+        .id(Id::new(FIND_INPUT_ID))
+        .on_input(Message::FindQueryChanged)
+        .font(EDITOR_FONT)
+        .size(14)
+        .padding(6)
+        .width(Length::Fixed(220.0))]
+    .spacing(8)
+    .align_y(alignment::Vertical::Center);
+
+    if let Some(count) = match_count {
+        card_row = card_row.push(
+            text(if count == 0 {
+                "no match".to_owned()
+            } else {
+                count.to_string()
+            })
+            .font(EDITOR_FONT)
+            .size(12)
+            .color(if count == 0 {
+                Color::from_rgb(0.9, 0.45, 0.4)
+            } else {
+                Color::from_rgb(0.5, 0.5, 0.5)
+            }),
+        );
+    }
+
+    container(container(card_row).padding(8).style(note_card_style))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .align_y(alignment::Vertical::Top)
+        .padding(16)
+        .into()
 }
 
 /// Whether the comments sidebar is showing: the manual `Ctrl+B` override
@@ -688,6 +810,8 @@ struct PreviewViewer<'a> {
     visual: Option<(CaretPosition, CaretPosition)>,
     /// Saved comments, to know which elements carry one.
     comments: &'a Comments,
+    /// The find popup's query; its matches paint as highlights.
+    find_query: &'a str,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -732,7 +856,16 @@ impl<'a> PreviewViewer<'a> {
         // if they ever disagree the item renders plainly, without caret,
         // selection, or comment mark.
         let Some((element, preview_element)) = self.claims.claim() else {
-            return interactive_text::paragraph(settings, text, None, None, None, false, false);
+            return interactive_text::paragraph(
+                settings,
+                text,
+                None,
+                None,
+                None,
+                false,
+                false,
+                Vec::new(),
+            );
         };
 
         let focused = self.focused_element == element;
@@ -742,6 +875,11 @@ impl<'a> PreviewViewer<'a> {
         let mark = self.comments.mark_for(element);
         let commented = matches!(mark, Mark::Commented | Mark::Active);
         let active_comment = mark == Mark::Active;
+        let search_matches = if self.find_query.is_empty() {
+            Vec::new()
+        } else {
+            editing::matches_in(preview_element.text(), self.find_query)
+        };
 
         interactive_text::paragraph(
             settings,
@@ -751,6 +889,7 @@ impl<'a> PreviewViewer<'a> {
             focused.then(|| Id::new(PREVIEW_CARET_ID)),
             commented,
             active_comment,
+            search_matches,
         )
     }
 }
@@ -770,6 +909,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                     caret_column: position.column,
                     visual,
                     comments: &editor.comments,
+                    find_query: &editor.find_query,
                 },
             ))
             .width(Length::Fill)
@@ -903,7 +1043,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     // The side margins frame the whole window — 5% left and right whether
     // or not the sidebar is showing.
-    container(
+    let content: Element<'_, Message> = container(
         row![
             Space::new()
                 .width(Length::FillPortion(5))
@@ -921,7 +1061,14 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(background_style)
-    .into()
+    .into();
+
+    // The find popup floats in the top right corner, in any mode.
+    if editor.keymap.find_open() {
+        stack![content, find_popup(editor)].into()
+    } else {
+        content
+    }
 }
 
 /// The comments sidebar: a full-height panel with a scrollable list of
@@ -1154,6 +1301,7 @@ fn mode_badge(editor: &Editor) -> Element<'_, Message> {
     let (label, color) = match mode {
         Mode::Visual => ("VISUAL", Color::from_rgb(0.4, 0.65, 1.0)),
         Mode::Note => ("NOTE", Color::from_rgb(0.9, 0.7, 0.35)),
+        Mode::Find => ("FIND", Color::from_rgb(0.95, 0.6, 0.35)),
         Mode::View => ("VIEW", Color::from_rgb(0.6, 0.6, 0.6)),
         Mode::Write => ("WRITE", Color::from_rgb(0.6, 0.6, 0.6)),
     };
@@ -1359,6 +1507,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         note_text: text_editor::Content::new(),
         comments: Comments::new(),
         sidebar_override: None,
+        find_query: String::new(),
     };
 
     let task = if args.preview {
@@ -1426,6 +1575,7 @@ mod tests {
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
             sidebar_override: None,
+            find_query: String::new(),
         }
     }
 
@@ -1483,6 +1633,40 @@ mod tests {
         assert_eq!(editor.keymap.mode(), Mode::View);
     }
 
+    /// Typing in the find popup selects the first match right away: as an
+    /// editor selection in write mode, and as a caret jump in the preview.
+    #[test]
+    fn find_selects_the_first_match_as_it_is_typed() {
+        use iced::widget::text_editor::Position;
+
+        let mut editor = editor_at(
+            "# Title\n\nbody text\n\nmore text",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.keymap.note(&Message::OpenFind);
+        assert!(editor.keymap.find_open());
+
+        // In the preview, the caret jumps to the match's element.
+        let _ = update(&mut editor, Message::FindQueryChanged("more".to_owned()));
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 2,
+                column: 0
+            }
+        );
+
+        // In write mode, the match becomes the editor's selection.
+        editor.keymap.note(&Message::TogglePreview);
+        let _ = update(&mut editor, Message::FindQueryChanged("text".to_owned()));
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 2, column: 5 });
+        assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
+    }
+
     /// Enter on a list line continues the list; Enter on an empty item
     /// removes the marker and ends it.
     #[test]
@@ -1500,6 +1684,7 @@ mod tests {
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
             sidebar_override: None,
+            find_query: String::new(),
         };
         editor.content.move_to(Cursor {
             position: Position { line: 0, column: 6 },
