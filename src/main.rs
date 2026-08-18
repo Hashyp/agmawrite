@@ -1,4 +1,5 @@
 mod comments;
+mod editing;
 mod highlight;
 mod interactive_text;
 mod keymap;
@@ -172,7 +173,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     editor.keymap.note(&message);
 
     match message {
-        Message::Edit(action) => editor.content.perform(action),
+        Message::Edit(action) => return edit_source(editor, action),
         Message::OpenFile => return Task::perform(open_file(), Message::FileLoaded),
         Message::FileLoaded(Some(contents)) => {
             editor.preview_elements = ElementMap::parse(&contents);
@@ -271,6 +272,47 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
+    }
+
+    Task::none()
+}
+
+/// Applies a source edit action. Pressing Enter on a list line continues
+/// the list — the marker, indented like the current item, starts the new
+/// line — and pressing it on an empty item removes the marker and ends
+/// the list.
+fn edit_source(editor: &mut Editor, action: text_editor::Action) -> Task<Message> {
+    use text_editor::{Action, Edit};
+
+    if !matches!(action, Action::Edit(Edit::Enter)) {
+        editor.content.perform(action);
+        return Task::none();
+    }
+
+    let cursor = editor.content.cursor().position;
+    let before = editor.content.line(cursor.line).map(|line| {
+        line.text
+            .char_indices()
+            .nth(cursor.column)
+            .map_or(line.text.as_ref(), |(index, _)| &line.text[..index])
+            .to_owned()
+    });
+
+    match before.as_deref().map(editing::continuation) {
+        Some(editing::Continuation::Continue(prefix)) => {
+            editor.content.perform(action);
+            editor
+                .content
+                .perform(Action::Edit(Edit::Paste(std::sync::Arc::new(prefix))));
+        }
+        Some(editing::Continuation::Outdent(count)) => {
+            for _ in 0..count {
+                editor.content.perform(Action::Edit(Edit::Backspace));
+            }
+
+            editor.content.perform(action);
+        }
+        _ => editor.content.perform(action),
     }
 
     Task::none()
@@ -1149,5 +1191,42 @@ mod tests {
 
         assert!(editor.comments.is_empty());
         assert_eq!(editor.keymap.mode(), Mode::View);
+    }
+
+    /// Enter on a list line continues the list; Enter on an empty item
+    /// removes the marker and ends it.
+    #[test]
+    fn enter_continues_lists() {
+        use iced::widget::text_editor::{Action, Cursor, Edit, Position};
+
+        let mut editor = Editor {
+            content: iced::widget::text_editor::Content::with_text("- item"),
+            markdown: iced::widget::markdown::Content::parse("- item"),
+            keymap: Keymap::new(false),
+            caret: Caret::new(),
+            preview_elements: ElementMap::parse("- item"),
+            visual_anchor: None,
+            note_text: iced::widget::text_editor::Content::new(),
+            comments: Comments::new(),
+        };
+        editor.content.move_to(Cursor {
+            position: Position { line: 0, column: 6 },
+            selection: None,
+        });
+
+        update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
+
+        assert_eq!(editor.content.text(), "- item\n- ");
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 1, column: 2 });
+
+        // The new item is empty; Enter removes the marker and ends the list.
+        update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
+
+        assert_eq!(editor.content.text(), "- item\n\n");
+        assert_eq!(
+            editor.content.cursor().position,
+            Position { line: 2, column: 0 }
+        );
     }
 }
