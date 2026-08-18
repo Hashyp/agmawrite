@@ -68,6 +68,7 @@ enum Message {
     SaveFile,
     SavePathChosen(Option<std::path::PathBuf>),
     FileSaved(Result<std::path::PathBuf, String>),
+    FileChangedExternally,
     TogglePreview,
     LinkClicked(markdown::Uri),
     MovePreviewCursor(Motion),
@@ -259,9 +260,84 @@ async fn pick_save_path() -> Option<std::path::PathBuf> {
 }
 
 fn subscription(editor: &Editor) -> Subscription<Message> {
-    keyboard::listen()
+    let keys = keyboard::listen()
         .with(editor.keymap)
-        .filter_map(|(keymap, event)| keymap.handle(event))
+        .filter_map(|(keymap, event)| keymap.handle(event));
+
+    match &editor.path {
+        Some(path) => Subscription::batch([keys, watch_file(path)]),
+        None => keys,
+    }
+}
+
+/// Watches the opened file's directory and reloads it when it changes on
+/// disk — in write mode and preview alike.
+fn watch_file(path: &std::path::Path) -> Subscription<Message> {
+    Subscription::run_with(path.to_path_buf(), |path| {
+        let path = path.clone();
+
+        iced::stream::channel(1, move |sender| async move {
+            spawn_watcher(path, sender);
+            // The events arrive on the watcher thread; this runner only
+            // keeps the stream alive.
+            std::future::pending::<()>().await;
+        })
+    })
+}
+
+/// Spawns the filesystem watcher thread for `path`, forwarding one
+/// [`Message::FileChangedExternally`] per burst of events touching the
+/// file. Editors that save by rename-over are caught by watching the
+/// directory rather than the file itself.
+fn spawn_watcher(
+    path: std::path::PathBuf,
+    mut sender: iced::futures::channel::mpsc::Sender<Message>,
+) {
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+
+        let Some(directory) = path.parent().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(tx) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                eprintln!("agmawrite: cannot watch '{}': {error}", path.display());
+                return;
+            }
+        };
+
+        if let Err(error) = watcher.watch(&directory, RecursiveMode::NonRecursive) {
+            eprintln!("agmawrite: cannot watch '{}': {error}", directory.display());
+            return;
+        }
+
+        while let Ok(event) = rx.recv() {
+            let Ok(event) = event else { continue };
+
+            let touches = event.paths.iter().any(|event_path| {
+                event_path == &path
+                    || event_path
+                        .canonicalize()
+                        .is_ok_and(|canonicalized| canonicalized == canonical)
+            });
+
+            if !touches {
+                continue;
+            }
+
+            // A save often produces a burst of events; collapse it into a
+            // single reload.
+            while rx.try_recv().is_ok() {}
+
+            if sender.try_send(Message::FileChangedExternally).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
@@ -305,6 +381,28 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::FileSaved(Ok(_path)) => {}
         Message::FileSaved(Err(error)) => {
             eprintln!("agmawrite: {error}");
+        }
+        Message::FileChangedExternally => {
+            let Some(path) = &editor.path else {
+                return Task::none();
+            };
+
+            // Our own saves fire the watcher too; reload only when the
+            // contents actually differ.
+            let Ok(contents) = std::fs::read_to_string(path) else {
+                return Task::none();
+            };
+
+            if contents != editor.content.text() {
+                editor.content = text_editor::Content::with_text(&contents);
+                editor.markdown = markdown::Content::parse(&contents);
+                editor.preview_elements = ElementMap::parse(&contents);
+                editor.caret = Caret::new();
+
+                if editor.keymap.preview() {
+                    return reveal_preview_caret();
+                }
+            }
         }
         Message::TogglePreview => {
             if !editor.keymap.preview_only() {
