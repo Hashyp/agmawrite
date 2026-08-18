@@ -1188,6 +1188,9 @@ fn view(editor: &Editor) -> Element<'_, Message> {
             .padding([0, 8]),
         )
         .id(Id::new(PREVIEW_SCROLL_ID))
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::hidden(),
+        ))
         .height(Length::Fill)
         .into()
     } else {
@@ -1256,10 +1259,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 .width(Length::FillPortion(1))
                 .height(Length::Fill),
             container(editing_area)
-                .width(Length::FillPortion(8))
-                .height(Length::Fill),
-            Space::new()
-                .width(Length::FillPortion(1))
+                .width(Length::FillPortion(9))
                 .height(Length::Fill),
         ]
         .width(Length::Fill)
@@ -1306,7 +1306,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         container(
             row![
                 container(main)
-                    .width(Length::FillPortion(8))
+                    .width(Length::FillPortion(9))
                     .height(Length::Fill),
                 container(comments_sidebar(editor))
                     .width(Length::FillPortion(2))
@@ -1377,17 +1377,29 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
             }),
             scrollable(column(cards).spacing(8).width(Length::Fill))
                 .width(Length::Fill)
-                .height(Length::Fill),
+                .height(Length::Fill)
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::hidden(),
+                )),
             container(
-                text_editor(&editor.publish_text)
-                    .on_action(Message::EditPublish)
-                    .font(EDITOR_FONT)
-                    .size(14)
-                    .height(Length::Fixed(72.0))
-                    .padding(6)
-                    .style(editor_style),
+                column![
+                    text("Write a comment…")
+                        .font(EDITOR_FONT)
+                        .size(11)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    text_editor(&editor.publish_text)
+                        .on_action(Message::EditPublish)
+                        .font(EDITOR_FONT)
+                        .size(14)
+                        .height(Length::Fixed(72.0))
+                        .padding(6)
+                        .style(publish_editor_style),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
             )
             .width(Length::Fill)
+            .padding(6)
             .style(publish_field_style),
             button(
                 text("Publish")
@@ -1440,17 +1452,29 @@ fn comment_card_style(_theme: &Theme) -> container::Style {
     }
 }
 
-/// The publish text field stands out with a slightly lighter surface than
-/// the comment cards and a clearly visible border.
+/// The publish text field stands out with a lighter surface than the
+/// comment cards and a clearly visible border.
 fn publish_field_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        background: Some(Background::Color(Color::from_rgb(0.17, 0.17, 0.17))),
         border: Border {
-            color: Color::from_rgb(0.4, 0.4, 0.4),
-            width: 1.0,
+            color: Color::from_rgb(0.55, 0.55, 0.55),
+            width: 1.5,
             radius: 4.0.into(),
         },
         ..Default::default()
+    }
+}
+
+/// The editor inside the publish field keeps its own light surface so the
+/// two nested boxes read as one input control.
+fn publish_editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Background::Color(Color::from_rgb(0.22, 0.22, 0.22)),
+        border: Border::default(),
+        placeholder: Color::WHITE,
+        value: Color::WHITE,
+        selection: Color::from_rgb(0.35, 0.35, 0.35),
     }
 }
 
