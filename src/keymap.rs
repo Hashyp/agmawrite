@@ -537,7 +537,7 @@ mod tests {
     /// popup open it saves the note instead.
     #[test]
     fn ctrl_s_saves_the_file_unless_a_note_is_open() {
-        for mut keymap in [Keymap::new(false), viewing()] {
+        for keymap in [Keymap::new(false), viewing()] {
             assert!(matches!(
                 keymap.handle(key_press_with("s", Modifiers::CTRL, false)),
                 Some(Message::SaveFile)

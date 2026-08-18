@@ -330,6 +330,13 @@ fn spawn_watcher(
         while let Ok(event) = rx.recv() {
             let Ok(event) = event else { continue };
 
+            // Reading the file below produces Access events on Linux. If
+            // those events trigger another read, the watcher and editor
+            // form a feedback loop that consumes an entire CPU core.
+            if !may_change_file(&event.kind) {
+                continue;
+            }
+
             let touches = event.paths.iter().any(|event_path| {
                 event_path == &path
                     || event_path
@@ -345,11 +352,55 @@ fn spawn_watcher(
             // single reload.
             while rx.try_recv().is_ok() {}
 
-            if sender.try_send(Message::FileChangedExternally).is_err() {
+            if !forward_file_change(&mut sender) {
                 break;
             }
         }
     });
+}
+
+fn may_change_file(kind: &notify::EventKind) -> bool {
+    !kind.is_access()
+}
+
+/// Queues a reload, treating a full one-item channel as an already queued
+/// reload rather than as a disconnected watcher.
+fn forward_file_change(sender: &mut iced::futures::channel::mpsc::Sender<Message>) -> bool {
+    match sender.try_send(Message::FileChangedExternally) {
+        Ok(()) => true,
+        Err(error) => error.is_full(),
+    }
+}
+
+/// Replaces source text while keeping its cursor (and selection) at the
+/// nearest valid position in the externally changed document.
+fn replace_source_text(editor: &mut Editor, contents: &str) {
+    let cursor = editor.content.cursor();
+    let mut content = text_editor::Content::with_text(contents);
+    content.move_to(text_editor::Cursor {
+        position: clamp_editor_position(&content, cursor.position),
+        selection: cursor
+            .selection
+            .map(|position| clamp_editor_position(&content, position)),
+    });
+    editor.content = content;
+}
+
+fn clamp_editor_position(
+    content: &text_editor::Content,
+    position: text_editor::Position,
+) -> text_editor::Position {
+    let line = position.line.min(content.line_count().saturating_sub(1));
+    let text = content.line(line).map(|line| line.text).unwrap_or_default();
+    let mut column = position.column.min(text.len());
+
+    // iced's editor columns are UTF-8 byte offsets. An external edit can
+    // put the old offset in the middle of a new multi-byte character.
+    while !text.is_char_boundary(column) {
+        column -= 1;
+    }
+
+    text_editor::Position { line, column }
 }
 
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
@@ -406,7 +457,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             };
 
             if contents != editor.content.text() {
-                editor.content = text_editor::Content::with_text(&contents);
+                replace_source_text(editor, &contents);
                 editor.markdown = markdown::Content::parse(&contents);
                 editor.preview_elements = ElementMap::parse(&contents);
                 editor.caret = Caret::new();
@@ -1555,7 +1606,9 @@ mod tests {
     use super::comments::{Comments, Mark};
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
-    use super::{update, Editor, Message};
+    use super::{
+        forward_file_change, may_change_file, replace_source_text, update, Editor, Message,
+    };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -1665,6 +1718,63 @@ mod tests {
         let cursor = editor.content.cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
         assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
+    }
+
+    /// Opening the watched file to reload it must not trigger another
+    /// reload; mutations still do.
+    #[test]
+    fn file_watcher_ignores_access_events() {
+        use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
+        use notify::EventKind;
+
+        assert!(!may_change_file(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read,
+        ))));
+        assert!(may_change_file(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content,
+        ))));
+    }
+
+    /// A queued file-change message already represents the latest disk
+    /// state. A full channel must therefore coalesce, not kill the watcher.
+    #[test]
+    fn a_full_file_watcher_channel_stays_connected() {
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(0);
+
+        assert!(forward_file_change(&mut sender));
+        assert!(forward_file_change(&mut sender));
+
+        drop(receiver);
+        assert!(!forward_file_change(&mut sender));
+    }
+
+    /// Reloading external text keeps the write cursor instead of moving it
+    /// to the beginning, clamping positions when the new text is shorter.
+    #[test]
+    fn external_text_replacement_preserves_the_source_cursor() {
+        use iced::widget::text_editor::{Cursor, Position};
+
+        let mut editor = editor_at(
+            "first line\nsecond line\nthird line",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.content.move_to(Cursor {
+            position: Position { line: 1, column: 6 },
+            selection: Some(Position { line: 2, column: 5 }),
+        });
+
+        replace_source_text(&mut editor, "changed\nstill here\nlast");
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 1, column: 6 });
+        assert_eq!(cursor.selection, Some(Position { line: 2, column: 4 }));
+
+        replace_source_text(&mut editor, "short");
+        let cursor = editor.content.cursor();
+        assert_eq!(cursor.position, Position { line: 0, column: 5 });
+        assert_eq!(cursor.selection, Some(Position { line: 0, column: 4 }));
     }
 
     /// Enter on a list line continues the list; Enter on an empty item
