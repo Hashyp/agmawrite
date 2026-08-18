@@ -650,7 +650,7 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
                         } else {
                             Color::from_rgb(0.45, 0.45, 0.45)
                         }),
-                    text(card.text.to_owned())
+                    text(card.text)
                         .font(EDITOR_FONT)
                         .size(13)
                         .color(Color::WHITE),

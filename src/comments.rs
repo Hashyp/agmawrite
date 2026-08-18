@@ -14,6 +14,11 @@ use crate::preview::{CaretPosition, PreviewElement};
 /// quotes before cutting it off.
 const COMMENT_QUOTE_MAX_CHARS: usize = 60;
 
+/// How many characters of the comment text itself a card shows before
+/// cutting it off, so every card keeps the same bounded height in the
+/// sidebar and no comment dominates the list.
+const COMMENT_TEXT_MAX_CHARS: usize = 100;
+
 /// Whether a preview element carries a comment, and which kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
@@ -32,8 +37,10 @@ struct Comment {
 
 /// A comment as the sidebar renders it: the note text, a quote of the
 /// anchored element's source, and whether it is the active comment.
-pub struct CommentCard<'a> {
-    pub text: &'a str,
+pub struct CommentCard {
+    /// The note text, condensed like the quote: collapsed to one line and
+    /// cut off, so every card occupies the same vertical space.
+    pub text: String,
     pub quote: String,
     pub active: bool,
 }
@@ -117,12 +124,12 @@ impl Comments {
     }
 
     /// The comments as sidebar cards, oldest first.
-    pub fn cards<'a>(&'a self, source: &str, elements: &[PreviewElement]) -> Vec<CommentCard<'a>> {
+    pub fn cards(&self, source: &str, elements: &[PreviewElement]) -> Vec<CommentCard> {
         self.comments
             .iter()
             .enumerate()
             .map(|(index, comment)| CommentCard {
-                text: &comment.text,
+                text: condensed(&comment.text, COMMENT_TEXT_MAX_CHARS),
                 quote: quote(
                     source,
                     elements,
@@ -150,18 +157,22 @@ impl Default for Comments {
     }
 }
 
-/// Returns the Markdown source of the preview element at `index`, trimmed
-/// for a comment card: collapsed to one line and cut off after `max_chars`
-/// characters with an ellipsis.
+/// Returns the Markdown source of the preview element at `index`,
+/// condensed for a comment card.
 fn quote(source: &str, elements: &[PreviewElement], index: usize, max_chars: usize) -> String {
     let Some(element) = elements.get(index) else {
         return String::new();
     };
 
-    let source = source[element.source()].trim();
-    let mut collapsed = String::with_capacity(source.len());
+    condensed(source[element.source()].trim(), max_chars)
+}
 
-    for word in source.split_whitespace() {
+/// Condenses text for a comment card: collapses it to one line and cuts it
+/// off after `max_chars` characters with an ellipsis.
+fn condensed(text: &str, max_chars: usize) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+
+    for word in text.split_whitespace() {
         if !collapsed.is_empty() {
             collapsed.push(' ');
         }
@@ -262,5 +273,26 @@ mod tests {
 
         let cards = comments.cards(&long, elements.elements());
         assert_eq!(cards[0].quote, format!("# {}…", "a".repeat(58)));
+    }
+
+    /// Cards condense the comment text like the quote — one line, cut off
+    /// with an ellipsis — so every card keeps the same bounded height.
+    #[test]
+    fn cards_trim_comment_text_to_a_uniform_length() {
+        let mut comments = Comments::new();
+        comments.save("short", at(0));
+        comments.save(
+            &format!("  {}  \n{}", "wordy ".repeat(40), "more\nlines"),
+            at(1),
+        );
+
+        let cards = comments.cards("", &[]);
+
+        assert_eq!(cards[0].text, "short");
+        assert_eq!(cards[0].text.chars().count(), 5);
+        // Collapsed to one line and cut off at the limit with an ellipsis.
+        assert!(cards[1].text.ends_with('…'));
+        assert_eq!(cards[1].text.chars().count(), 101);
+        assert!(!cards[1].text.contains('\n'));
     }
 }
