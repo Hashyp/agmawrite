@@ -25,6 +25,13 @@ const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
+/// The design space the icon glyphs are drawn in, before scaling to the
+/// canvas size.
+const ICON_DESIGN_SIZE: f32 = 16.0;
+/// The bottom-bar icon glyph size: 150% of the original 16px.
+const ICON_SIZE: f32 = 24.0;
+/// The bottom-bar icon button size: 150% of the original 28px.
+const ICON_BUTTON_SIZE: f32 = 42.0;
 /// The id of the source text editor, refocused when switching back to
 /// write mode so the cursor reappears where it was left.
 const SOURCE_EDITOR_ID: &str = "source-editor";
@@ -89,6 +96,9 @@ impl<Message> canvas::Program<Message> for OpenFileIcon {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
+        frame.scale(bounds.width / ICON_DESIGN_SIZE);
+
         let folder = canvas::Path::new(|path| {
             path.move_to(Point::new(2.5, 13.0));
             path.line_to(Point::new(2.5, 3.5));
@@ -126,6 +136,8 @@ impl<Message> canvas::Program<Message> for PreviewIcon {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
+        frame.scale(bounds.width / ICON_DESIGN_SIZE);
 
         let eye = canvas::Path::new(|path| {
             path.move_to(Point::new(1.5, 8.0));
@@ -570,12 +582,12 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let open_button = tooltip(
         button(
             canvas(OpenFileIcon)
-                .width(Length::Fixed(16.0))
-                .height(Length::Fixed(16.0)),
+                .width(Length::Fixed(ICON_SIZE))
+                .height(Length::Fixed(ICON_SIZE)),
         )
         .on_press(Message::OpenFile)
-        .width(Length::Fixed(28.0))
-        .height(Length::Fixed(28.0))
+        .width(Length::Fixed(ICON_BUTTON_SIZE))
+        .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
         .style(icon_button_style),
         container(text("Ctrl + o, Open").font(EDITOR_FONT).size(12))
@@ -587,12 +599,12 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let preview_button = tooltip(
         button(
             canvas(PreviewIcon)
-                .width(Length::Fixed(16.0))
-                .height(Length::Fixed(16.0)),
+                .width(Length::Fixed(ICON_SIZE))
+                .height(Length::Fixed(ICON_SIZE)),
         )
         .on_press(Message::TogglePreview)
-        .width(Length::Fixed(28.0))
-        .height(Length::Fixed(28.0))
+        .width(Length::Fixed(ICON_BUTTON_SIZE))
+        .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
         .style(icon_button_style),
         container(text("Ctrl + p, Preview").font(EDITOR_FONT).size(12))
@@ -888,7 +900,7 @@ fn mode_badge(editor: &Editor) -> Element<'_, Message> {
             bottom: 4.0,
             left: 8.0,
         })
-        .height(Length::Fixed(28.0))
+        .height(Length::Fixed(ICON_BUTTON_SIZE))
         .align_y(alignment::Vertical::Center)
         .style(move |_theme| mode_badge_style(color))
         .into()
