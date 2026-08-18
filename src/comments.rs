@@ -32,7 +32,16 @@ pub enum Mark {
 #[derive(Debug, Clone)]
 struct Comment {
     text: String,
-    anchor: CaretPosition,
+    anchor: Anchor,
+}
+
+/// What a comment is anchored to: a caret position in the preview, or
+/// nothing — a global comment about the document as a whole, labeled
+/// "Global" in the sidebar.
+#[derive(Debug, Clone, Copy)]
+enum Anchor {
+    Caret(CaretPosition),
+    Global,
 }
 
 /// A comment as the sidebar renders it: the note text, a quote of the
@@ -42,6 +51,8 @@ pub struct CommentCard {
     /// cut off, so every card occupies the same vertical space.
     pub text: String,
     pub quote: String,
+    /// The card's label when the comment has no anchor: `"Global"`.
+    pub label: Option<&'static str>,
     pub active: bool,
 }
 
@@ -73,6 +84,31 @@ impl Comments {
     /// Saves a comment anchored at `at` and makes it the active one. Empty
     /// notes are discarded.
     pub fn save(&mut self, text: &str, at: CaretPosition) {
+        self.save_with(text, Anchor::Caret(at));
+    }
+
+    /// Saves a global comment — unanchored, about the document as a whole
+    /// — and makes it the active one. Empty notes are discarded.
+    pub fn save_global(&mut self, text: &str) {
+        self.save_with(text, Anchor::Global);
+    }
+
+    /// Adds the publish draft as a global comment and clears the draft.
+    /// Empty drafts are discarded.
+    pub fn add_draft_as_global(&mut self) {
+        let text = self.draft.text();
+        let text = text.trim();
+
+        if text.is_empty() {
+            return;
+        }
+
+        let text = text.to_owned();
+        self.save_global(&text);
+        self.draft = text_editor::Content::new();
+    }
+
+    fn save_with(&mut self, text: &str, anchor: Anchor) {
         let text = text.trim();
 
         if text.is_empty() {
@@ -82,41 +118,46 @@ impl Comments {
         self.active = Some(self.comments.len());
         self.comments.push(Comment {
             text: text.to_owned(),
-            anchor: at,
+            anchor,
         });
     }
 
-    /// Cycles the active comment forward, wrapping around at the end, and
-    /// returns its anchor so the caret can jump to the mark. With no
-    /// comments there is nothing to activate.
+    /// Cycles the active comment forward through the anchored ones,
+    /// wrapping around at the end, and returns its anchor so the caret can
+    /// jump to the mark. Global comments have no position to jump to and
+    /// are skipped; with no anchored comments there is nothing to
+    /// activate.
     pub fn cycle(&mut self) -> Option<CaretPosition> {
         if self.comments.is_empty() {
             return None;
         }
 
-        let index = match self.active {
-            None => 0,
-            Some(index) => (index + 1) % self.comments.len(),
-        };
-        self.active = Some(index);
+        let start = self.active.map_or(0, |index| index + 1);
 
-        Some(self.comments[index].anchor)
+        for step in 0..self.comments.len() {
+            let index = (start + step) % self.comments.len();
+
+            if let Anchor::Caret(position) = self.comments[index].anchor {
+                self.active = Some(index);
+                return Some(position);
+            }
+        }
+
+        None
     }
 
     /// The mark a preview element carries.
     pub fn mark_for(&self, element: usize) -> Mark {
+        let anchored_to = |comment: &Comment| matches!(comment.anchor, Anchor::Caret(position) if position.element == element);
+
         if self
             .active
-            .is_some_and(|index| self.comments[index].anchor.element == element)
+            .is_some_and(|index| anchored_to(&self.comments[index]))
         {
             return Mark::Active;
         }
 
-        if self
-            .comments
-            .iter()
-            .any(|comment| comment.anchor.element == element)
-        {
+        if self.comments.iter().any(anchored_to) {
             Mark::Commented
         } else {
             Mark::None
@@ -128,15 +169,21 @@ impl Comments {
         self.comments
             .iter()
             .enumerate()
-            .map(|(index, comment)| CommentCard {
-                text: condensed(&comment.text, COMMENT_TEXT_MAX_CHARS),
-                quote: quote(
-                    source,
-                    elements,
-                    comment.anchor.element,
-                    COMMENT_QUOTE_MAX_CHARS,
-                ),
-                active: self.active == Some(index),
+            .map(|(index, comment)| {
+                let (quote, label) = match comment.anchor {
+                    Anchor::Caret(position) => (
+                        quote(source, elements, position.element, COMMENT_QUOTE_MAX_CHARS),
+                        None,
+                    ),
+                    Anchor::Global => (String::new(), Some("Global")),
+                };
+
+                CommentCard {
+                    text: condensed(&comment.text, COMMENT_TEXT_MAX_CHARS),
+                    quote,
+                    label,
+                    active: self.active == Some(index),
+                }
             })
             .collect()
     }
@@ -294,5 +341,55 @@ mod tests {
         assert!(cards[1].text.ends_with('…'));
         assert_eq!(cards[1].text.chars().count(), 101);
         assert!(!cards[1].text.contains('\n'));
+    }
+
+    /// Global comments carry the "Global" label and no quote, never mark a
+    /// preview element, and are skipped by cycling — there is no position
+    /// to jump to.
+    #[test]
+    fn global_comments_are_unanchored() {
+        let mut comments = Comments::new();
+        comments.save("anchored", at(2));
+        comments.save_global(" overall note ");
+
+        let cards = comments.cards("", &[]);
+        assert_eq!(cards[1].label, Some("Global"));
+        assert_eq!(cards[1].quote, "");
+        assert_eq!(cards[1].text, "overall note");
+        assert_eq!(cards[0].label, None);
+
+        // Saving the global comment made it active, but no element carries
+        // a mark for it.
+        assert_eq!(comments.mark_for(2), Mark::Commented);
+
+        // Cycling skips the global comment and jumps straight to the
+        // anchored one, every time.
+        assert_eq!(comments.cycle(), Some(at(2)));
+        assert_eq!(comments.cycle(), Some(at(2)));
+
+        // With only global comments there is nothing to cycle to.
+        let mut globals = Comments::new();
+        globals.save_global("one");
+        assert_eq!(globals.cycle(), None);
+    }
+
+    /// The publish draft becomes a global comment and clears; empty drafts
+    /// are discarded.
+    #[test]
+    fn add_draft_as_global() {
+        let mut comments = Comments::new();
+
+        comments.edit_draft(iced::widget::text_editor::Action::Edit(
+            iced::widget::text_editor::Edit::Paste(std::sync::Arc::new("  ship it  \n".to_owned())),
+        ));
+        comments.add_draft_as_global();
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments.draft().text(), "");
+        assert_eq!(comments.cards("", &[])[0].label, Some("Global"));
+        assert_eq!(comments.cards("", &[])[0].text, "ship it");
+
+        comments.add_draft_as_global();
+        assert_eq!(comments.len(), 1);
     }
 }

@@ -88,6 +88,7 @@ enum Message {
     NoteCardPressed,
     EditPublish(text_editor::Action),
     PublishPressed,
+    AddGlobalComment,
     NextComment,
     ToggleSidebar,
 }
@@ -474,6 +475,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::CloseNotePopup => {}
         Message::EditNote(action) => editor.note_text.perform(action),
         Message::EditPublish(action) => editor.comments.edit_draft(action),
+        Message::AddGlobalComment => editor.comments.add_draft_as_global(),
         Message::PublishPressed => {
             // TODO: publish the comments
         }
@@ -935,17 +937,17 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
         .into_iter()
         .map(|card| {
             let active = card.active;
+            // Anchored comments quote their element's source; global
+            // comments show their label instead.
+            let caption = card.label.map(str::to_owned).unwrap_or(card.quote);
 
             container(
                 column![
-                    text(card.quote)
-                        .font(EDITOR_FONT)
-                        .size(11)
-                        .color(if active {
-                            Color::from_rgb(0.4, 0.85, 0.78)
-                        } else {
-                            Color::from_rgb(0.45, 0.45, 0.45)
-                        }),
+                    text(caption).font(EDITOR_FONT).size(11).color(if active {
+                        Color::from_rgb(0.4, 0.85, 0.78)
+                    } else {
+                        Color::from_rgb(0.45, 0.45, 0.45)
+                    }),
                     text(card.text)
                         .font(EDITOR_FONT)
                         .size(13)
@@ -999,16 +1001,25 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
             .width(Length::Fill)
             .padding(6)
             .style(publish_field_style),
-            button(
-                text("Publish")
-                    .font(EDITOR_FONT)
-                    .size(13)
-                    .color(Color::WHITE),
-            )
-            .on_press(Message::PublishPressed)
-            .width(Length::Fill)
-            .padding([6, 12])
-            .style(publish_button_style),
+            row![
+                button(text("Add").font(EDITOR_FONT).size(13).color(Color::WHITE),)
+                    .on_press(Message::AddGlobalComment)
+                    .width(Length::Fill)
+                    .padding([6, 12])
+                    .style(add_button_style),
+                button(
+                    text("Publish")
+                        .font(EDITOR_FONT)
+                        .size(13)
+                        .color(Color::WHITE),
+                )
+                .on_press(Message::PublishPressed)
+                .width(Length::Fill)
+                .padding([6, 12])
+                .style(publish_button_style),
+            ]
+            .spacing(8)
+            .width(Length::Fill),
         ]
         .spacing(8)
         .width(Length::Fill)
@@ -1081,6 +1092,30 @@ fn publish_editor_style(_theme: &Theme, _status: text_editor::Status) -> text_ed
         placeholder: Color::WHITE,
         value: Color::WHITE,
         selection: Color::from_rgb(0.35, 0.35, 0.35),
+    }
+}
+
+/// The Add button sits beside Publish as the quieter, secondary action:
+/// it files the draft as a global comment.
+fn add_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => {
+                Some(Background::Color(Color::from_rgb(0.22, 0.22, 0.22)))
+            }
+            _ => Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        },
+        border: Border {
+            color: match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Color::from_rgb(0.55, 0.55, 0.55)
+                }
+                _ => Color::from_rgb(0.35, 0.35, 0.35),
+            },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
     }
 }
 
