@@ -41,6 +41,8 @@ const CARET_MARGIN: f32 = 8.0;
 struct Editor {
     content: text_editor::Content,
     markdown: markdown::Content,
+    /// The file the contents came from and save back to, once known.
+    path: Option<std::path::PathBuf>,
     /// The input mode stack — write, view, visual, note — owning key
     /// handling and the mode badge's state.
     keymap: Keymap,
@@ -62,7 +64,10 @@ struct Editor {
 enum Message {
     Edit(text_editor::Action),
     OpenFile,
-    FileLoaded(Option<String>),
+    FileLoaded(Option<(std::path::PathBuf, String)>),
+    SaveFile,
+    SavePathChosen(Option<std::path::PathBuf>),
+    FileSaved(Result<std::path::PathBuf, String>),
     TogglePreview,
     LinkClicked(markdown::Uri),
     MovePreviewCursor(Motion),
@@ -162,13 +167,95 @@ impl<Message> canvas::Program<Message> for PreviewIcon {
     }
 }
 
-async fn open_file() -> Option<String> {
+struct SaveIcon;
+
+impl<Message> canvas::Program<Message> for SaveIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
+        frame.scale(bounds.width / ICON_DESIGN_SIZE);
+
+        let stroke = || {
+            canvas::Stroke::default()
+                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
+                .with_width(1.4)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round)
+        };
+
+        // A floppy disk: the body with a beveled corner, the shutter notch
+        // on top, and the label slot at the bottom.
+        let body = canvas::Path::new(|path| {
+            path.move_to(Point::new(2.5, 1.5));
+            path.line_to(Point::new(11.0, 1.5));
+            path.line_to(Point::new(13.5, 4.0));
+            path.line_to(Point::new(13.5, 14.5));
+            path.line_to(Point::new(2.5, 14.5));
+            path.close();
+        });
+        let shutter = canvas::Path::new(|path| {
+            path.move_to(Point::new(5.0, 1.5));
+            path.line_to(Point::new(5.0, 6.0));
+            path.line_to(Point::new(10.5, 6.0));
+            path.line_to(Point::new(10.5, 1.5));
+        });
+        let slot = canvas::Path::new(|path| {
+            path.move_to(Point::new(4.5, 14.5));
+            path.line_to(Point::new(4.5, 10.0));
+            path.line_to(Point::new(11.5, 10.0));
+            path.line_to(Point::new(11.5, 14.5));
+        });
+
+        frame.stroke(&body, stroke());
+        frame.stroke(&shutter, stroke());
+        frame.stroke(&slot, stroke());
+
+        vec![frame.into_geometry()]
+    }
+}
+
+async fn open_file() -> Option<(std::path::PathBuf, String)> {
     let file = rfd::AsyncFileDialog::new()
         .set_title("Open Markdown file")
         .pick_file()
         .await?;
 
-    Some(String::from_utf8_lossy(&file.read().await).into_owned())
+    let contents = String::from_utf8_lossy(&file.read().await).into_owned();
+
+    Some((file.path().to_path_buf(), contents))
+}
+
+/// Writes the editor contents to `path`, returning the path on success and
+/// the error message on failure (kept as a string so the message stays
+/// `Clone`).
+async fn save_file(
+    path: std::path::PathBuf,
+    contents: String,
+) -> Result<std::path::PathBuf, String> {
+    // The files this editor opens are small; a blocking write inside the
+    // task is fine.
+    std::fs::write(&path, contents)
+        .map_err(|error| format!("cannot save '{}': {error}", path.display()))?;
+
+    Ok(path)
+}
+
+async fn pick_save_path() -> Option<std::path::PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Save Markdown file")
+        .set_file_name("untitled.md")
+        .save_file()
+        .await
+        .map(|file| file.path().to_path_buf())
 }
 
 fn subscription(editor: &Editor) -> Subscription<Message> {
@@ -187,7 +274,8 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     match message {
         Message::Edit(action) => return edit_source(editor, action),
         Message::OpenFile => return Task::perform(open_file(), Message::FileLoaded),
-        Message::FileLoaded(Some(contents)) => {
+        Message::FileLoaded(Some((path, contents))) => {
+            editor.path = Some(path);
             editor.preview_elements = ElementMap::parse(&contents);
             editor.caret = Caret::new();
             editor.visual_anchor = None;
@@ -197,6 +285,27 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.markdown = markdown::Content::parse(&contents);
         }
         Message::FileLoaded(None) => {}
+        Message::SaveFile => {
+            return match &editor.path {
+                // A known path saves straight to disk; an unsaved document
+                // asks where first.
+                Some(path) => Task::perform(
+                    save_file(path.clone(), editor.content.text()),
+                    Message::FileSaved,
+                ),
+                None => Task::perform(pick_save_path(), Message::SavePathChosen),
+            };
+        }
+        Message::SavePathChosen(Some(path)) => {
+            editor.path = Some(path.clone());
+
+            return Task::perform(save_file(path, editor.content.text()), Message::FileSaved);
+        }
+        Message::SavePathChosen(None) => {}
+        Message::FileSaved(Ok(_path)) => {}
+        Message::FileSaved(Err(error)) => {
+            eprintln!("agmawrite: {error}");
+        }
         Message::TogglePreview => {
             if !editor.keymap.preview_only() {
                 editor.visual_anchor = None;
@@ -613,6 +722,23 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         iced::widget::tooltip::Position::Top,
     );
 
+    let save_button = tooltip(
+        button(
+            canvas(SaveIcon)
+                .width(Length::Fixed(ICON_SIZE))
+                .height(Length::Fixed(ICON_SIZE)),
+        )
+        .on_press(Message::SaveFile)
+        .width(Length::Fixed(ICON_BUTTON_SIZE))
+        .height(Length::Fixed(ICON_BUTTON_SIZE))
+        .padding(0)
+        .style(icon_button_style),
+        container(text("Ctrl + s, Save").font(EDITOR_FONT).size(12))
+            .padding([4, 8])
+            .style(tooltip_style),
+        iced::widget::tooltip::Position::Top,
+    );
+
     // The main column: top margin, the writing area, and the bottom
     // controls. With comments saved, the comments sidebar sits beside it
     // and spans the whole window height.
@@ -637,6 +763,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                     .height(Length::Fill)
                     .into(),
                 open_button.into(),
+                save_button.into(),
             ];
 
             if !editor.keymap.preview_only() {
@@ -1084,6 +1211,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             .as_deref()
             .map(markdown::Content::parse)
             .unwrap_or_default(),
+        path: args.path.as_ref().map(std::path::PathBuf::from),
         keymap: Keymap::new(args.preview),
         caret: Caret::new(),
         preview_elements,
@@ -1137,7 +1265,7 @@ mod tests {
     use super::comments::{Comments, Mark};
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
-    use super::{save_note, update, Editor, Message};
+    use super::{update, Editor, Message};
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -1149,6 +1277,7 @@ mod tests {
         Editor {
             content: iced::widget::text_editor::Content::with_text(contents),
             markdown: iced::widget::markdown::Content::parse(contents),
+            path: None,
             keymap,
             caret,
             preview_elements: ElementMap::parse(contents),
@@ -1170,7 +1299,7 @@ mod tests {
         editor.note_text = iced::widget::text_editor::Content::with_text("  fix this  \n");
         editor.keymap.note(&Message::OpenNotePopup);
 
-        update(&mut editor, Message::SaveNote);
+        let _ = update(&mut editor, Message::SaveNote);
 
         assert!(!editor.keymap.note_open());
         assert_eq!(editor.note_text.text(), "");
@@ -1190,7 +1319,7 @@ mod tests {
         // An empty note only closes the popup; the first comment stays.
         editor.keymap.note(&Message::OpenNotePopup);
         editor.note_text = iced::widget::text_editor::Content::with_text("   ");
-        update(&mut editor, Message::SaveNote);
+        let _ = update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.keymap.note_open());
     }
@@ -1206,7 +1335,7 @@ mod tests {
             },
         );
 
-        update(&mut editor, Message::SaveNote);
+        let _ = update(&mut editor, Message::SaveNote);
 
         assert!(editor.comments.is_empty());
         assert_eq!(editor.keymap.mode(), Mode::View);
@@ -1221,6 +1350,7 @@ mod tests {
         let mut editor = Editor {
             content: iced::widget::text_editor::Content::with_text("- item"),
             markdown: iced::widget::markdown::Content::parse("- item"),
+            path: None,
             keymap: Keymap::new(false),
             caret: Caret::new(),
             preview_elements: ElementMap::parse("- item"),
@@ -1233,14 +1363,14 @@ mod tests {
             selection: None,
         });
 
-        update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
+        let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
 
         assert_eq!(editor.content.text(), "- item\n- ");
         let cursor = editor.content.cursor();
         assert_eq!(cursor.position, Position { line: 1, column: 2 });
 
         // The new item is empty; Enter removes the marker and ends the list.
-        update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
+        let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
 
         assert_eq!(editor.content.text(), "- item\n\n");
         assert_eq!(
