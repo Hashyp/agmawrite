@@ -90,6 +90,7 @@ enum Message {
     EditNote(text_editor::Action),
     SaveNote,
     NoteCardPressed,
+    CommentCardPressed(usize),
     EditPublish(text_editor::Action),
     PublishPressed,
     AddGlobalComment,
@@ -576,6 +577,32 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
+        Message::CommentCardPressed(index) => {
+            // Clicking a card makes its comment the active one and moves the
+            // cursor to the anchored element: the preview caret jumps there
+            // and the page reveals it; in write mode the source cursor lands
+            // on the element's source instead.
+            if let Some(anchor) = editor.comments.activate(index) {
+                if editor.keymap.preview() {
+                    editor.visual_anchor = None;
+                    editor.caret.place(anchor);
+
+                    return reveal_preview_caret();
+                }
+
+                let source = editor.content.text();
+                let element = editor.preview_elements.elements().get(anchor.element);
+
+                if let Some(element) = element {
+                    editor.content.move_to(text_editor::Cursor {
+                        position: editing::position_at(&source, element.source().start),
+                        selection: None,
+                    });
+
+                    return focus(Id::new(SOURCE_EDITOR_ID));
+                }
+            }
+        }
     }
 
     Task::none()
@@ -1146,29 +1173,35 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
         .cards(&source, editor.preview_elements.elements())
         .into_iter()
         .map(|card| {
+            let index = card.index;
             let active = card.active;
             // Anchored comments quote their element's source; global
             // comments show their label instead.
             let caption = card.label.map(str::to_owned).unwrap_or(card.quote);
 
-            container(
-                column![
-                    text(caption).font(EDITOR_FONT).size(11).color(if active {
-                        Color::from_rgb(0.4, 0.85, 0.78)
-                    } else {
-                        Color::from_rgb(0.45, 0.45, 0.45)
-                    }),
-                    text(card.text)
-                        .font(EDITOR_FONT)
-                        .size(13)
-                        .color(Color::WHITE),
-                ]
-                .spacing(4)
-                .width(Length::Fill),
+            // The card is a button: clicking it activates its comment and
+            // moves the cursor to the anchored element.
+            mouse_area(
+                container(
+                    column![
+                        text(caption).font(EDITOR_FONT).size(11).color(if active {
+                            Color::from_rgb(0.4, 0.85, 0.78)
+                        } else {
+                            Color::from_rgb(0.45, 0.45, 0.45)
+                        }),
+                        text(card.text)
+                            .font(EDITOR_FONT)
+                            .size(13)
+                            .color(Color::WHITE),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                )
+                .padding(8)
+                .width(Length::Fill)
+                .style(move |_theme| comment_card_style(active)),
             )
-            .padding(8)
-            .width(Length::Fill)
-            .style(move |_theme| comment_card_style(active))
+            .on_press(Message::CommentCardPressed(index))
             .into()
         })
         .collect();
@@ -1679,6 +1712,49 @@ mod tests {
         let _ = update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
         assert!(!editor.keymap.note_open());
+    }
+
+    /// Clicking a comment card activates its comment and moves the cursor
+    /// to the anchored element: the preview caret jumps there, and in
+    /// write mode the source cursor lands on the element's source.
+    #[test]
+    fn clicking_a_comment_card_moves_the_cursor_to_its_anchor() {
+        use iced::widget::text_editor::Position;
+
+        let mut editor = editor_at(
+            "# Title\n\nfirst\n\nsecond",
+            CaretPosition {
+                element: 2,
+                column: 3,
+            },
+        );
+        editor.note_text = iced::widget::text_editor::Content::with_text("note");
+        editor.keymap.note(&Message::OpenNotePopup);
+        let _ = update(&mut editor, Message::SaveNote);
+
+        // The caret wanders off before the card is clicked.
+        editor.caret.place(CaretPosition {
+            element: 0,
+            column: 0,
+        });
+
+        let _ = update(&mut editor, Message::CommentCardPressed(0));
+
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 2,
+                column: 3,
+            }
+        );
+        assert_eq!(editor.comments.mark_for(2), Mark::Active);
+
+        // In write mode the source cursor lands on the anchored element's
+        // source instead.
+        editor.keymap.note(&Message::TogglePreview);
+        let _ = update(&mut editor, Message::CommentCardPressed(0));
+
+        assert_eq!(editor.content.cursor().position, Position { line: 4, column: 0 });
     }
 
     /// Escaping the note popup discards the draft: the next `c` opens a

@@ -1,6 +1,7 @@
 //! Write-mode editing helpers: what Enter means on a list line, and
 //! finding text in the document.
 
+use iced::widget::text_editor::Position;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// What pressing Enter does, based on the line before the cursor.
@@ -121,10 +122,23 @@ pub fn first_match(text: &str, query: &str) -> Option<(usize, usize, usize)> {
     Some((line, start_column, end_column))
 }
 
+/// The source editor position of a byte `offset`: its line and its
+/// character column — the units the source editor's cursor uses. Offsets
+/// past the end clamp to the end of the text.
+pub fn position_at(text: &str, offset: usize) -> Position {
+    let offset = offset.min(text.len());
+    let line = text[..offset].matches('\n').count();
+    let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let column = text[line_start..offset].chars().count();
+
+    Position { line, column }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Continuation::{Break, Continue, Outdent};
-    use super::{continuation, first_match, matches_in};
+    use super::{continuation, first_match, matches_in, position_at};
+    use iced::widget::text_editor::Position;
 
     #[test]
     fn continues_bullets_with_their_indent() {
@@ -185,5 +199,16 @@ mod tests {
         assert_eq!(first_match("one\ntwo\nthree", "t"), Some((1, 0, 1)));
         assert_eq!(first_match("nothing here", "zzz"), None);
         assert_eq!(first_match("abc", ""), None);
+    }
+
+    /// Byte offsets map onto the line and character column the source
+    /// editor's cursor uses; columns count characters, and offsets past
+    /// the end clamp to the text's end.
+    #[test]
+    fn maps_byte_offsets_to_editor_positions() {
+        assert_eq!(position_at("hello\nworld", 0), Position { line: 0, column: 0 });
+        assert_eq!(position_at("hello\nworld", 6), Position { line: 1, column: 0 });
+        assert_eq!(position_at("héllo\nworld", 8), Position { line: 1, column: 1 });
+        assert_eq!(position_at("hello", 99), Position { line: 0, column: 5 });
     }
 }

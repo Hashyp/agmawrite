@@ -47,6 +47,9 @@ enum Anchor {
 /// A comment as the sidebar renders it: the note text, a quote of the
 /// anchored element's source, and whether it is the active comment.
 pub struct CommentCard {
+    /// The comment's index in the store — what clicking the card
+    /// activates.
+    pub index: usize,
     /// The note text, condensed like the quote: collapsed to one line and
     /// cut off, so every card occupies the same vertical space.
     pub text: String,
@@ -179,6 +182,7 @@ impl Comments {
                 };
 
                 CommentCard {
+                    index,
                     text: condensed(&comment.text, COMMENT_TEXT_MAX_CHARS),
                     quote,
                     label,
@@ -186,6 +190,20 @@ impl Comments {
                 }
             })
             .collect()
+    }
+
+    /// Activates the comment at `index` — the comment whose card was
+    /// clicked — and returns its anchor so the caret can jump there.
+    /// Global comments activate but have nowhere to jump to; unknown
+    /// indices change nothing.
+    pub fn activate(&mut self, index: usize) -> Option<CaretPosition> {
+        let comment = self.comments.get(index)?;
+        self.active = Some(index);
+
+        match comment.anchor {
+            Anchor::Caret(position) => Some(position),
+            Anchor::Global => None,
+        }
     }
 
     /// The publish draft, for the sidebar text field.
@@ -371,6 +389,35 @@ mod tests {
         let mut globals = Comments::new();
         globals.save_global("one");
         assert_eq!(globals.cycle(), None);
+    }
+
+    /// Clicking a card makes its comment the active one and yields its
+    /// anchor so the caret can jump there; global comments activate too
+    /// but have nowhere to jump to, and unknown indices change nothing.
+    #[test]
+    fn activating_a_comment_returns_its_anchor() {
+        let mut comments = Comments::new();
+        comments.save("first", at(1));
+        comments.save("second", at(5));
+        comments.save_global("overall");
+
+        let cards = comments.cards("", &[]);
+        assert_eq!(cards[0].index, 0);
+        assert_eq!(cards[2].label, Some("Global"));
+
+        assert_eq!(comments.activate(1), Some(at(5)));
+        assert_eq!(comments.mark_for(5), Mark::Active);
+        let cards = comments.cards("", &[]);
+        assert!(!cards[0].active);
+        assert!(cards[1].active);
+
+        // A global comment activates but yields no position.
+        assert_eq!(comments.activate(2), None);
+        assert!(comments.cards("", &[])[2].active);
+
+        // Unknown indices change nothing.
+        assert_eq!(comments.activate(9), None);
+        assert!(comments.cards("", &[])[2].active);
     }
 
     /// The publish draft becomes a global comment and clears; empty drafts
