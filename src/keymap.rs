@@ -192,6 +192,8 @@ impl Keymap {
                 keyboard::Key::Character("p" | "P") if !self.preview_only => {
                     Some(Message::TogglePreview)
                 }
+                // Show or hide the comments sidebar.
+                keyboard::Key::Character("b" | "B") => Some(Message::ToggleSidebar),
                 // Browse the saved comments in the preview.
                 keyboard::Key::Character("n" | "N") if self.preview() => Some(Message::NextComment),
                 _ => None,
@@ -465,6 +467,21 @@ mod tests {
         assert!(keymap
             .handle(key_press_with("o", Modifiers::CTRL, false))
             .is_none());
+    }
+
+    /// Ctrl+B toggles the comments sidebar in any mode.
+    #[test]
+    fn ctrl_b_toggles_the_sidebar() {
+        for keymap in [Keymap::new(false), viewing()] {
+            assert!(matches!(
+                keymap.handle(key_press_with("b", Modifiers::CTRL, false)),
+                Some(Message::ToggleSidebar)
+            ));
+            // Held down, the toggle does not flip back and forth.
+            assert!(keymap
+                .handle(key_press_with("b", Modifiers::CTRL, true))
+                .is_none());
+        }
     }
 
     /// Preview-only mode disables switching back to write mode, from keys

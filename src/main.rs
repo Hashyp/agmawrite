@@ -58,6 +58,9 @@ struct Editor {
     note_text: text_editor::Content,
     /// Saved comments, the active one, and the publish draft.
     comments: Comments,
+    /// Manual override for the comments sidebar's visibility (`Ctrl+B`):
+    /// `None` follows the default — shown once there are comments.
+    sidebar_override: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +89,7 @@ enum Message {
     EditPublish(text_editor::Action),
     PublishPressed,
     NextComment,
+    ToggleSidebar,
 }
 
 struct OpenFileIcon;
@@ -488,12 +492,23 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 save_note(editor);
             }
         }
+        Message::ToggleSidebar => {
+            editor.sidebar_override = Some(!sidebar_shown(editor));
+        }
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
     }
 
     Task::none()
+}
+
+/// Whether the comments sidebar is showing: the manual `Ctrl+B` override
+/// wins, otherwise it appears once there are comments.
+fn sidebar_shown(editor: &Editor) -> bool {
+    editor
+        .sidebar_override
+        .unwrap_or(!editor.comments.is_empty())
 }
 
 /// Applies a source edit action. Pressing Enter on a list line continues
@@ -876,7 +891,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    if !editor.comments.is_empty() {
+    if sidebar_shown(editor) {
         inner = inner.push(
             container(comments_sidebar(editor))
                 .width(Length::FillPortion(2))
@@ -1308,6 +1323,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         visual_anchor: None,
         note_text: text_editor::Content::new(),
         comments: Comments::new(),
+        sidebar_override: None,
     };
 
     let task = if args.preview {
@@ -1374,6 +1390,7 @@ mod tests {
             visual_anchor: None,
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
+            sidebar_override: None,
         }
     }
 
@@ -1447,6 +1464,7 @@ mod tests {
             visual_anchor: None,
             note_text: iced::widget::text_editor::Content::new(),
             comments: Comments::new(),
+            sidebar_override: None,
         };
         editor.content.move_to(Cursor {
             position: Position { line: 0, column: 6 },
