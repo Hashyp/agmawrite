@@ -1,11 +1,11 @@
 mod comments;
 mod interactive_text;
+mod preview;
 
 use std::cell::Cell;
 
-use comments::{CaretPosition, Comments, Mark};
-
-use unicode_segmentation::UnicodeSegmentation;
+use comments::{Comments, Mark};
+use preview::{Caret, CaretPosition, Jump, Motion, PreviewElement, WordMotion};
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
 use iced::advanced::widget::Operation;
@@ -26,75 +26,20 @@ const NOTE_EDITOR_ID: &str = "note-editor";
 /// Margin kept between the preview caret and the viewport edges while scrolling.
 const CARET_MARGIN: f32 = 8.0;
 
-/// A caret motion in the preview, usable with the arrow keys or the vim keys
-/// `h`, `j`, `k`, and `l`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Motion {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-/// A word motion in the preview, like the vim keys `w`, `b`, `e`, and `ge`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WordMotion {
-    /// `w` — forward to the start of the next word.
-    NextStart,
-    /// `b` — backward to the start of the previous word.
-    PreviousStart,
-    /// `e` — forward to the end of the next word.
-    NextEnd,
-    /// `ge` — backward to the end of the previous word.
-    PreviousEnd,
-}
-
-/// A document jump in the preview, like the vim keys `gg` and `G`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Jump {
-    /// `gg` — to the first element.
-    First,
-    /// `G` — to the last element.
-    Last,
-}
-
-/// The kind of a preview element, used for grid-style navigation in tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ElementKind {
-    /// A heading, paragraph, quote, or list item.
-    Text,
-    /// A non-empty table cell.
-    Cell { row: usize, column: usize },
-}
-
-/// A source range paired with the kind of element the preview renders it as.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PreviewElement {
-    source: std::ops::Range<usize>,
-    kind: ElementKind,
-    /// The rendered text of the element — markdown markup like `**bold**`
-    /// is not part of it.
-    text: String,
-    /// The number of graphemes in `text`.
-    len: usize,
-}
-
 struct Editor {
     content: text_editor::Content,
     markdown: markdown::Content,
     preview: bool,
     preview_only: bool,
-    preview_cursor: usize,
-    /// The grapheme column of the caret within the current element.
-    preview_column: usize,
-    /// The column `j`/`k` aim for, like vim's sticky column.
-    preview_column_target: usize,
+    /// The preview caret: element, grapheme column, and sticky target
+    /// column, owned by the preview module.
+    caret: Caret,
     preview_elements: Vec<PreviewElement>,
     /// Whether a lone `g` is awaiting its second key of a `gg`/`ge` sequence.
     pending_g: bool,
-    /// The fixed end of the visual-mode selection, as an (element, column)
-    /// caret position. `None` outside visual mode.
-    visual_anchor: Option<(usize, usize)>,
+    /// The fixed end of the visual-mode selection, as a caret position.
+    /// `None` outside visual mode.
+    visual_anchor: Option<CaretPosition>,
     /// Whether the note popup is open over the preview.
     note_open: bool,
     /// The text of the note popup.
@@ -324,10 +269,8 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::Edit(action) => editor.content.perform(action),
         Message::OpenFile => return Task::perform(open_file(), Message::FileLoaded),
         Message::FileLoaded(Some(contents)) => {
-            editor.preview_elements = preview_elements(&contents);
-            editor.preview_cursor = 0;
-            editor.preview_column = 0;
-            editor.preview_column_target = 0;
+            editor.preview_elements = preview::parse(&contents);
+            editor.caret = Caret::new();
             editor.note_open = false;
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
@@ -344,11 +287,10 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
                 if editor.preview {
                     let contents = editor.content.text();
-                    editor.preview_elements = preview_elements(&contents);
-                    editor.preview_cursor =
-                        element_for_source_cursor(&editor.content, &editor.preview_elements);
-                    editor.preview_column = 0;
-                    editor.preview_column_target = 0;
+                    editor.preview_elements = preview::parse(&contents);
+                    editor
+                        .caret
+                        .move_to_source_cursor(&editor.content, &editor.preview_elements);
                     editor.markdown = markdown::Content::parse(&contents);
 
                     return reveal_preview_caret();
@@ -359,43 +301,19 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             // TODO: open links in the default browser
         }
         Message::MovePreviewCursor(motion) => {
-            if let Some((cursor, column, column_target)) = move_caret(
-                &editor.preview_elements,
-                editor.preview_cursor,
-                editor.preview_column,
-                editor.preview_column_target,
-                motion,
-            ) {
-                editor.preview_cursor = cursor;
-                editor.preview_column = column;
-                editor.preview_column_target = column_target;
-
-                // The caret always advances; the page only scrolls as much
-                // as needed to keep the caret visible.
+            // The caret always advances; the page only scrolls as much as
+            // needed to keep the caret visible.
+            if editor.caret.move_by(&editor.preview_elements, motion) {
                 return reveal_preview_caret();
             }
         }
         Message::MovePreviewWord(motion) => {
-            if let Some((cursor, column)) = move_word(
-                &editor.preview_elements,
-                editor.preview_cursor,
-                editor.preview_column,
-                motion,
-            ) {
-                editor.preview_cursor = cursor;
-                editor.preview_column = column;
-                editor.preview_column_target = column;
-
+            if editor.caret.move_word(&editor.preview_elements, motion) {
                 return reveal_preview_caret();
             }
         }
         Message::MovePreviewJump(jump) => {
-            if let Some((cursor, column)) =
-                jump_caret(&editor.preview_elements, editor.preview_column_target, jump)
-            {
-                editor.preview_cursor = cursor;
-                editor.preview_column = column;
-
+            if editor.caret.jump(&editor.preview_elements, jump) {
                 return reveal_preview_caret();
             }
         }
@@ -409,7 +327,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.visual_anchor = if editor.visual_anchor.is_some() {
                 None
             } else {
-                Some((editor.preview_cursor, editor.preview_column))
+                Some(editor.caret.position())
             };
         }
         Message::ScrollPreviewBy(y) => {
@@ -435,9 +353,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 // Jump the caret to the comment and reveal it, so the mark
                 // is actually in view.
                 editor.visual_anchor = None;
-                editor.preview_cursor = anchor.element;
-                editor.preview_column = anchor.column;
-                editor.preview_column_target = anchor.column;
+                editor.caret.place(anchor);
 
                 return reveal_preview_caret();
             }
@@ -455,475 +371,12 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Returns the Markdown elements the preview numbers as caret positions, in
-/// order, each paired with its source range and kind.
-///
-/// This mirrors how `iced`'s Markdown parser turns `pulldown-cmark` events
-/// into items: only headings and paragraphs become caret elements, and a
-/// paragraph item is only produced while there is pending inline text. Lists,
-/// quotes, tables, code blocks, images, and rules are containers or unnumbered
-/// items — but their contents still produce numbered elements.
-fn preview_elements(markdown: &str) -> Vec<PreviewElement> {
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-
-    let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
-        | Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
-
-    let mut elements = Vec::new();
-    // Mirrors iced's `spans` buffer: some inline text is pending since the
-    // last produced item.
-    let mut pending_text = false;
-    // The rendered text of the pending item, mirroring how iced builds spans
-    // (soft breaks become spaces, hard breaks newlines).
-    let mut rendered = String::new();
-    let mut metadata = false;
-    let mut code_block = false;
-    // End of the last recorded element; pending text always lies after it.
-    let mut last_end = 0;
-    // Grid position of the current table cell; only meaningful inside a
-    // table, where the header row is row `0`.
-    let mut cell_row = 0;
-    let mut cell_column = 0;
-
-    // Records the pending rendered text as a finished caret element.
-    let finish = |source: std::ops::Range<usize>,
-                  kind: ElementKind,
-                  elements: &mut Vec<PreviewElement>,
-                  rendered: &mut String,
-                  last_end: &mut usize| {
-        let text = rendered.clone();
-        let len = rendered.graphemes(true).count();
-        rendered.clear();
-        *last_end = source.end;
-        elements.push(PreviewElement {
-            source,
-            kind,
-            text,
-            len,
-        });
-    };
-
-    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
-        match event {
-            Event::Text(text) | Event::Code(text) if !metadata && !code_block => {
-                pending_text = true;
-                rendered.push_str(text.as_ref());
-            }
-            Event::SoftBreak if !metadata && !code_block => {
-                pending_text = true;
-                rendered.push(' ');
-            }
-            Event::HardBreak if !metadata && !code_block => {
-                pending_text = true;
-                rendered.push('\n');
-            }
-            Event::Start(Tag::MetadataBlock(_)) => metadata = true,
-            Event::End(TagEnd::MetadataBlock(_)) => metadata = false,
-            // A new table starts with its header row.
-            Event::Start(Tag::TableHead) => {
-                cell_row = 0;
-                cell_column = 0;
-            }
-            Event::Start(Tag::TableRow) => {
-                cell_row += 1;
-                cell_column = 0;
-            }
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) if !metadata => {
-                code_block = true;
-
-                // A code block interrupts a paragraph in progress and flushes
-                // it as its own element first.
-                if pending_text {
-                    finish(
-                        last_end.min(range.start)..range.start,
-                        ElementKind::Text,
-                        &mut elements,
-                        &mut rendered,
-                        &mut last_end,
-                    );
-                    pending_text = false;
-                }
-            }
-            Event::End(TagEnd::CodeBlock) => code_block = false,
-            // Lists and quotes likewise interrupt a paragraph in progress.
-            // The pending text lies between the previous element and the
-            // interrupting block, so record that span.
-            Event::Start(Tag::List(_) | Tag::BlockQuote(_)) if !metadata && pending_text => {
-                finish(
-                    last_end.min(range.start)..range.start,
-                    ElementKind::Text,
-                    &mut elements,
-                    &mut rendered,
-                    &mut last_end,
-                );
-                pending_text = false;
-            }
-            // Images drain the pending text into an unnumbered item.
-            Event::End(TagEnd::Image) => {
-                pending_text = false;
-                rendered.clear();
-            }
-            Event::End(TagEnd::Heading(_)) if !metadata => {
-                finish(
-                    range,
-                    ElementKind::Text,
-                    &mut elements,
-                    &mut rendered,
-                    &mut last_end,
-                );
-                pending_text = false;
-            }
-            Event::End(TagEnd::TableCell) if !metadata => {
-                if pending_text {
-                    finish(
-                        range,
-                        ElementKind::Cell {
-                            row: cell_row,
-                            column: cell_column,
-                        },
-                        &mut elements,
-                        &mut rendered,
-                        &mut last_end,
-                    );
-                    pending_text = false;
-                }
-
-                // Empty cells render no element but still occupy a column.
-                cell_column += 1;
-            }
-            Event::End(TagEnd::Paragraph | TagEnd::Item) if !metadata && pending_text => {
-                finish(
-                    range,
-                    ElementKind::Text,
-                    &mut elements,
-                    &mut rendered,
-                    &mut last_end,
-                );
-                pending_text = false;
-            }
-            _ => {}
-        }
-    }
-
-    elements
-}
-
-fn element_for_source_cursor(content: &text_editor::Content, elements: &[PreviewElement]) -> usize {
-    if elements.is_empty() {
-        return 0;
-    }
-
-    let cursor = content.cursor().position;
-    let mut offset = 0;
-
-    for line_index in 0..cursor.line {
-        if let Some(line) = content.line(line_index) {
-            offset += line.text.len() + line.ending.as_str().len();
-        }
-    }
-
-    if let Some(line) = content.line(cursor.line) {
-        offset += line
-            .text
-            .char_indices()
-            .nth(cursor.column)
-            .map_or(line.text.len(), |(index, _)| index);
-    }
-
-    elements
-        .iter()
-        .position(|element| element.source.contains(&offset))
-        .unwrap_or_else(|| {
-            elements
-                .iter()
-                .rposition(|element| element.source.start <= offset)
-                .unwrap_or(0)
-        })
-}
-
-/// Resolves a caret [`Motion`] from the element at `current` to the index of
-/// the next element, if the motion leads anywhere.
-///
-/// The preview list is flat, so outside tables every motion degenerates to
-/// the previous or next element. Inside a table, `Up`/`Down` move between
-/// rows of the same column (exiting the table at its edges) while
-/// `Left`/`Right` move between the cells of a row — like navigating a grid
-/// in vim.
-/// Resolves a vertical caret [`Motion`] (`j`/`k`) from the element at
-/// `current` to the index of the next element, if the motion leads anywhere.
-///
-/// The preview list is flat, so outside tables the motion is simply the
-/// previous or next element. Inside a table, it moves between rows of the
-/// same column (exiting the table at its edges) — like navigating a grid
-/// in vim.
-fn preview_element_after(
-    elements: &[PreviewElement],
-    current: usize,
-    motion: Motion,
-) -> Option<usize> {
-    let last = elements.len().checked_sub(1)?;
-    let element = elements.get(current)?;
-
-    match element.kind {
-        ElementKind::Text => match motion {
-            Motion::Up => current.checked_sub(1),
-            Motion::Down => (current < last).then_some(current + 1),
-            Motion::Left | Motion::Right => None,
-        },
-        ElementKind::Cell { row, column } => match motion {
-            Motion::Down => elements[current + 1..]
-                .iter()
-                .position(|element| match element.kind {
-                    // The first element past the table exits below it.
-                    ElementKind::Text => true,
-                    ElementKind::Cell { row: r, column: c } => r == row + 1 && c == column,
-                })
-                .map(|offset| current + 1 + offset),
-            Motion::Up => elements[..current]
-                .iter()
-                .rposition(|element| match element.kind {
-                    // The last element before the table exits above it.
-                    ElementKind::Text => true,
-                    ElementKind::Cell { row: r, column: c } => r + 1 == row && c == column,
-                }),
-            Motion::Left | Motion::Right => None,
-        },
-    }
-}
-
-/// Applies a caret [`Motion`] to the caret position and returns the new
-/// element, column, and sticky target column — if the motion leads anywhere.
-///
-/// `h`/`l` move the caret one grapheme within the current element, crossing
-/// to the end of the previous element or the start of the next one at the
-/// edges, like moving along wrapped lines. `j`/`k` move between elements
-/// (rows of the same column in tables) and aim for the sticky target column,
-/// clamped to the destination element like vim.
-fn move_caret(
-    elements: &[PreviewElement],
-    cursor: usize,
-    column: usize,
-    column_target: usize,
-    motion: Motion,
-) -> Option<(usize, usize, usize)> {
-    let len = elements.get(cursor)?.len;
-
-    match motion {
-        Motion::Left => {
-            if column > 0 {
-                Some((cursor, column - 1, column - 1))
-            } else {
-                let previous = cursor.checked_sub(1)?;
-                let len = elements[previous].len;
-                Some((previous, len, len))
-            }
-        }
-        Motion::Right => {
-            if column < len {
-                Some((cursor, column + 1, column + 1))
-            } else {
-                let next = cursor
-                    .checked_add(1)
-                    .filter(|next| *next < elements.len())?;
-                Some((next, 0, 0))
-            }
-        }
-        Motion::Up | Motion::Down => {
-            let next = preview_element_after(elements, cursor, motion)?;
-            let column = column_target.min(elements[next].len);
-            Some((next, column, column_target))
-        }
-    }
-}
-
-/// The word class of a grapheme, like vim's notion of words: alphanumeric
-/// characters and `_` form words, whitespace separates them, and any other
-/// punctuation forms words of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CharClass {
-    Word,
-    Punct,
-    Space,
-}
-
-fn char_class(grapheme: &str) -> CharClass {
-    let Some(character) = grapheme.chars().next() else {
-        return CharClass::Space;
-    };
-
-    if character.is_alphanumeric() || character == '_' {
-        CharClass::Word
-    } else if character.is_whitespace() {
-        CharClass::Space
-    } else {
-        CharClass::Punct
-    }
-}
-
-/// Returns the grapheme columns where words start and end in the rendered
-/// text of an element. A word is a maximal run of word characters or of
-/// punctuation, like vim's `w`/`b`/`e`.
-fn word_columns(text: &str) -> (Vec<usize>, Vec<usize>) {
-    let classes: Vec<CharClass> = text.graphemes(true).map(char_class).collect();
-
-    let mut starts = Vec::new();
-    let mut ends = Vec::new();
-
-    for (i, &class) in classes.iter().enumerate() {
-        if class == CharClass::Space {
-            continue;
-        }
-
-        let previous = i.checked_sub(1).map(|p| classes[p]);
-        let next = classes.get(i + 1).copied();
-
-        let at_word_start = previous.is_none_or(|p| p == CharClass::Space || p != class);
-        let at_word_end = next.is_none_or(|n| n == CharClass::Space || n != class);
-
-        if at_word_start {
-            starts.push(i);
-        }
-
-        if at_word_end {
-            ends.push(i);
-        }
-    }
-
-    (starts, ends)
-}
-
-/// Applies a [`WordMotion`] (`w`, `b`, `e`, `ge`) to the caret position and
-/// returns the new element and column — if the motion leads anywhere.
-///
-/// The caret column counts grapheme boundaries, and the caret is a bar
-/// drawn between characters: `w`/`b` place it at the start of a word, while
-/// `e`/`ge` place it just past the last character of a word. Word motions
-/// cross element boundaries like vim crosses lines: `w`/`e` continue in the
-/// next element, `b`/`ge` in the previous one.
-fn move_word(
-    elements: &[PreviewElement],
-    cursor: usize,
-    column: usize,
-    motion: WordMotion,
-) -> Option<(usize, usize)> {
-    let element = elements.get(cursor)?;
-    let (starts, ends) = word_columns(&element.text);
-
-    // End motions aim just past the word's last character, since the caret
-    // is a bar drawn between characters — unlike vim's block cursor, which
-    // sits on the last character itself.
-    let end_column = |end: usize| end + 1;
-
-    let in_element = match motion {
-        WordMotion::NextStart => starts.iter().copied().find(|&start| start > column),
-        WordMotion::NextEnd => ends
-            .iter()
-            .copied()
-            .map(end_column)
-            .find(|&end| end > column),
-        WordMotion::PreviousStart => starts.iter().copied().rev().find(|&start| start < column),
-        WordMotion::PreviousEnd => ends
-            .iter()
-            .copied()
-            .rev()
-            .map(end_column)
-            .find(|&end| end < column),
-    };
-
-    if let Some(column) = in_element {
-        return Some((cursor, column));
-    }
-
-    // Cross to the neighbouring element, like crossing a line in vim.
-    let (neighbor, columns) = match motion {
-        WordMotion::NextStart | WordMotion::NextEnd => {
-            let next = cursor
-                .checked_add(1)
-                .filter(|&next| next < elements.len())?;
-            (next, word_columns(&elements[next].text))
-        }
-        WordMotion::PreviousStart | WordMotion::PreviousEnd => {
-            let previous = cursor.checked_sub(1)?;
-            (previous, word_columns(&elements[previous].text))
-        }
-    };
-
-    let (starts, ends) = columns;
-
-    let column = match motion {
-        WordMotion::NextStart => starts.first().copied().unwrap_or(0),
-        WordMotion::NextEnd => ends.first().copied().map_or(0, end_column),
-        WordMotion::PreviousStart => starts.last().copied().unwrap_or(0),
-        WordMotion::PreviousEnd => ends.last().copied().map_or(0, end_column),
-    };
-
-    Some((neighbor, column))
-}
-
-/// Jumps to the first (`gg`) or last (`G`) element, keeping the sticky
-/// target column like vim.
-fn jump_caret(
-    elements: &[PreviewElement],
-    column_target: usize,
-    jump: Jump,
-) -> Option<(usize, usize)> {
-    let index = match jump {
-        Jump::First => elements.first().map(|_| 0)?,
-        Jump::Last => elements.len().checked_sub(1)?,
-    };
-
-    let column = column_target.min(elements[index].len);
-
-    Some((index, column))
-}
-
-/// Computes the selected grapheme range of a single preview element for a
-/// visual-mode selection between the `anchor` and `caret` `(element,
-/// column)` positions: the endpoints select partial elements, everything
-/// between them fully.
-fn element_selection(
-    anchor: (usize, usize),
-    caret: (usize, usize),
-    index: usize,
-    len: usize,
-) -> Option<std::ops::Range<usize>> {
-    let ((lo_element, lo_column), (hi_element, hi_column)) = if anchor <= caret {
-        (anchor, caret)
-    } else {
-        (caret, anchor)
-    };
-
-    if index < lo_element || index > hi_element {
-        return None;
-    }
-
-    let start = if index == lo_element {
-        lo_column.min(len)
-    } else {
-        0
-    };
-    let end = if index == hi_element {
-        hi_column.min(len)
-    } else {
-        len
-    };
-
-    (end > start).then_some(start..end)
-}
-
 /// Saves the note popup text as a comment anchored at the preview caret,
 /// then closes the popup with a fresh note. Empty notes are discarded.
 fn save_note(editor: &mut Editor) {
-    editor.comments.save(
-        &editor.note_text.text(),
-        CaretPosition {
-            element: editor.preview_cursor,
-            column: editor.preview_column,
-        },
-    );
+    editor
+        .comments
+        .save(&editor.note_text.text(), editor.caret.position());
 
     editor.note_open = false;
     editor.note_text = text_editor::Content::new();
@@ -1047,7 +500,7 @@ struct PreviewViewer<'a> {
     focused_element: usize,
     caret_column: usize,
     /// The `(anchor, caret)` endpoints of the visual-mode selection.
-    visual: Option<((usize, usize), (usize, usize))>,
+    visual: Option<(CaretPosition, CaretPosition)>,
     /// Per-element lengths for visual-mode selections.
     elements: &'a [PreviewElement],
     /// Saved comments, to know which elements carry one.
@@ -1096,10 +549,10 @@ impl<'a> PreviewViewer<'a> {
         self.next_paragraph.set(element + 1);
 
         let focused = self.focused_element == element;
-        let len = self.elements.get(element).map_or(0, |element| element.len);
+        let len = self.elements.get(element).map_or(0, PreviewElement::len);
         let selection = self
             .visual
-            .and_then(|(anchor, caret)| element_selection(anchor, caret, element, len));
+            .and_then(|(anchor, caret)| preview::element_selection(anchor, caret, element, len));
         let mark = self.comments.mark_for(element);
         let commented = matches!(mark, Mark::Commented | Mark::Active);
         let active_comment = mark == Mark::Active;
@@ -1117,9 +570,8 @@ impl<'a> PreviewViewer<'a> {
 }
 
 fn view(editor: &Editor) -> Element<'_, Message> {
-    let visual = editor
-        .visual_anchor
-        .map(|anchor| (anchor, (editor.preview_cursor, editor.preview_column)));
+    let position = editor.caret.position();
+    let visual = editor.visual_anchor.map(|anchor| (anchor, position));
 
     let base_area: Element<'_, Message> = if editor.preview {
         scrollable(
@@ -1128,8 +580,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 markdown::Settings::with_text_size(20.0, markdown_style()),
                 &PreviewViewer {
                     next_paragraph: Cell::new(0),
-                    focused_element: editor.preview_cursor,
-                    caret_column: editor.preview_column,
+                    focused_element: position.element,
+                    caret_column: position.column,
                     visual,
                     elements: &editor.preview_elements,
                     comments: &editor.comments,
@@ -1666,10 +1118,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             }
         });
 
-    let preview_elements = contents
-        .as_deref()
-        .map(preview_elements)
-        .unwrap_or_default();
+    let preview_elements = contents.as_deref().map(preview::parse).unwrap_or_default();
 
     let editor = Editor {
         content: contents
@@ -1682,9 +1131,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             .unwrap_or_default(),
         preview: args.preview,
         preview_only: args.preview,
-        preview_cursor: 0,
-        preview_column: 0,
-        preview_column_target: 0,
+        caret: Caret::new(),
         preview_elements,
         pending_g: false,
         visual_anchor: None,
@@ -1735,12 +1182,9 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::comments::{CaretPosition, Comments, Mark};
-    use super::{
-        editor_mode, element_selection, handle_key_press, jump_caret, move_caret, move_word,
-        preview_element_after, preview_elements, save_note, Editor, ElementKind, Jump, Message,
-        Mode, Motion, WordMotion,
-    };
+    use super::comments::{Comments, Mark};
+    use super::preview::{Caret, CaretPosition, Motion, WordMotion};
+    use super::{editor_mode, handle_key_press, save_note, Editor, Message, Mode};
     use iced::keyboard::{self, key, Modifiers};
 
     fn key_pressed_with(
@@ -1833,35 +1277,6 @@ mod tests {
         assert!(key_pressed("v", true).is_none());
     }
 
-    /// Visual mode anchors one end and the caret forms the other; motions
-    /// between them select partial elements at the ends and full elements
-    /// in between, regardless of direction.
-    #[test]
-    fn visual_selection_spans_elements() {
-        // "aaaa", "bb", "cc" — element lengths 4, 2, 2.
-        let selection =
-            |anchor: (usize, usize), caret: (usize, usize), index: usize, len: usize| {
-                element_selection(anchor, caret, index, len)
-            };
-
-        // Within one element: `v` then `l` three times selects 3 chars.
-        assert_eq!(selection((0, 1), (0, 4), 0, 4), Some(1..4));
-        assert_eq!(selection((0, 1), (0, 4), 1, 2), None);
-
-        // Across elements: the start selects to the end of its element, the
-        // middle is full, the destination selects up to the caret column.
-        assert_eq!(selection((0, 1), (2, 1), 0, 4), Some(1..4));
-        assert_eq!(selection((0, 1), (2, 1), 1, 2), Some(0..2));
-        assert_eq!(selection((0, 1), (2, 1), 2, 2), Some(0..1));
-
-        // Direction does not matter.
-        assert_eq!(selection((2, 1), (0, 1), 1, 2), Some(0..2));
-
-        // Columns beyond an element's length clamp away.
-        assert_eq!(selection((1, 9), (1, 10), 1, 2), None);
-        assert_eq!(selection((0, 0), (0, 0), 0, 4), None);
-    }
-
     /// The bottom bar names the navigation mode: write when editing, view
     /// when previewing, and visual while a selection is anchored.
     #[test]
@@ -1871,9 +1286,7 @@ mod tests {
             markdown: iced::widget::markdown::Content::parse(""),
             preview: false,
             preview_only: false,
-            preview_cursor: 0,
-            preview_column: 0,
-            preview_column_target: 0,
+            caret: Caret::new(),
             preview_elements: Vec::new(),
             pending_g: false,
             visual_anchor: None,
@@ -1887,7 +1300,10 @@ mod tests {
         editor.preview = true;
         assert_eq!(editor_mode(&editor), Mode::View);
 
-        editor.visual_anchor = Some((0, 0));
+        editor.visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 0,
+        });
         assert_eq!(editor_mode(&editor), Mode::Visual);
 
         // Leaving visual mode returns to view.
@@ -1899,15 +1315,19 @@ mod tests {
     /// resets the popup; empty notes are discarded.
     #[test]
     fn saving_a_note_adds_a_comment() {
+        let mut caret = Caret::new();
+        caret.place(CaretPosition {
+            element: 1,
+            column: 2,
+        });
+
         let mut editor = Editor {
             content: iced::widget::text_editor::Content::with_text("# Title\n\nbody"),
             markdown: iced::widget::markdown::Content::parse(""),
             preview: true,
             preview_only: false,
-            preview_cursor: 1,
-            preview_column: 2,
-            preview_column_target: 2,
-            preview_elements: preview_elements("# Title\n\nbody"),
+            caret,
+            preview_elements: crate::preview::parse("# Title\n\nbody"),
             pending_g: false,
             visual_anchor: None,
             note_open: true,
@@ -1996,214 +1416,5 @@ mod tests {
             handle_key_press(ctrl_s, true, false, false, true),
             Some(Message::SaveNote)
         ));
-    }
-
-    /// The preview caret stops early when `preview_elements` disagrees
-    /// with the number of elements the Markdown viewer actually numbers
-    /// (list items are `viewer.paragraph` calls too). This pins the parity,
-    /// and the grid position of table cells.
-    #[test]
-    fn elements_match_preview_viewer_numbering() {
-        let markdown = "\
-# Title
-
-Intro paragraph.
-
-> quote
-
-| A | B |
-|---|---|
-| 1 | 2 |
-
-- one
-- two
-  - nested
-
-1. first
-
-- [ ] todo
-- [x] done
-
-## Tail
-
-```rust
-fn main() {}
-```
-";
-
-        let elements = preview_elements(markdown);
-        let texts: Vec<&str> = elements
-            .iter()
-            .map(|element| &markdown[element.source.clone()])
-            .collect();
-
-        // Headings, paragraphs, quotes, table cells, and every list item
-        // (tight, ordered, task, and nested) — but not the code block.
-        assert_eq!(texts.len(), 14);
-        for (text, expected) in texts.iter().zip([
-            "Title", "Intro", "quote", "A", "B", "1", "2", "one", "two", "nested", "first", "todo",
-            "done", "Tail",
-        ]) {
-            assert!(text.contains(expected), "expected '{expected}' in '{text}'");
-        }
-
-        // Table cells carry their grid position: A B / 1 2.
-        let kinds: Vec<ElementKind> = elements.iter().map(|element| element.kind).collect();
-        assert_eq!(
-            kinds[3..7],
-            [
-                ElementKind::Cell { row: 0, column: 0 },
-                ElementKind::Cell { row: 0, column: 1 },
-                ElementKind::Cell { row: 1, column: 0 },
-                ElementKind::Cell { row: 1, column: 1 },
-            ]
-        );
-    }
-
-    /// `j`/`k` navigate tables as a grid: they move between rows of the same
-    /// column and exit the table at its edges.
-    #[test]
-    fn vim_motions_navigate_tables_by_grid() {
-        let markdown = "\
-intro
-
-| A | B |
-|---|---|
-| 1 | 2 |
-
-outro
-";
-
-        // intro, A, B, 1, 2, outro
-        let elements = preview_elements(markdown);
-        let navigate = |from, motion| preview_element_after(&elements, from, motion);
-
-        // Down descends a column and exits the table below it.
-        assert_eq!(navigate(0, Motion::Down), Some(1)); // intro → A
-        assert_eq!(navigate(1, Motion::Down), Some(3)); // A → 1
-        assert_eq!(navigate(3, Motion::Down), Some(5)); // 1 → outro
-        assert_eq!(navigate(5, Motion::Down), None); // end of document
-
-        // Up climbs the column and exits the table above it.
-        assert_eq!(navigate(4, Motion::Up), Some(2)); // 2 → B
-        assert_eq!(navigate(2, Motion::Up), Some(0)); // B → intro
-        assert_eq!(navigate(0, Motion::Up), None); // start of document
-    }
-
-    /// `h`/`l` move the caret one character at a time; at the edges of an
-    /// element they cross to the end of the previous element or the start of
-    /// the next one, like moving along wrapped lines.
-    #[test]
-    fn h_and_l_move_one_character() {
-        // Two text elements: "aa bb" and "cc dd".
-        let elements = preview_elements("aa bb\n\ncc dd");
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[0].len, 5);
-        assert_eq!(elements[1].len, 5);
-
-        let motion =
-            |cursor, column, target, motion| move_caret(&elements, cursor, column, target, motion);
-
-        // `l` walks the element one character at a time.
-        assert_eq!(motion(0, 0, 0, Motion::Right), Some((0, 1, 1)));
-        assert_eq!(motion(0, 4, 4, Motion::Right), Some((0, 5, 5)));
-        // At the end of the element, `l` crosses to the next one.
-        assert_eq!(motion(0, 5, 5, Motion::Right), Some((1, 0, 0)));
-        assert_eq!(motion(1, 5, 5, Motion::Right), None); // end of document
-
-        // `h` mirrors it, crossing to the end of the previous element.
-        assert_eq!(motion(1, 0, 0, Motion::Left), Some((0, 5, 5)));
-        assert_eq!(motion(0, 1, 1, Motion::Left), Some((0, 0, 0)));
-        assert_eq!(motion(0, 0, 0, Motion::Left), None); // start of document
-    }
-
-    /// `j`/`k` keep the vim sticky column: the target column survives moves
-    /// and clamps to the destination element's length.
-    #[test]
-    fn j_and_k_keep_the_sticky_column() {
-        // "aaaa", "bb", "ccccc"
-        let elements = preview_elements("aaaa\n\nbb\n\nccccc");
-        assert_eq!(elements.len(), 3);
-
-        let motion =
-            |cursor, column, target, motion| move_caret(&elements, cursor, column, target, motion);
-
-        // The column clamps when moving to a shorter element...
-        assert_eq!(motion(0, 3, 3, Motion::Down), Some((1, 2, 3)));
-        // ...and returns when moving on to a longer one.
-        assert_eq!(motion(1, 2, 3, Motion::Down), Some((2, 3, 3)));
-        assert_eq!(motion(2, 3, 3, Motion::Up), Some((1, 2, 3)));
-
-        // In tables the sticky column applies to the destination cell.
-        let markdown = "\
-| Feature | Editor |
-|---|---|
-| Headings | ✅ |
-";
-        let cells = preview_elements(markdown);
-        // Feature → Headings in the same table column.
-        let moved = move_caret(&cells, 0, 5, 5, Motion::Down);
-        assert_eq!(moved, Some((2, 5, 5)));
-        let moved = move_caret(&cells, 1, 3, 3, Motion::Down);
-        // ✅ is one grapheme, so the column clamps to 1.
-        assert_eq!(moved, Some((3, 1, 3)));
-    }
-
-    /// `w`/`b` jump between word starts and `e`/`ge` between word ends,
-    /// treating punctuation runs as words like vim; at element edges they
-    /// cross to the neighbouring element like crossing a line.
-    #[test]
-    fn w_b_e_and_ge_move_by_words() {
-        // "one two, three" — words: one, two, ",", three.
-        let elements = preview_elements("one two, three\n\nnext");
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[0].text, "one two, three");
-
-        let word = |cursor, column, motion| move_word(&elements, cursor, column, motion);
-
-        // w walks the word starts, comma included.
-        assert_eq!(word(0, 0, WordMotion::NextStart), Some((0, 4))); // → two
-        assert_eq!(word(0, 4, WordMotion::NextStart), Some((0, 7))); // → ,
-        assert_eq!(word(0, 7, WordMotion::NextStart), Some((0, 9))); // → three
-        assert_eq!(word(0, 9, WordMotion::NextStart), Some((1, 0))); // → next
-        assert_eq!(word(1, 4, WordMotion::NextStart), None); // end of document
-
-        // b walks them backwards.
-        assert_eq!(word(0, 9, WordMotion::PreviousStart), Some((0, 7)));
-        assert_eq!(word(0, 4, WordMotion::PreviousStart), Some((0, 0)));
-        assert_eq!(word(0, 0, WordMotion::PreviousStart), None); // start of document
-
-        // e places the caret just past the last character of each word.
-        assert_eq!(word(0, 0, WordMotion::NextEnd), Some((0, 3))); // one|
-        assert_eq!(word(0, 3, WordMotion::NextEnd), Some((0, 7))); // two|
-        assert_eq!(word(0, 7, WordMotion::NextEnd), Some((0, 8))); // ,|
-        assert_eq!(word(0, 8, WordMotion::NextEnd), Some((0, 14))); // three|
-        assert_eq!(word(0, 14, WordMotion::NextEnd), Some((1, 4))); // next| (crosses)
-        assert_eq!(word(1, 4, WordMotion::NextEnd), None); // end of document
-
-        // ge places it just past the last character of the previous word,
-        // crossing elements at the start.
-        assert_eq!(word(0, 9, WordMotion::PreviousEnd), Some((0, 8)));
-        assert_eq!(word(0, 4, WordMotion::PreviousEnd), Some((0, 3)));
-        assert_eq!(word(0, 0, WordMotion::PreviousEnd), None);
-        assert_eq!(word(1, 0, WordMotion::PreviousEnd), Some((0, 14)));
-    }
-
-    /// `gg` and `G` jump to the first and last element, keeping vim's sticky
-    /// column clamped to the destination element.
-    #[test]
-    fn gg_and_g_jump_between_document_ends() {
-        // "aaaa", "b", "ccccc"
-        let elements = preview_elements("aaaa\n\nb\n\nccccc");
-        assert_eq!(elements.len(), 3);
-
-        assert_eq!(jump_caret(&elements, 3, Jump::First), Some((0, 3)));
-        assert_eq!(jump_caret(&elements, 3, Jump::Last), Some((2, 3)));
-        // The sticky column clamps to shorter elements.
-        assert_eq!(jump_caret(&elements, 9, Jump::Last), Some((2, 5)));
-        assert_eq!(jump_caret(&elements, 9, Jump::First), Some((0, 4)));
-
-        assert_eq!(jump_caret(&[], 0, Jump::First), None);
-        assert_eq!(jump_caret(&[], 0, Jump::Last), None);
     }
 }

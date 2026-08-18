@@ -8,19 +8,11 @@
 
 use iced::widget::text_editor;
 
-use crate::PreviewElement;
+use crate::preview::{CaretPosition, PreviewElement};
 
 /// How many characters of an element's Markdown source a comment card
 /// quotes before cutting it off.
 const COMMENT_QUOTE_MAX_CHARS: usize = 60;
-
-/// A caret position in the preview: an element index plus a grapheme column
-/// within the element's rendered text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CaretPosition {
-    pub element: usize,
-    pub column: usize,
-}
 
 /// Whether a preview element carries a comment, and which kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +158,7 @@ fn quote(source: &str, elements: &[PreviewElement], index: usize, max_chars: usi
         return String::new();
     };
 
-    let source = source[element.source.clone()].trim();
+    let source = source[element.source()].trim();
     let mut collapsed = String::with_capacity(source.len());
 
     for word in source.split_whitespace() {
@@ -188,7 +180,7 @@ fn quote(source: &str, elements: &[PreviewElement], index: usize, max_chars: usi
 #[cfg(test)]
 mod tests {
     use super::{CaretPosition, Comments, Mark};
-    use crate::preview_elements;
+    use crate::preview::parse;
 
     fn at(element: usize) -> CaretPosition {
         CaretPosition { element, column: 0 }
@@ -251,7 +243,7 @@ mod tests {
     #[test]
     fn cards_quote_the_anchored_source() {
         let markdown = "# Some rather long heading text here\n\nshort";
-        let elements = preview_elements(markdown);
+        let elements = parse(markdown);
 
         let mut comments = Comments::new();
         comments.save("note", at(1));
@@ -263,7 +255,7 @@ mod tests {
 
         // Sources longer than the quote limit are cut off with an ellipsis.
         let long = format!("# {}\n\nbody", "a".repeat(80));
-        let elements = preview_elements(&long);
+        let elements = parse(&long);
 
         let mut comments = Comments::new();
         comments.save("note", at(0));
