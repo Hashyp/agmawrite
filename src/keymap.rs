@@ -11,19 +11,9 @@
 
 use iced::keyboard;
 
+use crate::help;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 use crate::Message;
-
-/// Whether a key press is the help chord: `Ctrl + ?` — `Ctrl + /` counts
-/// too, since `?` is shifted `/` on US layouts and some platforms report
-/// the unshifted character. The keymap and the keyboard guard both read
-/// this, so they agree by construction.
-pub fn is_help_chord(key: &keyboard::Key<&str>, modifiers: &keyboard::Modifiers) -> bool {
-    modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(key, keyboard::Key::Character("?" | "/"))
-}
 
 /// The highest a pending count may grow: `99999j` and `9999999999j` both
 /// scroll to the document's end instead of overflowing.
@@ -180,6 +170,17 @@ impl Keymap {
     /// [`Keymap::note`] once the produced message is dispatched, so key
     /// handling and message handling never see different states.
     pub fn handle(&self, event: keyboard::Event) -> Option<Message> {
+        // Help owns its chord and modal keyboard decisions; the keymap
+        // only supplies the visibility state and translates the decision
+        // into an application message.
+        match help::keyboard_action(self.help_open, &event) {
+            help::EventAction::Open => return Some(Message::OpenHelp),
+            help::EventAction::Close => return Some(Message::Help(help::Message::Close)),
+            help::EventAction::Capture => return None,
+            help::EventAction::Pass if self.help_open => return None,
+            help::EventAction::Pass => {}
+        }
+
         let keyboard::Event::KeyPressed {
             modified_key,
             modifiers,
@@ -189,22 +190,6 @@ impl Keymap {
         else {
             return None;
         };
-
-        // Help is a read-only modal overlay. It takes the Ctrl+? shortcut
-        // before any other popup or mode can interpret it; Escape and the
-        // chord itself toggle it closed. Every other key press is left to
-        // the help window's search field, which receives it through the
-        // widget tree — no underlying editor state is touched while it is
-        // open.
-        if self.help_open {
-            return match modified_key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
-                    Some(Message::CloseHelp)
-                }
-                key if !repeat && is_help_chord(&key, &modifiers) => Some(Message::CloseHelp),
-                _ => None,
-            };
-        }
 
         // The unsaved-changes dialog is a modal too: Escape cancels it, the
         // three buttons answer it, and every other key is swallowed so the
@@ -216,13 +201,6 @@ impl Keymap {
                 }
                 _ => None,
             };
-        }
-
-        // Ctrl+? opens help from every mode, including while another popup
-        // is open. The existing popup and editor state remains underneath
-        // it.
-        if !repeat && is_help_chord(&modified_key.as_ref(), &modifiers) {
-            return Some(Message::OpenHelp);
         }
 
         // The note popup swallows plain keys for its text area; only Escape
@@ -408,8 +386,7 @@ impl Keymap {
                 | Message::PreviewZPressed
                 | Message::PreviewCountPressed(_)
                 | Message::OpenHelp
-                | Message::CloseHelp
-                | Message::HelpCardPressed
+                | Message::Help(_)
         );
 
         if keeps_pending {
@@ -470,7 +447,7 @@ impl Keymap {
             Message::OpenFind => self.find_open = true,
             Message::CloseFind => self.find_open = false,
             Message::OpenHelp => self.help_open = true,
-            Message::CloseHelp => self.help_open = false,
+            Message::Help(help::Message::Close) => self.help_open = false,
             // The unsaved-changes dialog: shown when update decides the
             // document is modified, answered by its three buttons or
             // Escape.
@@ -495,6 +472,7 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::{Keymap, Mode};
+    use crate::help;
     use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
     use crate::Message;
     use iced::keyboard::{self, key, Modifiers};
@@ -829,12 +807,15 @@ mod tests {
         }
 
         // Escape closes; the chord toggles closed too.
-        assert!(matches!(write.handle(escape()), Some(Message::CloseHelp)));
+        assert!(matches!(
+            write.handle(escape()),
+            Some(Message::Help(help::Message::Close))
+        ));
         assert!(matches!(
             write.handle(key_press_with("?", Modifiers::CTRL, false)),
-            Some(Message::CloseHelp)
+            Some(Message::Help(help::Message::Close))
         ));
-        write.note(&Message::CloseHelp);
+        write.note(&Message::Help(help::Message::Close));
         assert!(!write.help_open());
         assert_eq!(write.mode(), Mode::Write);
 
@@ -843,7 +824,7 @@ mod tests {
         view.note(&Message::PreviewGPressed);
         view.note(&Message::OpenHelp);
         assert_eq!(view.mode(), Mode::View);
-        view.note(&Message::CloseHelp);
+        view.note(&Message::Help(help::Message::Close));
         assert!(matches!(
             view.handle(key_press("g", false)),
             Some(Message::MovePreviewJump(Jump::First, 0))

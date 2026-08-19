@@ -1,6 +1,7 @@
 mod comments;
 mod editing;
 mod find;
+mod help;
 mod highlight;
 mod interactive_text;
 mod keymap;
@@ -8,7 +9,7 @@ mod preview;
 mod theme;
 
 use comments::{Comments, Mark, Span};
-use keymap::{is_help_chord, Keymap, Mode};
+use keymap::{Keymap, Mode};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
 
@@ -32,8 +33,6 @@ const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
 /// The id of the find popup's query field, focused when the popup opens.
 const FIND_INPUT_ID: &str = "find-input";
-/// The id of the help window's search field, focused when the window opens.
-const HELP_INPUT_ID: &str = "help-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
 /// canvas size.
 const ICON_DESIGN_SIZE: f32 = 16.0;
@@ -72,9 +71,8 @@ struct Editor {
     sidebar_override: Option<bool>,
     /// The find popup's state: the query and the current match.
     find: find::Find,
-    /// The help window's search query, filtering the shortcuts list live;
-    /// it clears when the window closes so every search starts fresh.
-    help_query: String,
+    /// The shortcuts Help window's query state.
+    help: help::Help,
     /// The contents as last loaded or saved — the baseline the
     /// unsaved-changes detection compares against.
     saved_contents: String,
@@ -137,9 +135,7 @@ enum Message {
     OpenFind,
     CloseFind,
     OpenHelp,
-    CloseHelp,
-    HelpCardPressed,
-    HelpQueryChanged(String),
+    Help(help::Message),
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
@@ -927,25 +923,25 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::FindNext => return select_find_match(editor, find::Way::Next),
         Message::FindPrevious => return select_find_match(editor, find::Way::Previous),
-        // The help window only ever owns focus: opening focuses its search
-        // field, and closing clears the query and hands focus back to the
-        // field underneath — the editor state itself never changes.
-        Message::OpenHelp => return focus(Id::new(HELP_INPUT_ID)),
-        Message::CloseHelp => {
-            editor.help_query.clear();
+        // Help owns its query and internal events. The root only composes
+        // the window and restores whichever field was underneath it.
+        Message::OpenHelp => return help::focus_input(),
+        Message::Help(message) => {
+            let closed = matches!(message, help::Message::Close);
+            editor.help.update(message);
 
-            if editor.keymap.find_open() {
-                return focus(Id::new(FIND_INPUT_ID));
-            }
-            if editor.keymap.note_open() {
-                return focus(Id::new(NOTE_EDITOR_ID));
-            }
-            if !editor.keymap.preview() {
-                return focus(Id::new(SOURCE_EDITOR_ID));
+            if closed {
+                if editor.keymap.find_open() {
+                    return focus(Id::new(FIND_INPUT_ID));
+                }
+                if editor.keymap.note_open() {
+                    return focus(Id::new(NOTE_EDITOR_ID));
+                }
+                if !editor.keymap.preview() {
+                    return focus(Id::new(SOURCE_EDITOR_ID));
+                }
             }
         }
-        Message::HelpQueryChanged(query) => editor.help_query = query,
-        Message::HelpCardPressed => {}
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
@@ -1119,9 +1115,23 @@ enum KeyboardGuardAction {
 }
 
 fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAction {
+    // Help owns its chord and modal keyboard policy. It sits above every
+    // other modal, so its decisions have first refusal here.
+    match help::event_action(keymap.help_open(), event) {
+        help::EventAction::Open => return KeyboardGuardAction::OpenHelp,
+        help::EventAction::Close => return KeyboardGuardAction::CloseHelp,
+        help::EventAction::Capture => return KeyboardGuardAction::Capture,
+        help::EventAction::Pass => {}
+    }
+
+    // While Help is open, passed events belong to its focused search field,
+    // never to another modal beneath it.
+    if keymap.help_open() {
+        return KeyboardGuardAction::Pass;
+    }
+
     // Do not let an active input method commit or alter pre-edit text
-    // behind the unsaved-changes dialog. The help window's search field
-    // takes input-method events like any text input.
+    // behind the unsaved-changes dialog.
     if keymap.unsaved_open() && matches!(event, iced::Event::InputMethod(_)) {
         return KeyboardGuardAction::Capture;
     }
@@ -1136,31 +1146,6 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
         return KeyboardGuardAction::Pass;
     };
 
-    if keymap.help_open() {
-        // The help window's search field owns typing while the overlay is
-        // open (focus lives on it, so nothing beneath reacts). Only the
-        // closers — Escape and the Ctrl + ? toggle — and Tab, which would
-        // otherwise wander focus beneath the overlay, are claimed.
-        if !repeat {
-            if matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-            ) || is_help_chord(&modified_key.as_ref(), modifiers)
-            {
-                return KeyboardGuardAction::CloseHelp;
-            }
-
-            if matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Tab)
-            ) {
-                return KeyboardGuardAction::Capture;
-            }
-        }
-
-        return KeyboardGuardAction::Pass;
-    }
-
     // The unsaved-changes dialog captures every key press so the editing
     // surface beneath cannot react; Escape cancels it.
     if keymap.unsaved_open() {
@@ -1173,10 +1158,6 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
         } else {
             KeyboardGuardAction::Capture
         };
-    }
-
-    if !repeat && is_help_chord(&modified_key.as_ref(), modifiers) {
-        return KeyboardGuardAction::OpenHelp;
     }
 
     if !repeat
@@ -1284,7 +1265,9 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
         ) {
             match keyboard_guard_action(self.keymap, event) {
                 KeyboardGuardAction::OpenHelp => shell.publish(Message::OpenHelp),
-                KeyboardGuardAction::CloseHelp => shell.publish(Message::CloseHelp),
+                KeyboardGuardAction::CloseHelp => {
+                    shell.publish(Message::Help(help::Message::Close))
+                }
                 KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
                 KeyboardGuardAction::CloseNote => shell.publish(Message::CloseNotePopup),
                 KeyboardGuardAction::CancelUnsaved => shell.publish(Message::UnsavedCancel),
@@ -1328,198 +1311,6 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
     }
 
     Element::new(KeyboardGuard { content, keymap })
-}
-
-/// Every keyboard shortcut handled by the application, kept next to the
-/// help popup so the displayed list cannot drift from the user-facing
-/// shortcut vocabulary.
-const HELP_SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl + ?", "Open this shortcuts help window."),
-    (
-        "Esc",
-        "Close help/popups, leave visual mode, or unfocus a text field.",
-    ),
-    ("Ctrl + O", "Open a Markdown file."),
-    ("Ctrl + P", "Toggle between writing and preview mode."),
-    (
-        "Ctrl + S",
-        "Save the document; save the note when its popup is open.",
-    ),
-    ("Ctrl + F", "Open find in the document."),
-    ("Ctrl + G", "Find the next match while find is open."),
-    ("Ctrl + B", "Show or hide the comments sidebar."),
-    ("Ctrl + N", "Jump to the next saved comment in preview."),
-    (
-        "Ctrl + A",
-        "Select all text in the focused editor or field.",
-    ),
-    ("Ctrl + C", "Copy selected text."),
-    ("Ctrl + X", "Cut selected text."),
-    ("Ctrl + V", "Paste text."),
-    (
-        "Arrow keys",
-        "Move the focused text cursor, or the caret in preview.",
-    ),
-    (
-        "Shift + movement keys",
-        "Extend a focused selection while moving.",
-    ),
-    (
-        "Ctrl + ← / →",
-        "Move by words in the focused editor or field.",
-    ),
-    (
-        "Ctrl + Shift + ← / →",
-        "Extend the focused selection by words.",
-    ),
-    ("Home / End", "Move to the start or end of a line or field."),
-    (
-        "Ctrl + Home / End",
-        "Move to the start or end of the source document.",
-    ),
-    ("Page Up / Page Down", "Move by pages in the source editor."),
-    (
-        "Backspace / Delete",
-        "Delete text before or after the focused cursor.",
-    ),
-    (
-        "h/H · j/J · k/K · l/L",
-        "Move the preview caret left, down, up, or right.",
-    ),
-    ("w/W", "Move to the next word start in preview."),
-    ("b/B", "Move to the previous word start in preview."),
-    ("e/E", "Move to the next word end in preview."),
-    ("0", "Move to the start of the preview element."),
-    (
-        "1-9 then motion",
-        "Repeat a preview motion: 3j, 10k, 2h, 3l, 3w, 5G, 3gg.",
-    ),
-    ("Ctrl + D / Ctrl + U", "Scroll the preview half a page down or up."),
-    ("Page Up / Page Down", "Scroll the preview a full page."),
-    (
-        "z then z/t/b",
-        "Center, top, or bottom the preview around the caret.",
-    ),
-    ("g then e/E", "Move to the previous word end in preview."),
-    ("g then g", "Jump to the first preview element."),
-    ("G", "Jump to the last preview element."),
-    ("v/V", "Toggle visual selection mode in preview."),
-    ("c/C", "Open a note popup at the preview caret."),
-    (
-        "Enter",
-        "Insert a line break, or find the next match while find is open.",
-    ),
-    (
-        "Shift + Enter",
-        "Find the previous match while find is open.",
-    ),
-    (
-        "Enter (preview)",
-        "Open the active comment for editing.",
-    ),
-    (
-        "Ctrl + Enter",
-        "Add the sidebar draft as a global comment.",
-    ),
-    (
-        "Ctrl + Shift + Enter",
-        "Trigger the sidebar's Publish button.",
-    ),
-];
-
-/// The help window's incremental search: the shortcut rows matching
-/// `query` — the key or the description containing it,
-/// ASCII-case-insensitively like find. An empty query keeps the whole
-/// list.
-fn help_matches(query: &str) -> Vec<(&'static str, &'static str)> {
-    HELP_SHORTCUTS
-        .iter()
-        .filter(|(shortcut, description)| {
-            query.is_empty()
-                || !editing::byte_matches(shortcut, query).is_empty()
-                || !editing::byte_matches(description, query).is_empty()
-        })
-        .map(|(shortcut, description)| (*shortcut, *description))
-        .collect()
-}
-
-/// A centered shortcuts window with incremental search: typing filters the
-/// list down to the shortcuts and descriptions matching the query. Both
-/// the card and its backdrop capture clicks so the editing surface below
-/// cannot receive them.
-fn help_popup(query: &str, palette: Palette) -> Element<'static, Message> {
-    let matches = help_matches(query);
-    let list: Element<'static, Message> = if matches.is_empty() {
-        text("No matching shortcuts")
-            .font(EDITOR_FONT)
-            .size(13)
-            .color(palette.dark_foreground)
-            .into()
-    } else {
-        let rows: Vec<Element<'static, Message>> = matches
-            .into_iter()
-            .map(|(shortcut, description)| {
-                row![
-                    container(
-                        text(shortcut)
-                            .font(EDITOR_FONT)
-                            .size(13)
-                            .color(palette.foreground)
-                    )
-                    .width(Length::Fixed(240.0)),
-                    text(description)
-                        .font(EDITOR_FONT)
-                        .size(13)
-                        .color(palette.light_foreground),
-                ]
-                .spacing(12)
-                .align_y(alignment::Vertical::Center)
-                .width(Length::Fill)
-                .into()
-            })
-            .collect();
-
-        column(rows).spacing(9).width(Length::Fill).into()
-    };
-
-    let card = mouse_area(
-        container(
-            column![
-                text("Keyboard shortcuts")
-                    .font(EDITOR_FONT)
-                    .size(16)
-                    .color(palette.foreground),
-                text("Esc or Ctrl + ? closes")
-                    .font(EDITOR_FONT)
-                    .size(12)
-                    .color(palette.dark_foreground),
-                text_input("Search shortcuts…", query)
-                    .id(Id::new(HELP_INPUT_ID))
-                    .on_input(Message::HelpQueryChanged)
-                    .font(EDITOR_FONT)
-                    .size(13)
-                    .padding(6),
-                scrollable(list).height(Length::Fixed(440.0)),
-            ]
-            .spacing(12)
-            .width(Length::Fill),
-        )
-        .width(Length::Fixed(680.0))
-        .padding(20)
-        .style(move |_theme| note_card_style(&palette)),
-    )
-    .on_press(Message::HelpCardPressed);
-
-    mouse_area(
-        container(card)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .style(note_backdrop_style),
-    )
-    .on_press(Message::CloseHelp)
-    .on_scroll(|_| Message::HelpCardPressed)
-    .into()
 }
 
 /// Whether the comments sidebar is showing: the manual `Ctrl+B` override
@@ -2222,7 +2013,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     // focus back, so cursor and selections resume exactly where they were
     // after Escape closes the overlay.
     if editor.keymap.help_open() {
-        layers = layers.push(help_popup(&editor.help_query, palette));
+        layers = layers.push(help::view(&editor.help, palette).map(Message::Help));
     }
 
     keyboard_guard(layers.into(), editor.keymap)
@@ -3039,7 +2830,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         comments: Comments::new(),
         sidebar_override: None,
         find: find::Find::new(),
-        help_query: String::new(),
+        help: help::Help::new(),
         saved_contents: contents.clone().unwrap_or_default(),
         pending_unsaved: None,
         editing_comment: None,
@@ -3098,8 +2889,8 @@ mod tests {
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::{
-        forward_file_change, help_matches, keyboard_guard_action, may_change_file,
-        replace_source_text, update, Editor, KeyboardGuardAction, Message, HELP_SHORTCUTS,
+        forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
+        Editor, KeyboardGuardAction, Message,
     };
     use super::theme::Palette;
     use super::{is_modified, UnsavedAction};
@@ -3123,7 +2914,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
-            help_query: String::new(),
+            help: super::help::Help::new(),
             saved_contents: contents.to_owned(),
             pending_unsaved: None,
             editing_comment: None,
@@ -3149,7 +2940,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
-            help_query: String::new(),
+            help: super::help::Help::new(),
             saved_contents: "first\nsecond".to_owned(),
             pending_unsaved: None,
             editing_comment: None,
@@ -3161,7 +2952,7 @@ mod tests {
         });
         let before = source.content.cursor();
         let _ = update(&mut source, Message::OpenHelp);
-        let _ = update(&mut source, Message::CloseHelp);
+        let _ = update(&mut source, Message::Help(super::help::Message::Close));
         assert_eq!(source.content.cursor(), before);
 
         let mut preview = editor_at(
@@ -3178,7 +2969,7 @@ mod tests {
         let caret = preview.caret.position();
         let anchor = preview.visual_anchor;
         let _ = update(&mut preview, Message::OpenHelp);
-        let _ = update(&mut preview, Message::CloseHelp);
+        let _ = update(&mut preview, Message::Help(super::help::Message::Close));
         assert_eq!(preview.caret.position(), caret);
         assert_eq!(preview.visual_anchor, anchor);
     }
@@ -3261,75 +3052,6 @@ mod tests {
         let mut find = write;
         find.note(&Message::OpenFind);
         assert_eq!(keyboard_guard_action(find, &escape), KeyboardGuardAction::CloseFind);
-    }
-
-    /// Help includes both application commands and the standard editing
-    /// shortcuts supplied by iced's text widgets.
-    #[test]
-    fn help_lists_standard_editing_shortcuts() {
-        for shortcut in ["Ctrl + A", "Ctrl + C", "Ctrl + X", "Ctrl + V"] {
-            assert!(
-                HELP_SHORTCUTS.iter().any(|(key, _)| *key == shortcut),
-                "missing {shortcut}"
-            );
-        }
-
-        // The help window's own chord leads the list.
-        assert_eq!(HELP_SHORTCUTS[0].0, "Ctrl + ?");
-    }
-
-    /// The help window's search filters the list incrementally: an empty
-    /// query keeps everything, a query matches the key or the description
-    /// case-insensitively, and a query nothing matches empties the list.
-    #[test]
-    fn help_search_filters_the_shortcut_list() {
-        assert_eq!(help_matches("").len(), HELP_SHORTCUTS.len());
-
-        // Matching is case-insensitive over both columns.
-        for query in ["preview", "PREVIEW", "Ctrl"] {
-            let matches = help_matches(query);
-            assert!(
-                !matches.is_empty(),
-                "'{query}' should match some shortcuts"
-            );
-            assert!(matches.iter().all(|(key, description)| {
-                key.to_lowercase().contains(&query.to_lowercase())
-                    || description
-                        .to_lowercase()
-                        .contains(&query.to_lowercase())
-            }));
-        }
-
-        // A query matching only descriptions still filters the list.
-        assert!(help_matches("sidebar")
-            .iter()
-            .all(|(_, description)| description.to_lowercase().contains("sidebar")));
-
-        // A query matching a key by its label works too.
-        assert!(help_matches("page up")
-            .iter()
-            .any(|(key, _)| key.to_lowercase().contains("page up")));
-
-        assert!(help_matches("no shortcut has this text").is_empty());
-    }
-
-    /// The help window's query lives in the editor and clears when the
-    /// window closes, so every search starts fresh.
-    #[test]
-    fn help_search_clears_when_the_window_closes() {
-        let mut editor = editor_at(
-            "first\n\nsecond",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-
-        let _ = update(&mut editor, Message::HelpQueryChanged("gg".to_owned()));
-        assert_eq!(editor.help_query, "gg");
-
-        let _ = update(&mut editor, Message::CloseHelp);
-        assert_eq!(editor.help_query, "");
     }
 
     /// Saving the popup note stores a comment anchored at the caret and
@@ -3615,7 +3337,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
-            help_query: String::new(),
+            help: super::help::Help::new(),
             saved_contents: "- item".to_owned(),
             pending_unsaved: None,
             editing_comment: None,
