@@ -32,6 +32,8 @@ pub enum Motion {
     Down,
     Left,
     Right,
+    /// `0` — to the start of the current element, like vim's line start.
+    Start,
 }
 
 /// A word motion in the preview, like the vim keys `w`, `b`, `e`, and `ge`.
@@ -54,6 +56,27 @@ pub enum Jump {
     First,
     /// `G` — to the last element.
     Last,
+}
+
+/// A page of the preview viewport, scrolled by `Ctrl+D`/`Ctrl+U` (half)
+/// and `PageDown`/`PageUp` (full), like vim's scroll commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    HalfUp,
+    HalfDown,
+    FullUp,
+    FullDown,
+}
+
+/// Where a `zz`/`zt`/`zb` scroll places the caret inside the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// `zz` — the middle of the viewport.
+    Center,
+    /// `zt` — the top of the viewport.
+    Top,
+    /// `zb` — the bottom of the viewport.
+    Bottom,
 }
 
 /// The kind of a preview element, used for grid-style navigation in tables.
@@ -184,20 +207,47 @@ impl Caret {
         self.column_target = position.column;
     }
 
-    /// Applies a caret [`Motion`] (`h`/`j`/`k`/`l`), returning whether the
-    /// caret moved.
+    /// Applies a caret [`Motion`] (`h`/`j`/`k`/`l`) `count` times —
+    /// `3j` moves three elements down — stopping early at the document's
+    /// edges like vim. A `count` of `0` moves once.
     ///
     /// `h`/`l` move the caret one grapheme within the current element,
     /// crossing to the end of the previous element or the start of the next
     /// one at the edges, like moving along wrapped lines. `j`/`k` move
     /// between elements (rows of the same column in tables) and aim for the
     /// sticky target column, clamped to the destination element like vim.
-    pub fn move_by(&mut self, elements: &[PreviewElement], motion: Motion) -> bool {
+    /// `0` returns to the start of the current element.
+    pub fn move_by(&mut self, elements: &[PreviewElement], motion: Motion, count: usize) -> bool {
+        let mut moved = false;
+
+        for _ in 0..count.max(1) {
+            if !self.move_once(elements, motion) {
+                break;
+            }
+
+            moved = true;
+        }
+
+        moved
+    }
+
+    /// Applies a single step of a caret [`Motion`], returning whether the
+    /// caret moved.
+    fn move_once(&mut self, elements: &[PreviewElement], motion: Motion) -> bool {
         let Some(len) = elements.get(self.element).map(PreviewElement::len) else {
             return false;
         };
 
+        if motion == Motion::Start {
+            let moved = self.column > 0;
+            self.column = 0;
+            self.column_target = 0;
+            return moved;
+        }
+
         let next = (|| match motion {
+            // `Start` never reaches here — it returns above.
+            Motion::Start => None,
             Motion::Left => {
                 if self.column > 0 {
                     Some((self.element, self.column - 1, self.column - 1))
@@ -235,8 +285,9 @@ impl Caret {
         true
     }
 
-    /// Applies a [`WordMotion`] (`w`, `b`, `e`, `ge`), returning whether the
-    /// caret moved.
+    /// Applies a [`WordMotion`] (`w`, `b`, `e`, `ge`) `count` times —
+    /// `3w` moves three words forward — stopping early at the document's
+    /// edges like vim. A `count` of `0` moves once.
     ///
     /// The caret column counts grapheme boundaries, and the caret is a bar
     /// drawn between characters: `w`/`b` place it at the start of a word,
@@ -244,7 +295,28 @@ impl Caret {
     /// motions cross element boundaries like vim crosses lines: `w`/`e`
     /// continue in the next element, `b`/`ge` in the previous one. The
     /// sticky column follows the destination.
-    pub fn move_word(&mut self, elements: &[PreviewElement], motion: WordMotion) -> bool {
+    pub fn move_word(
+        &mut self,
+        elements: &[PreviewElement],
+        motion: WordMotion,
+        count: usize,
+    ) -> bool {
+        let mut moved = false;
+
+        for _ in 0..count.max(1) {
+            if !self.move_word_once(elements, motion) {
+                break;
+            }
+
+            moved = true;
+        }
+
+        moved
+    }
+
+    /// Applies a single step of a [`WordMotion`], returning whether the
+    /// caret moved.
+    fn move_word_once(&mut self, elements: &[PreviewElement], motion: WordMotion) -> bool {
         let Some(element) = elements.get(self.element) else {
             return false;
         };
@@ -316,23 +388,28 @@ impl Caret {
     }
 
     /// Jumps to the first (`gg`) or last (`G`) element, keeping the sticky
-    /// target column like vim, clamped to the destination element.
-    pub fn jump(&mut self, elements: &[PreviewElement], jump: Jump) -> bool {
-        let index = match jump {
-            Jump::First => {
-                if elements.is_empty() {
-                    return false;
-                }
-                0
-            }
-            Jump::Last => match elements.len().checked_sub(1) {
-                Some(last) => last,
-                None => return false,
-            },
+    /// target column like vim, clamped to the destination element. A count
+    /// of `n` jumps to the `n`-th element instead — `3gg` and `3G` land on
+    /// the third element, like vim's `3G`; a count of `0` means none.
+    pub fn jump(&mut self, elements: &[PreviewElement], jump: Jump, count: usize) -> bool {
+        let Some(last) = elements.len().checked_sub(1) else {
+            return false;
         };
 
+        let index = match jump {
+            Jump::First => count.saturating_sub(1),
+            Jump::Last => {
+                if count == 0 {
+                    last
+                } else {
+                    count - 1
+                }
+            }
+        }
+        .min(last);
+
         self.element = index;
-        self.column = self.column_target.min(elements[index].len);
+        self.column = self.column_target.min(elements[index].len());
         true
     }
 
@@ -577,7 +654,7 @@ fn element_after(elements: &[PreviewElement], current: usize, motion: Motion) ->
         ElementKind::Text => match motion {
             Motion::Up => current.checked_sub(1),
             Motion::Down => (current < last).then_some(current + 1),
-            Motion::Left | Motion::Right => None,
+            Motion::Left | Motion::Right | Motion::Start => None,
         },
         ElementKind::Cell { row, column } => match motion {
             Motion::Down => elements[current + 1..]
@@ -595,7 +672,7 @@ fn element_after(elements: &[PreviewElement], current: usize, motion: Motion) ->
                     ElementKind::Text => true,
                     ElementKind::Cell { row: r, column: c } => r + 1 == row && c == column,
                 }),
-            Motion::Left | Motion::Right => None,
+            Motion::Left | Motion::Right | Motion::Start => None,
         },
     }
 }
@@ -796,18 +873,18 @@ fn main() {}
         // character, and `j`/`k` cross its edges.
         let mut caret = Caret::new();
         caret.place(at(0, 0));
-        assert!(caret.move_by(&elements, Motion::Down));
+        assert!(caret.move_by(&elements, Motion::Down, 1));
         assert_eq!(caret.position(), at(1, 0));
-        assert!(caret.move_by(&elements, Motion::Right));
+        assert!(caret.move_by(&elements, Motion::Right, 1));
         assert_eq!(caret.position(), at(1, 1));
-        assert!(caret.move_by(&elements, Motion::Down));
+        assert!(caret.move_by(&elements, Motion::Down, 1));
         assert_eq!(caret.position(), at(2, 1));
 
         // Word motions treat the code's words like any other element's.
         caret.place(at(1, 0));
-        assert!(caret.move_word(&elements, WordMotion::NextStart));
+        assert!(caret.move_word(&elements, WordMotion::NextStart, 1));
         assert_eq!(caret.position(), at(1, 3)); // → main
-        assert!(caret.move_word(&elements, WordMotion::NextStart));
+        assert!(caret.move_word(&elements, WordMotion::NextStart, 1));
         assert_eq!(caret.position(), at(1, 7)); // → (
     }
 
@@ -831,7 +908,7 @@ outro
         let mut navigate = |from, motion| {
             caret.place(at(from, 0));
             caret
-                .move_by(&elements, motion)
+                .move_by(&elements, motion, 1)
                 .then(|| caret.position().element)
         };
 
@@ -861,7 +938,7 @@ outro
         let mut caret = Caret::new();
         let mut motion = |from: CaretPosition, motion| {
             caret.place(from);
-            caret.move_by(&elements, motion).then(|| caret.position())
+            caret.move_by(&elements, motion, 1).then(|| caret.position())
         };
 
         // `l` walks the element one character at a time.
@@ -889,12 +966,12 @@ outro
         caret.place(at(0, 3));
 
         // The column clamps when moving to a shorter element...
-        assert!(caret.move_by(&elements, Motion::Down));
+        assert!(caret.move_by(&elements, Motion::Down, 1));
         assert_eq!(caret.position(), at(1, 2));
         // ...and returns when moving on to a longer one.
-        assert!(caret.move_by(&elements, Motion::Down));
+        assert!(caret.move_by(&elements, Motion::Down, 1));
         assert_eq!(caret.position(), at(2, 3));
-        assert!(caret.move_by(&elements, Motion::Up));
+        assert!(caret.move_by(&elements, Motion::Up, 1));
         assert_eq!(caret.position(), at(1, 2));
 
         // In tables the sticky column applies to the destination cell.
@@ -906,11 +983,11 @@ outro
         let cells = parse(markdown);
         // Feature → Headings in the same table column.
         caret.place(at(0, 5));
-        assert!(caret.move_by(&cells, Motion::Down));
+        assert!(caret.move_by(&cells, Motion::Down, 1));
         assert_eq!(caret.position(), at(2, 5));
         // ✅ is one grapheme, so the column clamps to 1.
         caret.place(at(1, 3));
-        assert!(caret.move_by(&cells, Motion::Down));
+        assert!(caret.move_by(&cells, Motion::Down, 1));
         assert_eq!(caret.position(), at(3, 1));
     }
 
@@ -927,7 +1004,7 @@ outro
         let mut caret = Caret::new();
         let mut word = |from: CaretPosition, motion| {
             caret.place(from);
-            caret.move_word(&elements, motion).then(|| caret.position())
+            caret.move_word(&elements, motion, 1).then(|| caret.position())
         };
 
         // w walks the word starts, comma included.
@@ -969,21 +1046,129 @@ outro
         let mut caret = Caret::new();
         caret.place(at(0, 3));
 
-        assert!(caret.jump(&elements, Jump::First));
+        assert!(caret.jump(&elements, Jump::First, 0));
         assert_eq!(caret.position(), at(0, 3));
-        assert!(caret.jump(&elements, Jump::Last));
+        assert!(caret.jump(&elements, Jump::Last, 0));
         assert_eq!(caret.position(), at(2, 3));
 
         // The sticky column clamps to shorter elements.
         caret.place(at(1, 9));
-        assert!(caret.jump(&elements, Jump::Last));
+        assert!(caret.jump(&elements, Jump::Last, 0));
         assert_eq!(caret.position(), at(2, 5));
-        assert!(caret.jump(&elements, Jump::First));
+        assert!(caret.jump(&elements, Jump::First, 0));
         assert_eq!(caret.position(), at(0, 4));
 
         let mut caret = Caret::new();
-        assert!(!caret.jump(&[], Jump::First));
-        assert!(!caret.jump(&[], Jump::Last));
+        assert!(!caret.jump(&[], Jump::First, 0));
+        assert!(!caret.jump(&[], Jump::Last, 0));
+    }
+
+    /// A count repeats a motion like vim: `3j` moves three elements down,
+    /// `10k` ten up (stopping at the document's start), `2h`/`3l` cross
+    /// element edges, and `3w`/`3e`/`2b` walk words. The sticky column
+    /// survives counted vertical moves and `0` returns to the element's
+    /// start.
+    #[test]
+    fn counts_repeat_motions_like_vim() {
+        // "one", "two", "three", "four", "five", "six"
+        let markdown = "one\n\ntwo\n\nthree\n\nfour\n\nfive\n\nsix";
+        let elements = parse(markdown);
+        assert_eq!(elements.len(), 6);
+
+        let mut caret = Caret::new();
+
+        // 3j from the first element lands on the fourth.
+        caret.place(at(0, 0));
+        assert!(caret.move_by(&elements, Motion::Down, 3));
+        assert_eq!(caret.position(), at(3, 0));
+
+        // 10k stops early at the document's start.
+        assert!(caret.move_by(&elements, Motion::Up, 10));
+        assert_eq!(caret.position(), at(0, 0));
+
+        // 2h crosses to the end of the previous element.
+        caret.place(at(1, 0));
+        assert!(caret.move_by(&elements, Motion::Left, 2));
+        assert_eq!(caret.position(), at(0, 2));
+
+        // 3l crosses into the next element: two steps to the element's
+        // end, the third crossing to the next element's start.
+        caret.place(at(0, 2));
+        assert!(caret.move_by(&elements, Motion::Right, 3));
+        assert_eq!(caret.position(), at(1, 1));
+
+        // A count larger than the document stops at its end.
+        caret.place(at(4, 0));
+        assert!(caret.move_by(&elements, Motion::Down, 99));
+        assert_eq!(caret.position(), at(5, 0));
+        assert!(!caret.move_by(&elements, Motion::Down, 1));
+
+        // 3w walks three word starts; the words of "three" are one word,
+        // so 3w from element 0 crosses into element 2.
+        let words = parse("one two\n\nthree\n\nfour");
+        caret.place(at(0, 0));
+        assert!(caret.move_word(&words, WordMotion::NextStart, 3));
+        assert_eq!(caret.position(), at(2, 0));
+
+        // 2b walks back two word starts.
+        assert!(caret.move_word(&words, WordMotion::PreviousStart, 2));
+        assert_eq!(caret.position(), at(0, 4));
+
+        // 3e walks three word ends, each just past the last grapheme:
+        // one|, two|, then crossing into three| (element 1).
+        caret.place(at(0, 0));
+        assert!(caret.move_word(&words, WordMotion::NextEnd, 3));
+        assert_eq!(caret.position(), at(1, 5));
+
+        // The sticky column survives a counted vertical move.
+        let sticky = parse("aaaa\n\nbb\n\ncc\n\ndddd");
+        caret.place(at(0, 3));
+        assert!(caret.move_by(&sticky, Motion::Down, 3));
+        assert_eq!(caret.position(), at(3, 3));
+
+        // `0` returns to the element's start and reports the move.
+        assert!(caret.move_by(&sticky, Motion::Start, 1));
+        assert_eq!(caret.position(), at(3, 0));
+        assert!(!caret.move_by(&sticky, Motion::Start, 1));
+
+        // A count of 0 moves once, like the default.
+        caret.place(at(0, 2));
+        assert!(caret.move_by(&sticky, Motion::Down, 0));
+        assert_eq!(caret.position(), at(1, 2));
+    }
+
+    /// A counted jump lands on the `n`-th element like vim's `3G` and
+    /// `3gg`: counts are 1-based and clamp to the document's end, while a
+    /// count of 0 keeps the plain `gg`/`G` meaning.
+    #[test]
+    fn counted_jumps_land_on_the_nth_element() {
+        // "a", "b", "c", "d"
+        let elements = parse("a\n\nb\n\nc\n\nd");
+        assert_eq!(elements.len(), 4);
+
+        let mut caret = Caret::new();
+        caret.place(at(3, 0));
+
+        // 3G and 3gg land on the third element (index 2).
+        assert!(caret.jump(&elements, Jump::Last, 3));
+        assert_eq!(caret.position(), at(2, 0));
+        assert!(caret.jump(&elements, Jump::First, 3));
+        assert_eq!(caret.position(), at(2, 0));
+
+        // A count past the end clamps to the last element.
+        assert!(caret.jump(&elements, Jump::Last, 99));
+        assert_eq!(caret.position(), at(3, 0));
+
+        // A count of 1 is the first element, for both jumps.
+        assert!(caret.jump(&elements, Jump::Last, 1));
+        assert_eq!(caret.position(), at(0, 0));
+        assert!(caret.jump(&elements, Jump::First, 0));
+        assert_eq!(caret.position(), at(0, 0));
+
+        // The sticky column clamps to the destination.
+        caret.place(at(3, 9));
+        assert!(caret.jump(&elements, Jump::Last, 2));
+        assert_eq!(caret.position(), at(1, 1));
     }
 
     /// Visual mode anchors one end and the caret forms the other; motions

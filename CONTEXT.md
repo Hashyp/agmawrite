@@ -47,5 +47,24 @@ preview and anchored comments.
 - **Element map** — the numbered preview elements, owned by the preview
   module (`ElementMap`) together with the claim protocol the Markdown
   viewer uses per rendered item — the viewer claims, it never counts.
+- **Thread** — a comment and its replies: notes saved on the same anchor
+  (a covered spot or the same selection) grow one thread, the tree the
+  sidebar renders — root first, replies indented by depth (`Comments`).
+- **Resolve** — closes a thread: resolved threads are history — the
+  sidebar lists them under RESOLVED, they stop marking elements, and
+  cycling skips them; reopening restores everything (`Comments::resolve`).
+- **History** — the previous texts of a comment, kept when it is edited
+  (`Entry::history`); the edit popup shows them and the card counts them.
+- **Count** — the digits pending before a preview motion, like vim's `3`
+  of `3j`; it lives in the keymap, repeats the next motion (or page), and
+  shows beside the mode badge while pending (`Keymap::pending_count`).
+- **Unsaved dialog** — the modal asking what to do with unsaved changes
+  before opening another file or closing the window: Cancel, Save
+  (save, then proceed), Discard. The guarded action waits in
+  `Editor::pending_unsaved` until the save lands.
+- **Palette** — the Omarchy color scheme the interface paints with,
+  loaded from the current theme and reloaded when it changes
+  (`theme::Palette`).
 - **Watch** — the opened file's directory is watched; external changes
-  reload the document immediately in any mode.
+  reload the document immediately in any mode. The Omarchy theme state is
+  watched the same way, re-painting the interface on theme switches.

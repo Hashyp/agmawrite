@@ -5,10 +5,12 @@ mod highlight;
 mod interactive_text;
 mod keymap;
 mod preview;
+mod theme;
 
-use comments::{Comments, Mark};
+use comments::{Comments, Mark, Span};
 use keymap::{Keymap, Mode};
-use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, WordMotion};
+use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
+use theme::Palette;
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
 use iced::advanced::widget::{Operation, Tree};
@@ -68,6 +70,25 @@ struct Editor {
     sidebar_override: Option<bool>,
     /// The find popup's state: the query and the current match.
     find: find::Find,
+    /// The contents as last loaded or saved — the baseline the
+    /// unsaved-changes detection compares against.
+    saved_contents: String,
+    /// What happens once the unsaved-changes dialog is answered: the
+    /// action the user was trying to perform.
+    pending_unsaved: Option<UnsavedAction>,
+    /// The comment the note popup edits, when it is open for editing an
+    /// existing comment instead of writing a fresh one.
+    editing_comment: Option<(usize, usize)>,
+    /// The omarchy color scheme the interface paints with.
+    palette: Palette,
+}
+
+/// What the unsaved-changes dialog guards: opening another file, or
+/// closing the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsavedAction {
+    OpenFile,
+    CloseWindow(iced::window::Id),
 }
 
 #[derive(Debug, Clone)]
@@ -77,23 +98,32 @@ enum Message {
     FileLoaded(Option<(std::path::PathBuf, String)>),
     SaveFile,
     SavePathChosen(Option<std::path::PathBuf>),
-    FileSaved(Result<std::path::PathBuf, String>),
+    /// The save finished — carrying the exact snapshot that was written,
+    /// so edits made while the save ran are not mistaken for saved.
+    FileSaved(Result<std::path::PathBuf, String>, String),
     FileChangedExternally,
     TogglePreview,
     LinkClicked(markdown::Uri),
-    MovePreviewCursor(Motion),
-    MovePreviewWord(WordMotion),
-    MovePreviewJump(Jump),
+    MovePreviewCursor(Motion, usize),
+    MovePreviewWord(WordMotion, usize),
+    MovePreviewJump(Jump, usize),
     PreviewGPressed,
+    PreviewZPressed,
+    PreviewCountPressed(u32),
     PreviewCancel,
     ToggleVisualMode,
     ScrollPreviewBy(f32),
+    ScrollPreviewPage(Page, usize),
+    ScrollPreviewCaret(Placement),
     OpenNotePopup,
     CloseNotePopup,
     EditNote(text_editor::Action),
     SaveNote,
+    EditActiveComment,
     NoteCardPressed,
-    CommentCardPressed(usize),
+    CommentCardPressed(usize, usize),
+    DeleteComment(usize, usize),
+    ResolveComment(usize),
     EditPublish(text_editor::Action),
     PublishPressed,
     AddGlobalComment,
@@ -107,6 +137,13 @@ enum Message {
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
+    UnsavedChanges,
+    UnsavedCardPressed,
+    UnsavedCancel,
+    UnsavedSave,
+    UnsavedDiscard,
+    WindowCloseRequested(iced::window::Id),
+    PaletteChanged,
 }
 
 struct OpenFileIcon;
@@ -190,6 +227,106 @@ impl<Message> canvas::Program<Message> for PreviewIcon {
 }
 
 struct SaveIcon;
+
+/// The write-mode icon of the preview toggle: a pencil, drawn in the same
+/// stroke style as the eye so the toggle reads as one button with two
+/// glyphs.
+struct WriteIcon;
+
+impl<Message> canvas::Program<Message> for WriteIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
+        frame.scale(bounds.width / ICON_DESIGN_SIZE);
+
+        let stroke = || {
+            canvas::Stroke::default()
+                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
+                .with_width(1.4)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round)
+        };
+
+        // A pencil lying diagonal: a triangular tip at the bottom-left, a
+        // band above it, and the body running to the top-right.
+        let body = canvas::Path::new(|path| {
+            path.move_to(Point::new(2.5, 13.5));
+            path.line_to(Point::new(3.35, 10.95));
+            path.line_to(Point::new(9.07, 5.23));
+            path.line_to(Point::new(10.77, 6.93));
+            path.line_to(Point::new(5.05, 12.65));
+            path.close();
+        });
+        let band = canvas::Path::new(|path| {
+            path.move_to(Point::new(3.35, 10.95));
+            path.line_to(Point::new(5.05, 12.65));
+        });
+        let edge = canvas::Path::new(|path| {
+            path.move_to(Point::new(9.6, 4.7));
+            path.line_to(Point::new(11.3, 6.4));
+        });
+
+        frame.stroke(&body, stroke());
+        frame.stroke(&band, stroke());
+        frame.stroke(&edge, stroke());
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The comments icon of the collapsed sidebar rail: a speech bubble in
+/// the same stroke style as the other icons.
+struct CommentsIcon;
+
+impl<Message> canvas::Program<Message> for CommentsIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
+        frame.scale(bounds.width / ICON_DESIGN_SIZE);
+
+        let stroke = || {
+            canvas::Stroke::default()
+                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
+                .with_width(1.4)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round)
+        };
+
+        // A rounded speech bubble with a tail at the bottom-left.
+        let bubble = canvas::Path::new(|path| {
+            path.move_to(Point::new(8.0, 2.5));
+            path.quadratic_curve_to(Point::new(13.5, 2.5), Point::new(13.5, 7.0));
+            path.quadratic_curve_to(Point::new(13.5, 10.5), Point::new(9.5, 10.8));
+            path.line_to(Point::new(6.0, 13.0));
+            path.line_to(Point::new(6.4, 10.5));
+            path.quadratic_curve_to(Point::new(2.5, 10.2), Point::new(2.5, 7.0));
+            path.quadratic_curve_to(Point::new(2.5, 2.5), Point::new(8.0, 2.5));
+            path.close();
+        });
+
+        frame.stroke(&bubble, stroke());
+
+        vec![frame.into_geometry()]
+    }
+}
 
 impl<Message> canvas::Program<Message> for SaveIcon {
     type State = ();
@@ -285,10 +422,75 @@ fn subscription(editor: &Editor) -> Subscription<Message> {
         .with(editor.keymap)
         .filter_map(|(keymap, event)| keymap.handle(event));
 
+    // The close request arrives as a message instead of exiting, so the
+    // unsaved-changes dialog can intercept it; a clean window closes.
+    let close = iced::window::close_requests().map(Message::WindowCloseRequested);
+
     match &editor.path {
-        Some(path) => Subscription::batch([keys, watch_file(path)]),
-        None => keys,
+        Some(path) => Subscription::batch([keys, close, watch_file(path), watch_palette()]),
+        None => Subscription::batch([keys, close, watch_palette()]),
     }
+}
+
+/// Watches the omarchy current-theme state so switching themes re-paints
+/// the interface live.
+fn watch_palette() -> Subscription<Message> {
+    let state = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".local/state/omarchy/current"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".local/state/omarchy/current"));
+
+    Subscription::run_with(("omarchy-palette", state), move |(_, state)| {
+        let state = state.clone();
+        iced::stream::channel(1, move |sender| async move {
+            spawn_palette_watcher(state, sender);
+            // The events arrive on the watcher thread; this runner only
+            // keeps the stream alive.
+            std::future::pending::<()>().await;
+        })
+    })
+}
+
+/// Spawns the omarchy theme watcher: any change in the current-theme state
+/// directory forwards one reload.
+fn spawn_palette_watcher(
+    state: std::path::PathBuf,
+    mut sender: iced::futures::channel::mpsc::Sender<Message>,
+) {
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+
+        if !state.is_dir() {
+            // Without omarchy there is nothing to watch; stay quiet.
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(tx) {
+            Ok(watcher) => watcher,
+            Err(_) => return,
+        };
+
+        if watcher.watch(&state, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+
+        while let Ok(event) = rx.recv() {
+            let Ok(event) = event else { continue };
+
+            if !may_change_file(&event.kind) {
+                continue;
+            }
+
+            // A theme switch produces a burst of events; collapse it.
+            while rx.try_recv().is_ok() {}
+
+            match sender.try_send(Message::PaletteChanged) {
+                Ok(()) => {}
+                Err(error) if error.is_full() => {}
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 /// Watches the opened file's directory and reloads it when it changes on
@@ -412,6 +614,40 @@ fn clamp_editor_position(
     text_editor::Position { line, column }
 }
 
+/// Whether the document carries unsaved changes.
+fn is_modified(editor: &Editor) -> bool {
+    editor.content.text() != editor.saved_contents
+}
+
+/// Runs the action the unsaved-changes dialog was guarding.
+fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
+    match action {
+        UnsavedAction::OpenFile => Task::perform(open_file(), Message::FileLoaded),
+        UnsavedAction::CloseWindow(id) => iced::window::close(id),
+    }
+}
+
+/// Shows the unsaved-changes dialog guarding `action`.
+fn show_unsaved(editor: &mut Editor, action: UnsavedAction) {
+    editor.pending_unsaved = Some(action);
+    editor.keymap.note(&Message::UnsavedChanges);
+}
+
+/// Starts saving — straight to a known path, or through the save dialog.
+/// The save carries a snapshot of the contents: whatever the user types
+/// while it runs stays unsaved, not silently swallowed by the completion.
+fn start_save(editor: &Editor) -> Task<Message> {
+    match &editor.path {
+        Some(path) => {
+            let snapshot = editor.content.text();
+            Task::perform(save_file(path.clone(), snapshot.clone()), move |result| {
+                Message::FileSaved(result, snapshot)
+            })
+        }
+        None => Task::perform(pick_save_path(), Message::SavePathChosen),
+    }
+}
+
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     // The note popup's text area owns the draft until the popup closes; a
     // save started from the open popup still lands after the keymap has
@@ -421,7 +657,17 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
     match message {
         Message::Edit(action) => return edit_source(editor, action),
-        Message::OpenFile => return Task::perform(open_file(), Message::FileLoaded),
+        Message::OpenFile => {
+            // Opening a new file over unsaved changes would lose them:
+            // the dialog asks first, and only a clean document opens
+            // straight away.
+            if is_modified(editor) {
+                show_unsaved(editor, UnsavedAction::OpenFile);
+                return Task::none();
+            }
+
+            return Task::perform(open_file(), Message::FileLoaded);
+        }
         Message::FileLoaded(Some((path, contents))) => {
             editor.path = Some(path);
             editor.preview_elements = ElementMap::parse(&contents);
@@ -429,31 +675,71 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
             editor.comments = Comments::new();
+            editor.editing_comment = None;
             editor.content = text_editor::Content::with_text(&contents);
+            editor.saved_contents = contents.clone();
             editor.markdown = markdown::Content::parse(&contents);
         }
         Message::FileLoaded(None) => {}
-        Message::SaveFile => {
-            return match &editor.path {
-                // A known path saves straight to disk; an unsaved document
-                // asks where first.
-                Some(path) => Task::perform(
-                    save_file(path.clone(), editor.content.text()),
-                    Message::FileSaved,
-                ),
-                None => Task::perform(pick_save_path(), Message::SavePathChosen),
-            };
-        }
+        Message::SaveFile => return start_save(editor),
         Message::SavePathChosen(Some(path)) => {
             editor.path = Some(path.clone());
 
-            return Task::perform(save_file(path, editor.content.text()), Message::FileSaved);
+            let snapshot = editor.content.text();
+
+            return Task::perform(save_file(path, snapshot.clone()), move |result| {
+                Message::FileSaved(result, snapshot)
+            });
         }
-        Message::SavePathChosen(None) => {}
-        Message::FileSaved(Ok(_path)) => {}
-        Message::FileSaved(Err(error)) => {
+        Message::SavePathChosen(None) => {
+            // The save dialog was cancelled: whatever waited on the save
+            // is off, the document stays as it is.
+            editor.pending_unsaved = None;
+        }
+        Message::FileSaved(Ok(_path), snapshot) => {
+            // Only what was actually written counts as saved: the baseline
+            // is the snapshot the save carried, not the live editor.
+            editor.saved_contents = snapshot;
+
+            // Whatever the unsaved dialog was guarding proceeds now that
+            // the saved revision is clean — unless the user typed while
+            // the save ran, in which case the newer edits are still
+            // unsaved and the dialog asks again.
+            if let Some(action) = editor.pending_unsaved.take() {
+                if !is_modified(editor) {
+                    return run_unsaved_action(action);
+                }
+
+                show_unsaved(editor, action);
+            }
+        }
+        Message::FileSaved(Err(error), _snapshot) => {
             eprintln!("agmawrite: {error}");
+            editor.pending_unsaved = None;
         }
+        // Clicks on the dialog card are swallowed so they neither cancel
+        // the dialog nor reach the editing surface beneath.
+        Message::UnsavedCardPressed => {}
+        Message::UnsavedCancel => editor.pending_unsaved = None,
+        Message::UnsavedSave => return start_save(editor),
+        Message::UnsavedDiscard => {
+            if let Some(action) = editor.pending_unsaved.take() {
+                return run_unsaved_action(action);
+            }
+        }
+        Message::WindowCloseRequested(id) => {
+            // Closing over unsaved changes asks first; a clean window
+            // closes.
+            if is_modified(editor) {
+                show_unsaved(editor, UnsavedAction::CloseWindow(id));
+            } else {
+                return iced::window::close(id);
+            }
+        }
+        Message::PaletteChanged => editor.palette = Palette::current(),
+        // The dialog state itself lives in the keymap and pending_unsaved;
+        // the message only ever comes from show_unsaved, which set both.
+        Message::UnsavedChanges => {}
         Message::FileChangedExternally => {
             let Some(path) = &editor.path else {
                 return Task::none();
@@ -467,8 +753,9 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
             if contents != editor.content.text() {
                 replace_source_text(editor, &contents);
-                editor.markdown = markdown::Content::parse(&contents);
-                editor.preview_elements = ElementMap::parse(&contents);
+                editor.saved_contents = contents;
+                editor.markdown = markdown::Content::parse(&editor.content.text());
+                editor.preview_elements = ElementMap::parse(&editor.content.text());
                 editor.caret = Caret::new();
 
                 if editor.keymap.preview() {
@@ -499,30 +786,33 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::LinkClicked(_uri) => {
             // TODO: open links in the default browser
         }
-        Message::MovePreviewCursor(motion) => {
+        Message::MovePreviewCursor(motion, count) => {
             // The caret always advances; the page only scrolls as much as
             // needed to keep the caret visible.
             if editor
                 .caret
-                .move_by(editor.preview_elements.elements(), motion)
+                .move_by(editor.preview_elements.elements(), motion, count)
             {
                 return reveal_preview_caret();
             }
         }
-        Message::MovePreviewWord(motion) => {
+        Message::MovePreviewWord(motion, count) => {
             if editor
                 .caret
-                .move_word(editor.preview_elements.elements(), motion)
+                .move_word(editor.preview_elements.elements(), motion, count)
             {
                 return reveal_preview_caret();
             }
         }
-        Message::MovePreviewJump(jump) => {
-            if editor.caret.jump(editor.preview_elements.elements(), jump) {
+        Message::MovePreviewJump(jump, count) => {
+            if editor
+                .caret
+                .jump(editor.preview_elements.elements(), jump, count)
+            {
                 return reveal_preview_caret();
             }
         }
-        Message::PreviewGPressed => {}
+        Message::PreviewGPressed | Message::PreviewZPressed | Message::PreviewCountPressed(_) => {}
         Message::PreviewCancel => {
             editor.visual_anchor = None;
         }
@@ -536,6 +826,29 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::ScrollPreviewBy(y) => {
             return scroll_by(Id::new(PREVIEW_SCROLL_ID), AbsoluteOffset { x: 0.0, y });
         }
+        Message::ScrollPreviewPage(page, count) => {
+            return iced::advanced::widget::operate(PageScroll {
+                scroll_id: Id::new(PREVIEW_SCROLL_ID),
+                viewport: None,
+                page,
+                count,
+            });
+        }
+        Message::ScrollPreviewCaret(placement) => {
+            let scroll = match placement {
+                Placement::Center => CaretScroll::Center,
+                Placement::Top => CaretScroll::Top,
+                Placement::Bottom => CaretScroll::Bottom,
+            };
+
+            return iced::advanced::widget::operate(RevealCaret {
+                scroll_id: Id::new(PREVIEW_SCROLL_ID),
+                caret_id: Id::new(PREVIEW_CARET_ID),
+                viewport: None,
+                caret: None,
+                scroll,
+            });
+        }
         Message::OpenNotePopup => {
             return focus(Id::new(NOTE_EDITOR_ID));
         }
@@ -543,8 +856,20 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             // Dismissing the popup discards the draft, so the next note
             // starts fresh instead of inheriting the escaped one.
             editor.note_text = text_editor::Content::new();
+            editor.editing_comment = None;
         }
         Message::EditNote(action) => editor.note_text.perform(action),
+        Message::EditActiveComment => {
+            // Enter over the active comment opens it for editing, its text
+            // preloaded in the popup; without one, Enter does nothing.
+            if let Some(text) = editor.comments.active_text().map(str::to_owned) {
+                editor.note_text = text_editor::Content::with_text(&text);
+                editor.editing_comment = editor.comments.active_entry();
+                editor.keymap.note(&Message::OpenNotePopup);
+
+                return focus(Id::new(NOTE_EDITOR_ID));
+            }
+        }
         Message::EditPublish(action) => editor.comments.edit_draft(action),
         Message::AddGlobalComment => editor.comments.add_draft_as_global(),
         Message::PublishPressed => {
@@ -565,6 +890,18 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 save_note(editor);
             }
         }
+        Message::DeleteComment(thread, entry) => {
+            editor.comments.delete(thread, entry);
+
+            // Deleting the very comment the popup is editing closes the
+            // popup with a fresh note, like dismissing it would.
+            if editor.editing_comment == Some((thread, entry)) {
+                editor.editing_comment = None;
+                editor.note_text = text_editor::Content::new();
+                editor.keymap.note(&Message::CloseNotePopup);
+            }
+        }
+        Message::ResolveComment(thread) => editor.comments.resolve(thread),
         Message::ToggleSidebar => {
             editor.sidebar_override = Some(!sidebar_shown(editor));
         }
@@ -590,12 +927,12 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
-        Message::CommentCardPressed(index) => {
+        Message::CommentCardPressed(thread, entry) => {
             // Clicking a card makes its comment the active one and moves the
             // cursor to the anchored element: the preview caret jumps there
             // and the page reveals it; in write mode the source cursor lands
             // on the element's source instead.
-            if let Some(anchor) = editor.comments.activate(index) {
+            if let Some(anchor) = editor.comments.activate(thread, entry) {
                 if editor.keymap.preview() {
                     editor.visual_anchor = None;
                     editor.caret.place(anchor);
@@ -685,16 +1022,16 @@ fn find_match_count(editor: &Editor) -> usize {
 /// The find popup: a small card in the top right corner with the query
 /// field, a live `n/m` match counter, and ▲/▼ buttons stepping through
 /// the matches.
-fn find_popup(editor: &Editor) -> Element<'_, Message> {
+fn find_popup(editor: &Editor, palette: Palette) -> Element<'_, Message> {
     let total = find_match_count(editor);
     let counter = editor.find.is_active().then(|| {
         if total == 0 {
-            ("no match".to_owned(), Color::from_rgb(0.9, 0.45, 0.4))
+            ("no match".to_owned(), palette.red)
         } else {
             let current = editor.find.current(total).map_or(1, |index| index + 1);
             (
                 format!("{}/{}", current, total),
-                Color::from_rgb(0.5, 0.5, 0.5),
+                palette.dark_foreground,
             )
         }
     });
@@ -721,25 +1058,25 @@ fn find_popup(editor: &Editor) -> Element<'_, Message> {
                 text("▲")
                     .font(EDITOR_FONT)
                     .size(12)
-                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+                    .color(palette.light_foreground),
             )
             .on_press(Message::FindPrevious)
             .padding([4, 8])
-            .style(popup_button_style),
+            .style(move |theme, status| popup_button_style(&palette, theme, status)),
         )
         .push(
             button(
                 text("▼")
                     .font(EDITOR_FONT)
                     .size(12)
-                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+                    .color(palette.light_foreground),
             )
             .on_press(Message::FindNext)
             .padding([4, 8])
-            .style(popup_button_style),
+            .style(move |theme, status| popup_button_style(&palette, theme, status)),
         );
 
-    container(container(card_row).padding(8).style(note_card_style))
+    container(container(card_row).padding(8).style(move |_theme| note_card_style(&palette)))
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(alignment::Horizontal::Right)
@@ -756,12 +1093,15 @@ enum KeyboardGuardAction {
     CloseHelp,
     CloseFind,
     CloseNote,
+    CancelUnsaved,
 }
 
 fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAction {
     // Do not let an active input method commit or alter pre-edit text behind
-    // the modal help window.
-    if keymap.help_open() && matches!(event, iced::Event::InputMethod(_)) {
+    // a modal window.
+    if (keymap.help_open() || keymap.unsaved_open())
+        && matches!(event, iced::Event::InputMethod(_))
+    {
         return KeyboardGuardAction::Capture;
     }
 
@@ -782,6 +1122,20 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
                 keyboard::Key::Named(keyboard::key::Named::Escape)
             ) {
             KeyboardGuardAction::CloseHelp
+        } else {
+            KeyboardGuardAction::Capture
+        };
+    }
+
+    // The unsaved-changes dialog captures every key press so the editing
+    // surface beneath cannot react; Escape cancels it.
+    if keymap.unsaved_open() {
+        return if !repeat
+            && matches!(
+                modified_key.as_ref(),
+                keyboard::Key::Named(keyboard::key::Named::Escape)
+            ) {
+            KeyboardGuardAction::CancelUnsaved
         } else {
             KeyboardGuardAction::Capture
         };
@@ -903,6 +1257,7 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
                 KeyboardGuardAction::CloseHelp => shell.publish(Message::CloseHelp),
                 KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
                 KeyboardGuardAction::CloseNote => shell.publish(Message::CloseNotePopup),
+                KeyboardGuardAction::CancelUnsaved => shell.publish(Message::UnsavedCancel),
                 KeyboardGuardAction::Capture => {}
                 KeyboardGuardAction::Pass => {
                     self.content.as_widget_mut().update(
@@ -1004,6 +1359,17 @@ const HELP_SHORTCUTS: &[(&str, &str)] = &[
     ("w/W", "Move to the next word start in preview."),
     ("b/B", "Move to the previous word start in preview."),
     ("e/E", "Move to the next word end in preview."),
+    ("0", "Move to the start of the preview element."),
+    (
+        "1-9 then motion",
+        "Repeat a preview motion: 3j, 10k, 2h, 3l, 3w, 5G, 3gg.",
+    ),
+    ("Ctrl + D / Ctrl + U", "Scroll the preview half a page down or up."),
+    ("Page Up / Page Down", "Scroll the preview a full page."),
+    (
+        "z then z/t/b",
+        "Center, top, or bottom the preview around the caret.",
+    ),
     ("g then e/E", "Move to the previous word end in preview."),
     ("g then g", "Jump to the first preview element."),
     ("G", "Jump to the last preview element."),
@@ -1017,11 +1383,23 @@ const HELP_SHORTCUTS: &[(&str, &str)] = &[
         "Shift + Enter",
         "Find the previous match while find is open.",
     ),
+    (
+        "Enter (preview)",
+        "Open the active comment for editing.",
+    ),
+    (
+        "Ctrl + Enter",
+        "Add the sidebar draft as a global comment.",
+    ),
+    (
+        "Ctrl + Shift + Enter",
+        "Trigger the sidebar's Publish button.",
+    ),
 ];
 
 /// A centered, read-only shortcuts window. Both the card and its backdrop
 /// capture clicks so the editing surface below cannot receive them.
-fn help_popup() -> Element<'static, Message> {
+fn help_popup(palette: Palette) -> Element<'static, Message> {
     let rows: Vec<Element<'static, Message>> = HELP_SHORTCUTS
         .iter()
         .map(|(shortcut, description)| {
@@ -1030,13 +1408,13 @@ fn help_popup() -> Element<'static, Message> {
                     text(*shortcut)
                         .font(EDITOR_FONT)
                         .size(13)
-                        .color(Color::WHITE)
+                        .color(palette.foreground)
                 )
-                .width(Length::Fixed(210.0)),
+                .width(Length::Fixed(240.0)),
                 text(*description)
                     .font(EDITOR_FONT)
                     .size(13)
-                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+                    .color(palette.light_foreground),
             ]
             .spacing(12)
             .align_y(alignment::Vertical::Center)
@@ -1051,20 +1429,20 @@ fn help_popup() -> Element<'static, Message> {
                 text("Keyboard shortcuts")
                     .font(EDITOR_FONT)
                     .size(16)
-                    .color(Color::WHITE),
+                    .color(palette.foreground),
                 text("Press Esc to close")
                     .font(EDITOR_FONT)
                     .size(12)
-                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    .color(palette.dark_foreground),
                 scrollable(column(rows).spacing(9).width(Length::Fill))
                     .height(Length::Fixed(480.0)),
             ]
             .spacing(12)
             .width(Length::Fill),
         )
-        .width(Length::Fixed(650.0))
+        .width(Length::Fixed(680.0))
         .padding(20)
-        .style(note_card_style),
+        .style(move |_theme| note_card_style(&palette)),
     )
     .on_press(Message::HelpCardPressed);
 
@@ -1129,18 +1507,32 @@ fn edit_source(editor: &mut Editor, action: text_editor::Action) -> Task<Message
     Task::none()
 }
 
-/// Saves the note popup text as a comment anchored at the preview caret,
-/// then closes the popup with a fresh note. Empty notes are discarded.
+/// Saves the note popup text as a comment — editing the comment the popup
+/// was opened for, anchoring to the visual selection when there is one,
+/// or anchoring at the preview caret — then closes the popup with a fresh
+/// note. Empty notes are discarded.
 fn save_note(editor: &mut Editor) {
-    editor
-        .comments
-        .save(&editor.note_text.text(), editor.caret.position());
+    let text = editor.note_text.text();
+
+    if let Some((thread, entry)) = editor.editing_comment.take() {
+        editor.comments.activate(thread, entry);
+        editor.comments.edit_active(&text);
+    } else if let Some(anchor) = editor.visual_anchor {
+        // The popup opened over a visual selection: the comment anchors to
+        // exactly the selected text.
+        editor
+            .comments
+            .save_selection(&text, Span::new(anchor, editor.caret.position()));
+    } else {
+        editor.comments.save(&text, editor.caret.position());
+    }
 
     editor.note_text = text_editor::Content::new();
 }
 
 /// Measures the preview scrollable and the caret element in the widget tree,
-/// then scrolls the minimum amount needed to bring the caret back into view.
+/// then scrolls the minimum amount needed to bring the caret back into
+/// view, or the amount that places the caret as `zz`/`zt`/`zb` ask.
 ///
 /// The page keeps its position once the caret is visible — unlike a
 /// proportional scroll, the caret can never outrun the end of the page.
@@ -1150,7 +1542,21 @@ fn reveal_preview_caret() -> Task<Message> {
         caret_id: Id::new(PREVIEW_CARET_ID),
         viewport: None,
         caret: None,
+        scroll: CaretScroll::Reveal,
     })
+}
+
+/// How a [`RevealCaret`] operation scrolls the caret into place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaretScroll {
+    /// The minimum scroll that brings the caret back into view.
+    Reveal,
+    /// `zz` — the caret lands in the middle of the viewport.
+    Center,
+    /// `zt` — the caret lands at the top of the viewport.
+    Top,
+    /// `zb` — the caret lands at the bottom of the viewport.
+    Bottom,
 }
 
 struct RevealCaret {
@@ -1158,6 +1564,7 @@ struct RevealCaret {
     caret_id: Id,
     viewport: Option<(Rectangle, Vector)>,
     caret: Option<Rectangle>,
+    scroll: CaretScroll,
 }
 
 impl Operation<Message> for RevealCaret {
@@ -1198,43 +1605,127 @@ impl Operation<Message> for RevealCaret {
         let caret_bottom = caret_top + caret.height;
         let viewport_bottom = viewport.y + viewport.height;
 
-        let delta = if caret_top < viewport.y + CARET_MARGIN {
-            caret_top - viewport.y - CARET_MARGIN
-        } else if caret_bottom > viewport_bottom - CARET_MARGIN {
-            caret_bottom - viewport_bottom + CARET_MARGIN
-        } else {
-            // Already visible; keep the page where it is.
-            return Outcome::None;
+        let delta = match self.scroll {
+            CaretScroll::Reveal => {
+                if caret_top < viewport.y + CARET_MARGIN {
+                    caret_top - viewport.y - CARET_MARGIN
+                } else if caret_bottom > viewport_bottom - CARET_MARGIN {
+                    caret_bottom - viewport_bottom + CARET_MARGIN
+                } else {
+                    // Already visible; keep the page where it is.
+                    return Outcome::None;
+                }
+            }
+            // `zz` — the caret lands in the middle of the viewport.
+            CaretScroll::Center => {
+                let caret_middle = caret_top + caret.height / 2.0;
+                caret_middle - (viewport.y + viewport.height / 2.0)
+            }
+            // `zt` — the caret lands at the top of the viewport.
+            CaretScroll::Top => caret_top - viewport.y - CARET_MARGIN,
+            // `zb` — the caret lands at the bottom of the viewport.
+            CaretScroll::Bottom => caret_bottom - viewport_bottom + CARET_MARGIN,
         };
+
+        if delta.abs() < 0.5 {
+            // Already there; keep the page where it is.
+            return Outcome::None;
+        }
 
         Outcome::Some(Message::ScrollPreviewBy(delta))
     }
 }
 
-fn editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Color::BLACK),
-        border: Border::default(),
-        placeholder: Color::WHITE,
-        value: Color::WHITE,
-        selection: Color::from_rgb(0.25, 0.25, 0.25),
+/// Measures the preview scrollable's viewport, then scrolls by whole or
+/// half pages — `Ctrl+D`/`Ctrl+U` and `PageDown`/`PageUp`, count times.
+struct PageScroll {
+    scroll_id: Id,
+    viewport: Option<Rectangle>,
+    page: Page,
+    count: usize,
+}
+
+impl Operation<Message> for PageScroll {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        if Some(&self.scroll_id) == id {
+            self.viewport = Some(bounds);
+        }
+    }
+
+    fn finish(&self) -> Outcome<Message> {
+        let Some(viewport) = self.viewport else {
+            return Outcome::None;
+        };
+
+        // Like vim's scroll step, a page keeps a little context visible.
+        let full = (viewport.height - 2.0 * CARET_MARGIN).max(1.0);
+        let half = full / 2.0;
+
+        let (distance, sign) = match self.page {
+            Page::HalfDown => (half, 1.0),
+            Page::HalfUp => (half, -1.0),
+            Page::FullDown => (full, 1.0),
+            Page::FullUp => (full, -1.0),
+        };
+
+        Outcome::Some(Message::ScrollPreviewBy(
+            sign * distance * self.count.max(1) as f32,
+        ))
     }
 }
 
-fn markdown_style() -> markdown::Style {
+fn editor_style(palette: &Palette, _theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Background::Color(palette.background),
+        border: Border::default(),
+        placeholder: palette.foreground,
+        value: palette.foreground,
+        selection: palette.selection,
+    }
+}
+
+fn comment_colors(palette: &Palette) -> interactive_text::CommentColors {
+    interactive_text::CommentColors {
+        // Open comments keep the palette's warning/annotation color, while
+        // the active comment uses the same accent as its sidebar card.
+        commented_bar: palette.tint(palette.yellow, 0.75),
+        active_bar: palette.accent,
+        active_tint: palette.tint(palette.accent, 0.09),
+        commented_span_tint: palette.tint(palette.yellow, 0.22),
+    }
+}
+
+fn markdown_style(palette: &Palette) -> markdown::Style {
+    let theme = if palette.light {
+        &Theme::Light
+    } else {
+        &Theme::Dark
+    };
+
     markdown::Style {
         font: EDITOR_FONT,
         inline_code_font: EDITOR_FONT,
         code_block_font: EDITOR_FONT,
-        ..markdown::Style::from(&Theme::Dark)
+        ..markdown::Style::from(theme)
     }
 }
 
-fn icon_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn icon_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         text_color: match status {
-            button::Status::Hovered | button::Status::Pressed => Color::from_rgb(0.7, 0.7, 0.7),
-            _ => Color::WHITE,
+            button::Status::Hovered | button::Status::Pressed => palette.light_foreground,
+            _ => palette.foreground,
         },
         ..Default::default()
     }
@@ -1267,6 +1758,11 @@ struct PreviewViewer<'a> {
     find_query: &'a str,
     /// The current find match, as the element and range it lives in.
     current_match: Option<(usize, std::ops::Range<usize>)>,
+    /// The color the caret and decorations paint with — the palette's
+    /// foreground.
+    text_color: Color,
+    /// The current theme's comment bar and tint colors.
+    comment_colors: interactive_text::CommentColors,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -1325,6 +1821,9 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
             decorations.id,
             decorations.commented,
             decorations.active_comment,
+            decorations.comment_span,
+            self.comment_colors,
+            self.text_color,
             decorations.find,
         ))
         .width(Length::Fill)
@@ -1336,8 +1835,8 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
 
 impl<'a> PreviewViewer<'a> {
     /// The decorations the claimed `element` carries: its slice of the
-    /// visual selection, the caret when focused, its comment mark, and
-    /// its find matches.
+    /// visual selection, the caret when focused, its comment mark and
+    /// anchored span, and its find matches.
     fn decorations(
         &self,
         element: usize,
@@ -1352,10 +1851,13 @@ impl<'a> PreviewViewer<'a> {
             caret: focused.then_some(self.caret_column),
             id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
             commented: matches!(
-                self.comments.mark_for(element),
+                self.comments.mark_for(element, preview_element.len()),
                 Mark::Commented | Mark::Active
             ),
-            active_comment: self.comments.mark_for(element) == Mark::Active,
+            active_comment: self.comments.mark_for(element, preview_element.len()) == Mark::Active,
+            comment_span: self
+                .comments
+                .anchor_selection_for(element, preview_element.len()),
             find: interactive_text::FindHighlights {
                 matches: if self.find_query.is_empty() {
                     Vec::new()
@@ -1389,6 +1891,9 @@ impl<'a> PreviewViewer<'a> {
                 None,
                 false,
                 false,
+                None,
+                self.comment_colors,
+                self.text_color,
                 interactive_text::FindHighlights::none(),
             );
         };
@@ -1403,6 +1908,9 @@ impl<'a> PreviewViewer<'a> {
             decorations.id,
             decorations.commented,
             decorations.active_comment,
+            decorations.comment_span,
+            self.comment_colors,
+            self.text_color,
             decorations.find,
         )
     }
@@ -1410,17 +1918,21 @@ impl<'a> PreviewViewer<'a> {
 
 /// The interactive decorations of one preview element: its slice of the
 /// visual-mode selection, the caret when it is the focused element, its
-/// comment mark, and its find highlights.
+/// comment mark and anchored span, and its find highlights.
 struct Decorations {
     selection: Option<std::ops::Range<usize>>,
     caret: Option<usize>,
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
+    /// The selected-text span a comment was written for, when its anchor
+    /// is a span.
+    comment_span: Option<std::ops::Range<usize>>,
     find: interactive_text::FindHighlights,
 }
 
 fn view(editor: &Editor) -> Element<'_, Message> {
+    let palette = editor.palette;
     let position = editor.caret.position();
     let visual = editor.visual_anchor.map(|anchor| (anchor, position));
 
@@ -1437,7 +1949,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         scrollable(
             container(markdown::view_with(
                 editor.markdown.items(),
-                markdown::Settings::with_text_size(20.0, markdown_style()),
+                markdown::Settings::with_text_size(20.0, markdown_style(&palette)),
                 &PreviewViewer {
                     claims: editor.preview_elements.claims(),
                     focused_element: position.element,
@@ -1446,6 +1958,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                     comments: &editor.comments,
                     find_query: editor.find.query(),
                     current_match,
+                    text_color: palette.foreground,
+                    comment_colors: comment_colors(&palette),
                 },
             ))
             .width(Length::Fill)
@@ -1470,7 +1984,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 editor.find.query().to_owned(),
                 highlight::format,
             )
-            .style(editor_style)
+            .style(move |theme, status| editor_style(&palette, theme, status))
             .into()
     };
 
@@ -1497,25 +2011,42 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         .width(Length::Fixed(ICON_BUTTON_SIZE))
         .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
-        .style(icon_button_style),
+        .style(move |theme, status| icon_button_style(&palette, theme, status)),
         container(text("Ctrl + o, Open").font(EDITOR_FONT).size(12))
             .padding([4, 8])
             .style(tooltip_style),
         iced::widget::tooltip::Position::Top,
     );
 
-    let preview_button = tooltip(
-        button(
-            canvas(PreviewIcon)
-                .width(Length::Fixed(ICON_SIZE))
-                .height(Length::Fixed(ICON_SIZE)),
-        )
-        .on_press(Message::TogglePreview)
-        .width(Length::Fixed(ICON_BUTTON_SIZE))
-        .height(Length::Fixed(ICON_BUTTON_SIZE))
-        .padding(0)
-        .style(icon_button_style),
-        container(text("Ctrl + p, Preview").font(EDITOR_FONT).size(12))
+    // The preview toggle carries two icons: the eye invites switching to
+    // the preview while writing, and the pencil switches back to writing
+    // while previewing. One button, one shortcut — `Ctrl+P`.
+    let toggle_label = if editor.keymap.preview() {
+        "Ctrl + p, Write"
+    } else {
+        "Ctrl + p, Preview"
+    };
+
+    let icon_canvas: Element<'_, Message> = if editor.keymap.preview() {
+        canvas(WriteIcon)
+            .width(Length::Fixed(ICON_SIZE))
+            .height(Length::Fixed(ICON_SIZE))
+            .into()
+    } else {
+        canvas(PreviewIcon)
+            .width(Length::Fixed(ICON_SIZE))
+            .height(Length::Fixed(ICON_SIZE))
+            .into()
+    };
+
+    let toggle_button = tooltip(
+        button(icon_canvas)
+            .on_press(Message::TogglePreview)
+            .width(Length::Fixed(ICON_BUTTON_SIZE))
+            .height(Length::Fixed(ICON_BUTTON_SIZE))
+            .padding(0)
+            .style(move |theme, status| icon_button_style(&palette, theme, status)),
+        container(text(toggle_label).font(EDITOR_FONT).size(12))
             .padding([4, 8])
             .style(tooltip_style),
         iced::widget::tooltip::Position::Top,
@@ -1531,7 +2062,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         .width(Length::Fixed(ICON_BUTTON_SIZE))
         .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
-        .style(icon_button_style),
+        .style(move |theme, status| icon_button_style(&palette, theme, status)),
         container(text("Ctrl + s, Save").font(EDITOR_FONT).size(12))
             .padding([4, 8])
             .style(tooltip_style),
@@ -1539,7 +2070,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     );
 
     // The main column: top margin, the writing area, and the bottom
-    // controls. It fills the space between the window's 5% side margins.
+    // controls. It fills the space between the window's 5% side margins,
+    // which stay symmetric whether or not the sidebar is showing.
     let main = column![
         Space::new()
             .width(Length::Fill)
@@ -1552,7 +2084,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 vec![open_button.into(), save_button.into()];
 
             if !editor.keymap.preview_only() {
-                controls.push(preview_button.into());
+                controls.push(toggle_button.into());
             }
 
             controls.push(mode_badge(editor));
@@ -1569,42 +2101,43 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    // With comments saved, the comments sidebar sits beside the main
-    // column and spans the whole window height.
-    let mut inner = row![container(main)
-        .width(Length::FillPortion(9))
-        .height(Length::Fill)]
+    // The editor keeps its symmetric 5% margins; the comments sidebar sits
+    // to the right of them, flush with the window's edge. When it is
+    // hidden, a slim rail marks where it collapsed to and brings it back.
+    let main_with_margins = row![
+        Space::new()
+            .width(Length::FillPortion(5))
+            .height(Length::Fill),
+        container(main)
+            .width(Length::FillPortion(90))
+            .height(Length::Fill),
+        Space::new()
+            .width(Length::FillPortion(5))
+            .height(Length::Fill),
+    ]
     .width(Length::Fill)
     .height(Length::Fill);
 
-    if sidebar_shown(editor) {
-        inner = inner.push(
-            container(comments_sidebar(editor))
-                .width(Length::FillPortion(2))
-                .height(Length::Fill),
-        );
-    }
+    let sidebar_area: Element<'_, Message> = if sidebar_shown(editor) {
+        container(comments_sidebar(editor, palette))
+            .width(Length::Fixed(SIDEBAR_WIDTH))
+            .height(Length::Fill)
+            .into()
+    } else {
+        collapsed_sidebar_rail(editor, palette)
+    };
 
-    // The side margins frame the whole window — 5% left and right whether
-    // or not the sidebar is showing.
     let content: Element<'_, Message> = container(
-        row![
-            Space::new()
-                .width(Length::FillPortion(5))
-                .height(Length::Fill),
-            container(inner)
-                .width(Length::FillPortion(90))
-                .height(Length::Fill),
-            Space::new()
-                .width(Length::FillPortion(5))
-                .height(Length::Fill),
-        ]
+        row![container(main_with_margins)
+            .width(Length::Fill)
+            .height(Length::Fill)]
+        .push(sidebar_area)
         .width(Length::Fill)
         .height(Length::Fill),
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(background_style)
+    .style(move |_theme| background_style(&palette))
     .into();
 
     // The find popup floats in the top right corner, in any mode — on a
@@ -1612,77 +2145,144 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let mut layers = stack![content];
 
     if editor.keymap.find_open() {
-        layers = layers.push(find_popup(editor));
+        layers = layers.push(find_popup(editor, palette));
+    }
+
+    // The unsaved-changes dialog floats above everything but help.
+    if editor.keymap.unsaved_open() {
+        layers = layers.push(unsaved_dialog(editor.pending_unsaved, palette));
     }
 
     // Help is the topmost, read-only layer. The content below remains in the
     // same stack and no focus task is issued, so cursor and selections resume
     // exactly where they were after Escape closes the overlay.
     if editor.keymap.help_open() {
-        layers = layers.push(help_popup());
+        layers = layers.push(help_popup(palette));
     }
 
     keyboard_guard(layers.into(), editor.keymap)
 }
 
-/// The comments sidebar: a full-height panel with a scrollable list of
-/// saved comments (each quoting the Markdown source it was written for,
-/// collapsed to one line and trimmed) and a free text field with a Publish
-/// button at the bottom.
-fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
-    let source = editor.content.text();
+/// The width of the comments sidebar on the right.
+const SIDEBAR_WIDTH: f32 = 340.0;
 
-    let cards: Vec<Element<'_, Message>> = editor
-        .comments
-        .cards(&source, editor.preview_elements.elements())
-        .into_iter()
-        .map(|card| {
-            let index = card.index;
-            let active = card.active;
-            // Anchored comments quote their element's source; global
-            // comments show their label instead.
-            let caption = card.label.map(str::to_owned).unwrap_or(card.quote);
+/// The collapsed sidebar's rail at the window's right edge: the visual
+/// indication that a sidebar exists and where it went. Its button expands
+/// the sidebar (`Ctrl+B` too), and the count under the icon shows how many
+/// comments wait inside.
+fn collapsed_sidebar_rail(editor: &Editor, palette: Palette) -> Element<'_, Message> {
+    let expand_button = button(
+        column![
+            canvas(CommentsIcon)
+                .width(Length::Fixed(ICON_SIZE))
+                .height(Length::Fixed(ICON_SIZE)),
+            text(if editor.comments.is_empty() {
+                String::new()
+            } else {
+                editor.comments.len().to_string()
+            })
+            .font(EDITOR_FONT)
+            .size(11)
+            .color(if editor.comments.is_empty() {
+                palette.dark_foreground
+            } else {
+                palette.accent
+            }),
+        ]
+        .spacing(2)
+        .align_x(alignment::Horizontal::Center),
+    )
+    .on_press(Message::ToggleSidebar)
+    .width(Length::Fill)
+    .padding([10, 4])
+    .style(move |theme, status| rail_button_style(palette, theme, status));
 
-            // The card is a button: clicking it activates its comment and
-            // moves the cursor to the anchored element.
-            mouse_area(
-                container(
-                    column![
-                        text(caption).font(EDITOR_FONT).size(11).color(if active {
-                            Color::from_rgb(0.4, 0.85, 0.78)
-                        } else {
-                            Color::from_rgb(0.45, 0.45, 0.45)
-                        }),
-                        text(card.text)
-                            .font(EDITOR_FONT)
-                            .size(13)
-                            .color(Color::WHITE),
-                    ]
-                    .spacing(4)
-                    .width(Length::Fill),
-                )
-                .padding(8)
+    tooltip(
+        container(
+            container(expand_button)
                 .width(Length::Fill)
-                .style(move |_theme| comment_card_style(active)),
-            )
-            .on_press(Message::CommentCardPressed(index))
-            .into()
-        })
+                .height(Length::Fill)
+                .align_y(alignment::Vertical::Center),
+        )
+        .width(Length::Fixed(44.0))
+        .height(Length::Fill)
+        .padding(0)
+        .style(move |_theme| sidebar_rail_style(palette)),
+        container(
+            text(format!(
+                "Ctrl + b, Comments ({})",
+                editor.comments.len()
+            ))
+            .font(EDITOR_FONT)
+            .size(12),
+        )
+        .padding([4, 8])
+        .style(tooltip_style),
+        iced::widget::tooltip::Position::Left,
+    )
+    .into()
+}
+
+/// The comments sidebar: a full-height panel with a scrollable tree of
+/// comment threads — the root quoting the Markdown source it was written
+/// for, replies indented under it — a resolved-history section below, and
+/// a free text field with Add and Publish buttons at the bottom.
+fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Message> {
+    let source = editor.content.text();
+    let cards = editor
+        .comments
+        .cards(&source, editor.preview_elements.elements());
+
+    let open: Vec<Element<'_, Message>> = cards
+        .iter()
+        .filter(|card| !card.resolved)
+        .map(|card| comment_card(card.clone(), palette))
         .collect();
+    let resolved: Vec<Element<'_, Message>> = cards
+        .iter()
+        .filter(|card| card.resolved)
+        .map(|card| comment_card(card.clone(), palette))
+        .collect();
+
+    let mut list: Vec<Element<'_, Message>> = Vec::new();
+
+    if open.is_empty() && resolved.is_empty() {
+        list.push(
+            text("No comments yet — press c in the preview or write one below.")
+                .font(EDITOR_FONT)
+                .size(13)
+                .color(palette.dark_foreground)
+                .into(),
+        );
+    }
+
+    list.extend(open);
+
+    // Resolved threads are the history section — kept, dimmed, reopenable.
+    if !resolved.is_empty() {
+        list.push(
+            text(format!("RESOLVED ({})", resolved.len()))
+                .font(EDITOR_FONT)
+                .size(13)
+                .color(palette.dark_foreground)
+                .into(),
+        );
+        list.extend(resolved);
+    }
 
     container(
         column![
             container(
                 text(format!("COMMENTS ({})", editor.comments.len()))
                     .font(EDITOR_FONT)
-                    .size(11)
-                    .color(Color::from_rgb(0.6, 0.6, 0.6)),
+                    .size(13)
+                    .color(palette.light_foreground),
             )
             .padding(iced::Padding {
                 top: 4.0,
                 ..iced::Padding::new(0.0)
             }),
-            scrollable(column(cards).spacing(8).width(Length::Fill))
+            scrollable(column(list).spacing(8).width(Length::Fill))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .direction(scrollable::Direction::Vertical(
@@ -1692,38 +2292,45 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
                 column![
                     text("Write a comment…")
                         .font(EDITOR_FONT)
-                        .size(11)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                        .size(13)
+                        .color(palette.dark_foreground),
                     text_editor(editor.comments.draft())
                         .on_action(Message::EditPublish)
                         .font(EDITOR_FONT)
-                        .size(14)
+                        .size(16)
                         .height(Length::Fixed(72.0))
                         .padding(6)
-                        .style(publish_editor_style),
+                        .style(move |theme, status| {
+                            publish_editor_style(&palette, theme, status)
+                        }),
                 ]
                 .spacing(4)
                 .width(Length::Fill),
             )
             .width(Length::Fill)
             .padding(6)
-            .style(publish_field_style),
+            .style(move |_theme| publish_field_style(&palette)),
             row![
-                button(text("Add").font(EDITOR_FONT).size(13).color(Color::WHITE),)
-                    .on_press(Message::AddGlobalComment)
-                    .width(Length::Fill)
-                    .padding([6, 12])
-                    .style(add_button_style),
+                button(
+                    text("Add")
+                        .font(EDITOR_FONT)
+                        .size(15)
+                        .color(palette.foreground),
+                )
+                .on_press(Message::AddGlobalComment)
+                .width(Length::Fill)
+                .padding([6, 12])
+                .style(move |_theme, status| add_button_style(&palette, status)),
                 button(
                     text("Publish")
                         .font(EDITOR_FONT)
-                        .size(13)
-                        .color(Color::WHITE),
+                        .size(15)
+                        .color(palette.foreground),
                 )
                 .on_press(Message::PublishPressed)
                 .width(Length::Fill)
                 .padding([6, 12])
-                .style(publish_button_style),
+                .style(move |_theme, status| publish_button_style(&palette, status)),
             ]
             .spacing(8)
             .width(Length::Fill),
@@ -1740,15 +2347,119 @@ fn comments_sidebar<'a>(editor: &'a Editor) -> Element<'a, Message> {
         left: 8.0,
         right: 8.0,
     })
-    .style(sidebar_style)
+    .style(move |_theme| sidebar_style(&palette))
     .into()
 }
 
-fn sidebar_style(_theme: &Theme) -> container::Style {
+/// One comment card: the root of its thread quotes the anchored source (or
+/// carries the Global label), replies indent under it. Every card carries
+/// its resolve toggle and delete; the active comment glows.
+fn comment_card(card: comments::CommentCard, palette: Palette) -> Element<'static, Message> {
+    let thread = card.thread;
+    let entry = card.entry;
+
+    // Anchored comments quote their element's source; global comments show
+    // their label instead. Only the thread's root carries it.
+    let caption = card
+        .label
+        .map(str::to_owned)
+        .unwrap_or_else(|| card.quote.clone());
+
+    let mut body = column![].spacing(4);
+
+    if card.first && !caption.is_empty() {
+        body = body.push(
+            text(if card.resolved {
+                format!("✓ {caption}")
+            } else {
+                caption
+            })
+            .font(EDITOR_FONT)
+            .size(13)
+            .color(if card.active {
+                palette.accent
+            } else {
+                palette.dark_foreground
+            }),
+        );
+    }
+
+    // The comment text, with its edit count when it has history.
+    let mut text_row = row![text(card.text.clone())
+        .font(EDITOR_FONT)
+        .size(15)
+        .color(if card.resolved {
+            palette.dark_foreground
+        } else {
+            palette.foreground
+        }),]
+    .align_y(alignment::Vertical::Top);
+
+    if card.history > 0 {
+        text_row = text_row.push(
+            text(format!("(edited ×{})", card.history))
+                .font(EDITOR_FONT)
+                .size(11)
+                .color(palette.dark_foreground),
+        );
+    }
+
+    body = body.push(text_row);
+
+    // Per-card actions: resolve or reopen the thread, delete the comment.
+    body = body.push(
+        row![
+            button(
+                text(if card.resolved { "↺ Reopen" } else { "✓ Resolve" })
+                    .font(EDITOR_FONT)
+                    .size(11)
+                    .color(palette.light_foreground),
+            )
+            .on_press(Message::ResolveComment(thread))
+            .padding([2, 6])
+            .style(move |theme, status| card_button_style(palette, theme, status)),
+            button(
+                text("× Delete")
+                    .font(EDITOR_FONT)
+                    .size(11)
+                    .color(palette.light_foreground),
+            )
+            .on_press(Message::DeleteComment(thread, entry))
+            .padding([2, 6])
+            .style(move |theme, status| card_button_style(palette, theme, status)),
+        ]
+        .spacing(4),
+    );
+
+    // The card is a button: clicking it activates its comment and moves the
+    // cursor to the anchored element. Replies indent by their depth.
+    let card_element: Element<'_, Message> = mouse_area(
+        container(body)
+            .padding(8)
+            .width(Length::Fill)
+            .style(move |_theme| comment_card_style(&palette, card.active, card.resolved)),
+    )
+    .on_press(Message::CommentCardPressed(thread, entry))
+    .into();
+
+    if card.depth == 0 {
+        card_element
+    } else {
+        container(card_element)
+            .padding(iced::Padding {
+                left: 14.0 * card.depth as f32,
+                ..iced::Padding::new(0.0)
+            })
+            .width(Length::Fill)
+            .into()
+    }
+}
+
+fn sidebar_style(palette: &Palette) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.03, 0.03, 0.03))),
+        background: Some(Background::Color(palette.dark_background)),
         border: Border {
-            color: Color::from_rgb(0.2, 0.2, 0.2),
+            color: palette.muted,
             width: 1.0,
             radius: 0.0.into(),
         },
@@ -1756,20 +2467,75 @@ fn sidebar_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn comment_card_style(active: bool) -> container::Style {
+/// The collapsed sidebar's rail: a slim strip at the window's right edge
+/// marking where the sidebar went.
+fn sidebar_rail_style(palette: Palette) -> container::Style {
     container::Style {
-        background: Some(if active {
-            Background::Color(Color::from_rgba(0.3, 0.9, 0.8, 0.1))
-        } else {
-            Background::Color(Color::from_rgb(0.08, 0.08, 0.08))
-        }),
+        background: Some(Background::Color(palette.dark_background)),
         border: Border {
-            color: if active {
-                Color::from_rgba(0.3, 0.9, 0.8, 0.9)
-            } else {
-                Color::from_rgb(0.25, 0.25, 0.25)
-            },
+            color: palette.muted,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn rail_button_style(palette: Palette, _theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
+                Palette::lightened(palette.darker_background, 0.15),
+            )),
+            _ => None,
+        },
+        ..Default::default()
+    }
+}
+
+/// A comment card: a dark surface with the active comment glowing in the
+/// accent color; resolved history dims to the background.
+fn comment_card_style(palette: &Palette, active: bool, resolved: bool) -> container::Style {
+    let (background, border) = if active {
+        (
+            Background::Color(palette.tint(palette.accent, 0.1)),
+            palette.accent,
+        )
+    } else if resolved {
+        (
+            Background::Color(palette.dark_background),
+            palette.dark_foreground,
+        )
+    } else {
+        (
+            Background::Color(palette.darker_background),
+            palette.muted,
+        )
+    };
+
+    container::Style {
+        background: Some(background),
+        border: Border {
+            color: border,
             width: if active { 1.5 } else { 1.0 },
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The quiet inline buttons of a comment card: resolve and delete.
+fn card_button_style(palette: Palette, _theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
+                Palette::lightened(palette.darker_background, 0.25),
+            )),
+            _ => None,
+        },
+        border: Border {
+            color: palette.muted,
+            width: 1.0,
             radius: 4.0.into(),
         },
         ..Default::default()
@@ -1778,11 +2544,11 @@ fn comment_card_style(active: bool) -> container::Style {
 
 /// The publish text field stands out with a lighter surface than the
 /// comment cards and a clearly visible border.
-fn publish_field_style(_theme: &Theme) -> container::Style {
+fn publish_field_style(palette: &Palette) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.17, 0.17, 0.17))),
+        background: Some(Background::Color(palette.lighter_background)),
         border: Border {
-            color: Color::from_rgb(0.55, 0.55, 0.55),
+            color: palette.light_foreground,
             width: 1.5,
             radius: 4.0.into(),
         },
@@ -1792,32 +2558,34 @@ fn publish_field_style(_theme: &Theme) -> container::Style {
 
 /// The editor inside the publish field keeps its own light surface so the
 /// two nested boxes read as one input control.
-fn publish_editor_style(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+fn publish_editor_style(
+    palette: &Palette,
+    _theme: &Theme,
+    _status: text_editor::Status,
+) -> text_editor::Style {
     text_editor::Style {
-        background: Background::Color(Color::from_rgb(0.22, 0.22, 0.22)),
+        background: Background::Color(Palette::lightened(palette.lighter_background, 0.18)),
         border: Border::default(),
-        placeholder: Color::WHITE,
-        value: Color::WHITE,
-        selection: Color::from_rgb(0.35, 0.35, 0.35),
+        placeholder: palette.foreground,
+        value: palette.foreground,
+        selection: Palette::lightened(palette.selection, 0.15),
     }
 }
 
 /// The Add button sits beside Publish as the quieter, secondary action:
 /// it files the draft as a global comment.
-fn add_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn add_button_style(palette: &Palette, status: button::Status) -> button::Style {
     button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => {
-                Some(Background::Color(Color::from_rgb(0.22, 0.22, 0.22)))
-            }
-            _ => Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
+                Palette::lightened(palette.darker_background, 0.3),
+            )),
+            _ => Some(Background::Color(palette.darker_background)),
         },
         border: Border {
             color: match status {
-                button::Status::Hovered | button::Status::Pressed => {
-                    Color::from_rgb(0.55, 0.55, 0.55)
-                }
-                _ => Color::from_rgb(0.35, 0.35, 0.35),
+                button::Status::Hovered | button::Status::Pressed => palette.light_foreground,
+                _ => palette.muted,
             },
             width: 1.0,
             radius: 4.0.into(),
@@ -1828,21 +2596,19 @@ fn add_button_style(_theme: &Theme, status: button::Status) -> button::Style {
 
 /// The Publish button spans the sidebar width and reads as the primary
 /// action of the panel.
-fn publish_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn publish_button_style(palette: &Palette, status: button::Status) -> button::Style {
+    let base = Palette::darkened(palette.blue, 0.55);
+    let hover = Palette::darkened(palette.blue, 0.4);
+
     button::Style {
         background: match status {
             button::Status::Hovered | button::Status::Pressed => {
-                Some(Background::Color(Color::from_rgb(0.25, 0.5, 1.0)))
+                Some(Background::Color(hover))
             }
-            _ => Some(Background::Color(Color::from_rgb(0.15, 0.3, 0.7))),
+            _ => Some(Background::Color(base)),
         },
         border: Border {
-            color: match status {
-                button::Status::Hovered | button::Status::Pressed => {
-                    Color::from_rgb(0.55, 0.7, 1.0)
-                }
-                _ => Color::from_rgb(0.35, 0.5, 0.9),
-            },
+            color: Palette::lightened(palette.blue, 0.2),
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -1857,13 +2623,22 @@ fn publish_button_style(_theme: &Theme, status: button::Status) -> button::Style
 /// keymap's mode.
 fn mode_badge(editor: &Editor) -> Element<'_, Message> {
     let mode = editor.keymap.mode();
+    let palette = editor.palette;
 
     let (label, color) = match mode {
-        Mode::Visual => ("VISUAL", Color::from_rgb(0.4, 0.65, 1.0)),
-        Mode::Note => ("NOTE", Color::from_rgb(0.9, 0.7, 0.35)),
-        Mode::Find => ("FIND", Color::from_rgb(0.95, 0.6, 0.35)),
-        Mode::View => ("VIEW", Color::from_rgb(0.6, 0.6, 0.6)),
-        Mode::Write => ("WRITE", Color::from_rgb(0.6, 0.6, 0.6)),
+        Mode::Visual => ("VISUAL", palette.blue),
+        Mode::Note => ("NOTE", palette.yellow),
+        Mode::Find => ("FIND", palette.orange),
+        Mode::View => ("VIEW", palette.light_foreground),
+        Mode::Write => ("WRITE", palette.light_foreground),
+    };
+
+    // A pending count shows beside the mode, like vim's cmdline — the `3`
+    // of a `3j` waiting for its motion.
+    let label = if editor.keymap.pending_count() > 0 {
+        format!("{} {}", editor.keymap.pending_count(), label)
+    } else {
+        label.to_owned()
     };
 
     container(text(label).font(EDITOR_FONT).size(12).color(color))
@@ -1893,56 +2668,105 @@ fn mode_badge_style(color: Color) -> container::Style {
     }
 }
 
-fn background_style(_theme: &Theme) -> container::Style {
+fn background_style(palette: &Palette) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::BLACK)),
+        background: Some(Background::Color(palette.background)),
         ..Default::default()
     }
 }
 
 /// The note popup: a translucent backdrop with a centered card holding a
 /// text area and a button. Clicking the backdrop closes the popup; clicks
-/// on the card are swallowed.
+/// on the card are swallowed. Opened over the active comment it edits that
+/// comment instead of writing a fresh one — its title says so, the previous
+/// versions show as history, and Delete removes the comment.
 fn note_popup(editor: &Editor) -> Element<'_, Message> {
-    let card = mouse_area(
-        container(
-            column![
-                text("Note")
+    let palette = editor.palette;
+    let editing = editor.editing_comment.is_some();
+
+    let mut card_body = column![].spacing(12);
+
+    card_body = card_body.push(if editing {
+        text("Editing comment — Ctrl+S saves, Esc discards")
+            .font(EDITOR_FONT)
+            .size(12)
+            .color(palette.yellow)
+    } else {
+        text("Note")
+            .font(EDITOR_FONT)
+            .size(12)
+            .color(palette.light_foreground)
+    });
+
+    // The comment's history: the texts this comment replaced, newest
+    // first, dimmed above the editor.
+    if editing {
+        for previous in editor.comments.active_history().iter().rev() {
+            card_body = card_body.push(
+                text(format!("— {previous}"))
                     .font(EDITOR_FONT)
                     .size(12)
-                    .color(Color::from_rgb(0.6, 0.6, 0.6)),
-                text_editor(&editor.note_text)
-                    .id(Id::new(NOTE_EDITOR_ID))
-                    .on_action(Message::EditNote)
+                    .color(palette.dark_foreground),
+            );
+        }
+    }
+
+    card_body = card_body.push(
+        text_editor(&editor.note_text)
+            .id(Id::new(NOTE_EDITOR_ID))
+            .on_action(Message::EditNote)
+            .font(EDITOR_FONT)
+            .size(20)
+            .height(Length::Fixed(160.0))
+            .padding(8)
+            .style(move |theme, status| editor_style(&palette, theme, status)),
+    );
+
+    let mut buttons = row![button(
+        text("Close")
+            .font(EDITOR_FONT)
+            .size(14)
+            .color(palette.light_foreground),
+    )
+    .on_press(Message::CloseNotePopup)
+    .padding([6, 12])
+    .style(move |theme, status| popup_button_style(&palette, theme, status))]
+    .width(Length::Fill);
+
+    // Deleting from the edit popup removes the comment outright.
+    if let Some((thread, entry)) = editor.editing_comment {
+        buttons = buttons.push(
+            button(
+                text("Delete")
                     .font(EDITOR_FONT)
-                    .size(20)
-                    .height(Length::Fixed(160.0))
-                    .padding(8)
-                    .style(editor_style),
-                row![
-                    button(
-                        text("Close")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(Color::from_rgb(0.6, 0.6, 0.6)),
-                    )
-                    .on_press(Message::CloseNotePopup)
-                    .padding([6, 12])
-                    .style(popup_button_style),
-                    Space::new().width(Length::Fill),
-                    button(text("Save").font(EDITOR_FONT).size(14).color(Color::WHITE),)
-                        .on_press(Message::SaveNote)
-                        .padding([6, 12])
-                        .style(popup_button_style),
-                ]
-                .width(Length::Fill),
-            ]
-            .spacing(12)
-            .width(Length::Fill),
+                    .size(14)
+                    .color(palette.red),
+            )
+            .on_press(Message::DeleteComment(thread, entry))
+            .padding([6, 12])
+            .style(move |theme, status| popup_button_style(&palette, theme, status)),
+        );
+    }
+
+    buttons = buttons.push(Space::new().width(Length::Fill)).push(
+        button(
+            text("Save")
+                .font(EDITOR_FONT)
+                .size(14)
+                .color(palette.foreground),
         )
-        .width(Length::Fixed(440.0))
-        .padding(16)
-        .style(note_card_style),
+        .on_press(Message::SaveNote)
+        .padding([6, 12])
+        .style(move |theme, status| popup_button_style(&palette, theme, status)),
+    );
+
+    card_body = card_body.push(buttons);
+
+    let card = mouse_area(
+        container(card_body)
+            .width(Length::Fixed(440.0))
+            .padding(16)
+            .style(move |_theme| note_card_style(&palette)),
     )
     .on_press(Message::NoteCardPressed);
 
@@ -1957,6 +2781,81 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
     .into()
 }
 
+/// The unsaved-changes dialog: a translucent backdrop with a centered card
+/// warning that the document is modified, and the three answers — Cancel
+/// keeps editing, Save writes the document and proceeds, Discard throws
+/// the changes away. Escape cancels like the button.
+fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'static, Message> {
+    let warning = match pending {
+        Some(UnsavedAction::CloseWindow(_)) => {
+            "The document has unsaved changes. Close without saving?"
+        }
+        _ => "The document has unsaved changes. Opening a new file will discard them.",
+    };
+
+    let card = mouse_area(
+        container(
+            column![
+                text("Unsaved changes")
+                    .font(EDITOR_FONT)
+                    .size(16)
+                    .color(palette.foreground),
+                text(warning)
+                    .font(EDITOR_FONT)
+                    .size(13)
+                    .color(palette.light_foreground),
+                row![
+                    button(
+                        text("Cancel")
+                            .font(EDITOR_FONT)
+                            .size(14)
+                            .color(palette.light_foreground),
+                    )
+                    .on_press(Message::UnsavedCancel)
+                    .padding([6, 12])
+                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
+                    Space::new().width(Length::Fill),
+                    button(
+                        text("Save")
+                            .font(EDITOR_FONT)
+                            .size(14)
+                            .color(palette.foreground),
+                    )
+                    .on_press(Message::UnsavedSave)
+                    .padding([6, 12])
+                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
+                    button(
+                        text("Discard")
+                            .font(EDITOR_FONT)
+                            .size(14)
+                            .color(palette.red),
+                    )
+                    .on_press(Message::UnsavedDiscard)
+                    .padding([6, 12])
+                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
+                ]
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+            .width(Length::Fill),
+        )
+        .width(Length::Fixed(440.0))
+        .padding(16)
+        .style(move |_theme| note_card_style(&palette)),
+    )
+    .on_press(Message::UnsavedCardPressed);
+
+    mouse_area(
+        container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .style(note_backdrop_style),
+    )
+    .on_press(Message::UnsavedCancel)
+    .into()
+}
+
 fn note_backdrop_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
@@ -1964,11 +2863,14 @@ fn note_backdrop_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn note_card_style(_theme: &Theme) -> container::Style {
+fn note_card_style(palette: &Palette) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.1, 0.1, 0.1))),
+        background: Some(Background::Color(Palette::lightened(
+            palette.dark_background,
+            0.08,
+        ))),
         border: Border {
-            color: Color::from_rgb(0.3, 0.3, 0.3),
+            color: palette.muted,
             width: 1.0,
             radius: 8.0.into(),
         },
@@ -1976,16 +2878,20 @@ fn note_card_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn popup_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn popup_button_style(
+    palette: &Palette,
+    _theme: &Theme,
+    status: button::Status,
+) -> button::Style {
     button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => {
-                Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.2)))
-            }
+            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
+                Palette::lightened(palette.darker_background, 0.25),
+            )),
             _ => None,
         },
         border: Border {
-            color: Color::from_rgb(0.3, 0.3, 0.3),
+            color: palette.muted,
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -2068,6 +2974,10 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         comments: Comments::new(),
         sidebar_override: None,
         find: find::Find::new(),
+        saved_contents: contents.clone().unwrap_or_default(),
+        pending_unsaved: None,
+        editing_comment: None,
+        palette: Palette::current(),
     };
 
     let task = if args.preview {
@@ -2079,8 +2989,12 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
     (editor, task)
 }
 
-fn theme(_editor: &Editor) -> Theme {
-    Theme::Dark
+fn theme(editor: &Editor) -> Theme {
+    if editor.palette.light {
+        Theme::Light
+    } else {
+        Theme::Dark
+    }
 }
 
 fn main() -> iced::Result {
@@ -2103,6 +3017,7 @@ fn main() -> iced::Result {
         .title("agmawrite")
         .theme(theme)
         .subscription(subscription)
+        .exit_on_close_request(false)
         .font(include_bytes!("../fonts/iAWriterMonoS-Regular.ttf").as_slice())
         .font(include_bytes!("../fonts/iAWriterMonoS-Italic.ttf").as_slice())
         .font(include_bytes!("../fonts/iAWriterMonoS-Bold.ttf").as_slice())
@@ -2120,6 +3035,8 @@ mod tests {
         forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
         Editor, KeyboardGuardAction, Message, HELP_SHORTCUTS,
     };
+    use super::theme::Palette;
+    use super::{is_modified, UnsavedAction};
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -2140,6 +3057,10 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            saved_contents: contents.to_owned(),
+            pending_unsaved: None,
+            editing_comment: None,
+            palette: Palette::default(),
         }
     }
 
@@ -2161,6 +3082,10 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            saved_contents: "first\nsecond".to_owned(),
+            pending_unsaved: None,
+            editing_comment: None,
+            palette: Palette::default(),
         };
         source.content.move_to(Cursor {
             position: Position { line: 1, column: 3 },
@@ -2286,7 +3211,7 @@ mod tests {
         );
         // The freshly saved comment is the active one, anchored at the
         // caret position (element 1, column 2).
-        assert_eq!(editor.comments.mark_for(1), Mark::Active);
+        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
         assert_eq!(editor.comments.cycle(), Some(position));
 
         // An empty note only closes the popup; the first comment stays.
@@ -2315,7 +3240,7 @@ mod tests {
 
         let _ = update(&mut editor, Message::SaveNote);
 
-        assert_eq!(editor.comments.mark_for(1), Mark::Active);
+        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
         let cards = editor
             .comments
             .cards(markdown, editor.preview_elements.elements());
@@ -2346,7 +3271,7 @@ mod tests {
             column: 0,
         });
 
-        let _ = update(&mut editor, Message::CommentCardPressed(0));
+        let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
 
         assert_eq!(
             editor.caret.position(),
@@ -2355,12 +3280,12 @@ mod tests {
                 column: 3,
             }
         );
-        assert_eq!(editor.comments.mark_for(2), Mark::Active);
+        assert_eq!(editor.comments.mark_for(2, 32), Mark::Active);
 
         // In write mode the source cursor lands on the anchored element's
         // source instead.
         editor.keymap.note(&Message::TogglePreview);
-        let _ = update(&mut editor, Message::CommentCardPressed(0));
+        let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
 
         assert_eq!(
             editor.content.cursor().position,
@@ -2543,6 +3468,10 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            saved_contents: "- item".to_owned(),
+            pending_unsaved: None,
+            editing_comment: None,
+            palette: Palette::default(),
         };
         editor.content.move_to(Cursor {
             position: Position { line: 0, column: 6 },
@@ -2563,5 +3492,464 @@ mod tests {
             editor.content.cursor().position,
             Position { line: 2, column: 0 }
         );
+    }
+
+    /// Editing the document marks it modified; loading and saving reset
+    /// the baseline the unsaved-changes detection compares against.
+    #[test]
+    fn modified_tracking_follows_load_save_and_edits() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+
+        assert!(!is_modified(&editor));
+
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('x'),
+            ),
+        ));
+        assert!(is_modified(&editor));
+
+        // Saving records the new baseline — the snapshot the save wrote.
+        let saved = editor.content.text();
+        let _ = update(
+            &mut editor,
+            Message::FileSaved(Ok("ignored".into()), saved),
+        );
+        assert!(!is_modified(&editor));
+
+        // A fresh load resets it too.
+        let _ = update(
+            &mut editor,
+            Message::FileLoaded(Some((
+                std::path::PathBuf::from("/tmp/a.md"),
+                "other".to_owned(),
+            ))),
+        );
+        assert!(!is_modified(&editor));
+    }
+
+    /// Opening a file over unsaved changes shows the dialog instead of the
+    /// file picker; answering it runs, cancels, or saves-then-runs the
+    /// guarded action.
+    #[test]
+    fn opening_over_unsaved_changes_asks_first() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-a.md"));
+
+        // A clean document opens straight away — no dialog state.
+        let _ = update(&mut editor, Message::OpenFile);
+        assert!(!editor.keymap.unsaved_open());
+        assert!(editor.pending_unsaved.is_none());
+
+        // A modified document opens the dialog guarding the open.
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('!'),
+            ),
+        ));
+        let _ = update(&mut editor, Message::OpenFile);
+        assert!(editor.keymap.unsaved_open());
+        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
+
+        // Cancel keeps the document open and unmodified-by-dialog.
+        let _ = update(&mut editor, Message::UnsavedCancel);
+        assert!(!editor.keymap.unsaved_open());
+        assert!(editor.pending_unsaved.is_none());
+        assert!(is_modified(&editor));
+
+        // Save answers by saving first; the guarded action waits for the
+        // save to land.
+        let _ = update(&mut editor, Message::OpenFile);
+        let _ = update(&mut editor, Message::UnsavedSave);
+        assert!(!editor.keymap.unsaved_open());
+        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
+        let saved = editor.content.text();
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
+        assert!(!is_modified(&editor));
+        assert!(editor.pending_unsaved.is_none());
+
+        // Discard drops the guard immediately — the action runs without
+        // saving.
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('?'),
+            ),
+        ));
+        let _ = update(&mut editor, Message::OpenFile);
+        let _ = update(&mut editor, Message::UnsavedDiscard);
+        assert!(!editor.keymap.unsaved_open());
+        assert!(editor.pending_unsaved.is_none());
+        // The changes stay in the editor — discarding the dialog only
+        // skips the save.
+        assert!(is_modified(&editor));
+    }
+
+    /// The save carries a snapshot: edits typed while the save ran are
+    /// not mistaken for saved. A pending open proceeds only when the
+    /// document still matches what was written, and asks again otherwise.
+    #[test]
+    fn edits_during_a_save_stay_unsaved() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-save.md"));
+
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('!'),
+            ),
+        ));
+        let _ = update(&mut editor, Message::OpenFile);
+        assert!(editor.keymap.unsaved_open());
+        let _ = update(&mut editor, Message::UnsavedSave);
+
+        // The save finishes — but the user typed while it ran. The stale
+        // snapshot is what counts as saved, the newer edit does not.
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('?'),
+            ),
+        ));
+        let snapshot = "# Title\n\nbody!".to_owned();
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), snapshot));
+
+        assert!(is_modified(&editor));
+        // The guarded open did not run; the dialog asks about the newer
+        // unsaved edit instead.
+        assert!(editor.keymap.unsaved_open());
+        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
+
+        // Saving the current contents this time lets the action proceed.
+        let snapshot = editor.content.text();
+        let _ = update(&mut editor, Message::UnsavedSave);
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), snapshot));
+        assert!(!is_modified(&editor));
+        assert!(editor.pending_unsaved.is_none());
+        assert!(!editor.keymap.unsaved_open());
+    }
+
+    /// A plain save (no dialog open) also baselines the snapshot that was
+    /// written: typing during the save keeps the document modified.
+    #[test]
+    fn a_plain_save_baselines_the_written_snapshot() {
+        let mut editor = editor_at(
+            "draft",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-save2.md"));
+
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('!'),
+            ),
+        ));
+
+        // The save carries the pre-edit snapshot; the edit lands after.
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), "draft".to_owned()));
+        assert!(is_modified(&editor));
+
+        // A save of the current text clears it.
+        let snapshot = editor.content.text();
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), snapshot));
+        assert!(!is_modified(&editor));
+    }
+
+    /// A cancelled save dialog also cancels whatever waited on the save:
+    /// the guarded action never runs.
+    #[test]
+    fn cancelling_the_save_dialog_drops_the_guarded_action() {
+        let mut editor = editor_at(
+            "draft",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        // No path yet: saving goes through the save dialog.
+        assert!(editor.path.is_none());
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('!'),
+            ),
+        ));
+
+        let _ = update(&mut editor, Message::OpenFile);
+        assert!(editor.keymap.unsaved_open());
+        let _ = update(&mut editor, Message::UnsavedSave);
+
+        // The user cancels the save dialog.
+        let _ = update(&mut editor, Message::SavePathChosen(None));
+        assert!(editor.pending_unsaved.is_none());
+        assert!(is_modified(&editor));
+    }
+
+    /// Closing the window over unsaved changes shows the dialog; a clean
+    /// document closes without one.
+    #[test]
+    fn closing_over_unsaved_changes_asks_first() {
+        let id = iced::window::Id::unique();
+
+        let mut editor = editor_at(
+            "clean",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        let _ = update(&mut editor, Message::WindowCloseRequested(id));
+        assert!(!editor.keymap.unsaved_open());
+
+        let _ = update(&mut editor, Message::Edit(
+            iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('!'),
+            ),
+        ));
+        let _ = update(&mut editor, Message::WindowCloseRequested(id));
+        assert!(editor.keymap.unsaved_open());
+        assert_eq!(
+            editor.pending_unsaved,
+            Some(UnsavedAction::CloseWindow(id))
+        );
+
+        // Escape cancels the close.
+        let _ = update(&mut editor, Message::UnsavedCancel);
+        assert!(!editor.keymap.unsaved_open());
+
+        // Save closes once the save landed: the guard clears with the
+        // action consumed.
+        let _ = update(&mut editor, Message::WindowCloseRequested(id));
+        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-b.md"));
+        let _ = update(&mut editor, Message::UnsavedSave);
+        let saved = editor.content.text();
+        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
+        assert!(editor.pending_unsaved.is_none());
+        assert!(!is_modified(&editor));
+    }
+
+    /// While the unsaved dialog is open the editing surface beneath is
+    /// frozen: the root guard captures every key press and the dialog
+    /// itself claims Escape.
+    #[test]
+    fn unsaved_dialog_captures_keys_before_focused_widgets() {
+        use iced::keyboard::{key, Location, Modifiers};
+
+        let pressed = |key: iced::keyboard::Key, modifiers| {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
+                location: Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+
+        let mut keymap = Keymap::new(false);
+        keymap.note(&Message::UnsavedChanges);
+
+        let typing = pressed(
+            iced::keyboard::Key::Character("x".into()),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            keyboard_guard_action(keymap, &typing),
+            KeyboardGuardAction::Capture
+        );
+
+        let shortcut = pressed(
+            iced::keyboard::Key::Character("s".into()),
+            Modifiers::CTRL,
+        );
+        assert_eq!(
+            keyboard_guard_action(keymap, &shortcut),
+            KeyboardGuardAction::Capture
+        );
+
+        let escape = pressed(
+            iced::keyboard::Key::Named(key::Named::Escape),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            keyboard_guard_action(keymap, &escape),
+            KeyboardGuardAction::CancelUnsaved
+        );
+    }
+
+    /// A note saved while visual mode holds a selection anchors to exactly
+    /// the selected text: the covered elements carry the mark, the card
+    /// quotes the joined source, and the active span reports its slices.
+    #[test]
+    fn notes_over_a_selection_comment_the_selected_text() {
+        let mut editor = editor_at(
+            "alpha\n\nbeta\n\ngamma",
+            CaretPosition {
+                element: 1,
+                column: 1,
+            },
+        );
+
+        // Visual mode anchors at the caret, which wanders to (2, 3).
+        editor.visual_anchor = Some(CaretPosition {
+            element: 1,
+            column: 1,
+        });
+        editor.caret.place(CaretPosition {
+            element: 2,
+            column: 3,
+        });
+
+        editor.keymap.note(&Message::OpenNotePopup);
+        editor.note_text =
+            iced::widget::text_editor::Content::with_text("about the span");
+        let _ = update(&mut editor, Message::SaveNote);
+
+        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
+        assert_eq!(editor.comments.mark_for(2, 32), Mark::Active);
+        assert_eq!(editor.comments.mark_for(0, 32), Mark::None);
+
+        let cards = editor
+            .comments
+            .cards("alpha\n\nbeta\n\ngamma", editor.preview_elements.elements());
+        assert_eq!(cards[0].quote, "eta gam");
+
+        // The active selection anchor reports the covered slices.
+        assert_eq!(editor.comments.anchor_selection_for(1, 4), Some(1..4));
+        assert_eq!(editor.comments.anchor_selection_for(2, 5), Some(0..3));
+    }
+
+    /// Enter over the active comment opens the note popup for editing —
+    /// the text preloaded, the popup titled so — and saving updates the
+    /// comment while keeping the old text as history. Without an active
+    /// comment, Enter does nothing at all.
+    #[test]
+    fn enter_edits_the_active_comment_end_to_end() {
+        let mut editor = editor_at(
+            "# Title\n\nbody",
+            CaretPosition {
+                element: 1,
+                column: 0,
+            },
+        );
+        editor.note_text = iced::widget::text_editor::Content::with_text("first");
+        editor.keymap.note(&Message::OpenNotePopup);
+        let _ = update(&mut editor, Message::SaveNote);
+
+        // Without an active comment (deleted below), Enter is a no-op;
+        // here the fresh comment is active, so Enter opens it for editing.
+        let _ = update(&mut editor, Message::EditActiveComment);
+        assert!(editor.keymap.note_open());
+        assert_eq!(editor.editing_comment, Some((0, 0)));
+        assert_eq!(editor.note_text.text(), "first");
+
+        // Saving the edited text updates the comment and keeps history.
+        editor.note_text =
+            iced::widget::text_editor::Content::with_text("  second take  ");
+        let _ = update(&mut editor, Message::SaveNote);
+
+        assert!(!editor.keymap.note_open());
+        assert_eq!(editor.comments.active_text(), Some("second take"));
+        assert_eq!(editor.comments.active_history(), ["first"]);
+        assert_eq!(editor.comments.len(), 1);
+
+        // Dismissing the edit popup keeps the original comment.
+        let _ = update(&mut editor, Message::EditActiveComment);
+        editor.note_text = iced::widget::text_editor::Content::with_text("nope");
+        let _ = update(&mut editor, Message::CloseNotePopup);
+        assert_eq!(editor.comments.active_text(), Some("second take"));
+        assert_eq!(editor.note_text.text(), "");
+        assert!(editor.editing_comment.is_none());
+
+        // With the comment deleted, Enter opens nothing.
+        let _ = update(&mut editor, Message::DeleteComment(0, 0));
+        let _ = update(&mut editor, Message::EditActiveComment);
+        assert!(!editor.keymap.note_open());
+    }
+
+    /// Comments grow threads through the app too: a second note on the
+    /// same element replies, replies render indented, and the thread's
+    /// resolve/delete work from the sidebar's buttons.
+    #[test]
+    fn comment_threads_grow_and_resolve_through_the_sidebar() {
+        let mut editor = editor_at(
+            "one\n\ntwo",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+
+        for text in ["root", "reply"] {
+            editor.keymap.note(&Message::OpenNotePopup);
+            editor.note_text = iced::widget::text_editor::Content::with_text(text);
+            let _ = update(&mut editor, Message::SaveNote);
+        }
+
+        assert_eq!(editor.comments.len(), 2);
+        let cards = editor
+            .comments
+            .cards("one\n\ntwo", editor.preview_elements.elements());
+        assert_eq!((cards[1].thread, cards[1].entry), (0, 1));
+        assert_eq!(cards[1].depth, 1);
+
+        // Resolving moves the whole thread to history.
+        let _ = update(&mut editor, Message::ResolveComment(0));
+        assert_eq!(editor.comments.mark_for(0, 32), Mark::None);
+
+        // Reopening brings the marks back.
+        let _ = update(&mut editor, Message::ResolveComment(0));
+        assert_eq!(editor.comments.mark_for(0, 32), Mark::Active);
+
+        // Deleting the reply leaves the root; deleting the root removes
+        // the thread.
+        let _ = update(&mut editor, Message::DeleteComment(0, 1));
+        assert_eq!(editor.comments.len(), 1);
+        let _ = update(&mut editor, Message::DeleteComment(0, 0));
+        assert!(editor.comments.is_empty());
+    }
+
+    /// Ctrl+Enter files the sidebar draft as a global comment, exactly
+    /// like pressing the Add button.
+    #[test]
+    fn ctrl_enter_adds_the_draft_as_a_global_comment() {
+        let mut editor = editor_at(
+            "text",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+
+        editor.comments.edit_draft(iced::widget::text_editor::Action::Edit(
+            iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(
+                "  overall note  ".to_owned(),
+            )),
+        ));
+        let _ = update(&mut editor, Message::AddGlobalComment);
+
+        assert_eq!(editor.comments.len(), 1);
+        let cards = editor.comments.cards("", &[]);
+        assert_eq!(cards[0].label, Some("Global"));
+        assert_eq!(cards[0].text, "overall note");
+        assert_eq!(editor.comments.draft().text(), "");
     }
 }

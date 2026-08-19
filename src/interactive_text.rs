@@ -37,17 +37,19 @@ impl FindHighlights {
     }
 }
 
-/// Marks an element carrying a saved comment: a muted amber bar on the left
-/// edge, subtle but unmistakable.
-const COMMENTED_BAR_COLOR: Color = Color::from_rgba(0.85, 0.65, 0.3, 0.75);
-const COMMENTED_BAR_WIDTH: f32 = 3.0;
+/// The palette colors used by comment decorations in the preview. Keeping
+/// these outside the widget means a theme switch updates both the sidebar
+/// and the marks painted here.
+#[derive(Debug, Clone, Copy)]
+pub struct CommentColors {
+    pub commented_bar: Color,
+    pub active_bar: Color,
+    pub active_tint: Color,
+    pub commented_span_tint: Color,
+}
 
-/// Marks the element of the currently active comment: a distinct cyan bar
-/// plus a faint tint over the whole element, so it is clearly visible which
-/// comment is selected.
-const ACTIVE_COMMENT_BAR_COLOR: Color = Color::from_rgba(0.3, 0.9, 0.8, 1.0);
+const COMMENTED_BAR_WIDTH: f32 = 3.0;
 const ACTIVE_COMMENT_BAR_WIDTH: f32 = 4.0;
-const ACTIVE_COMMENT_TINT: Color = Color::from_rgba(0.3, 0.9, 0.8, 0.09);
 
 #[allow(clippy::too_many_arguments)]
 pub fn paragraph<'a, M: 'a>(
@@ -58,6 +60,9 @@ pub fn paragraph<'a, M: 'a>(
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
+    comment_span: Option<std::ops::Range<usize>>,
+    comment_colors: CommentColors,
+    text_color: Color,
     find: FindHighlights,
 ) -> Element<'a, M> {
     let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
@@ -69,6 +74,9 @@ pub fn paragraph<'a, M: 'a>(
         id,
         commented,
         active_comment,
+        comment_span,
+        comment_colors,
+        text_color,
         find,
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
@@ -89,6 +97,9 @@ pub fn code<'a, M: 'a>(
     id: Option<Id>,
     commented: bool,
     active_comment: bool,
+    comment_span: Option<std::ops::Range<usize>>,
+    comment_colors: CommentColors,
+    text_color: Color,
     find: FindHighlights,
 ) -> Element<'a, M> {
     let span: text::Span<'static, markdown::Uri, Font> = text::Span::new(code.to_owned())
@@ -101,6 +112,9 @@ pub fn code<'a, M: 'a>(
         id,
         commented,
         active_comment,
+        comment_span,
+        comment_colors,
+        text_color,
         find,
         size: settings.code_size,
         line_height: iced::advanced::text::LineHeight::default(),
@@ -119,6 +133,14 @@ struct InteractiveText<M> {
     commented: bool,
     /// Whether this element belongs to the currently active comment.
     active_comment: bool,
+    /// The grapheme columns of the selected text a comment was written for,
+    /// when the anchor is a span.
+    comment_span: Option<std::ops::Range<usize>>,
+    /// Theme colors for the comment bar and tint decorations.
+    comment_colors: CommentColors,
+    /// The color the caret and text decorations paint with — the palette's
+    /// foreground, so light themes keep a visible caret.
+    text_color: Color,
     /// The element's find highlights: every match and the current one.
     find: FindHighlights,
     size: Pixels,
@@ -241,7 +263,8 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         }
 
         // Comment marks: the active comment tints the whole element and
-        // draws a bright bar, plain comments only the muted bar.
+        // draws a bright bar, plain comments only the muted bar. A comment
+        // anchored to a selected span tints exactly that span instead.
         let bounds = layout.bounds();
 
         if self.active_comment {
@@ -250,22 +273,43 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
                     bounds,
                     ..Default::default()
                 },
-                ACTIVE_COMMENT_TINT,
+                self.comment_colors.active_tint,
             );
 
             draw_comment_bar(
                 renderer,
                 bounds,
                 ACTIVE_COMMENT_BAR_WIDTH,
-                ACTIVE_COMMENT_BAR_COLOR,
+                self.comment_colors.active_bar,
             );
         } else if self.commented {
-            draw_comment_bar(renderer, bounds, COMMENTED_BAR_WIDTH, COMMENTED_BAR_COLOR);
+            draw_comment_bar(
+                renderer,
+                bounds,
+                COMMENTED_BAR_WIDTH,
+                self.comment_colors.commented_bar,
+            );
         }
 
         let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
         let line_height = self.line_height.to_absolute(self.size).0;
         let width = state.paragraph.min_bounds().width;
+
+        // A commented span paints under everything else — the selection and
+        // find matches stay readable on top of it.
+        if let Some(span) = self.comment_span.clone() {
+            for bounds in
+                selection_rects(&state.paragraph, &text, span, width, line_height)
+            {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: bounds + translation,
+                        ..Default::default()
+                    },
+                    self.comment_colors.commented_span_tint,
+                );
+            }
+        }
 
         // Find matches paint under the selection, so a selected match stays
         // visibly selected; the current match paints on top of the others
@@ -321,7 +365,7 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
                     bounds: caret,
                     ..Default::default()
                 },
-                Color::WHITE,
+                self.text_color,
             );
         }
 
