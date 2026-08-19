@@ -11,16 +11,17 @@ use keymap::{Keymap, Mode};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, WordMotion};
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
-use iced::advanced::widget::Operation;
+use iced::advanced::widget::{Operation, Tree};
+use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
+use iced::widget::markdown::Catalog as _;
 use iced::widget::{
     button, canvas, column, container, markdown, mouse_area, operation::focus,
     operation::focus_next, operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack,
     text, text_editor, text_input, tooltip, Id, Space,
 };
-use iced::widget::markdown::Catalog as _;
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
-    Point, Rectangle, Renderer, Subscription, Task, Theme, Vector,
+    Point, Rectangle, Renderer, Size, Subscription, Task, Theme, Vector,
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -100,6 +101,9 @@ enum Message {
     ToggleSidebar,
     OpenFind,
     CloseFind,
+    OpenHelp,
+    CloseHelp,
+    HelpCardPressed,
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
@@ -580,6 +584,9 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::FindNext => return select_find_match(editor, find::Way::Next),
         Message::FindPrevious => return select_find_match(editor, find::Way::Previous),
+        // Help is read-only: opening and closing it deliberately do not
+        // focus, move, or otherwise update the underlying application state.
+        Message::OpenHelp | Message::CloseHelp | Message::HelpCardPressed => {}
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
@@ -625,10 +632,8 @@ fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
     }
 
     if editor.keymap.preview() {
-        let matches = find::preview_matches(
-            editor.preview_elements.elements(),
-            editor.find.query(),
-        );
+        let matches =
+            find::preview_matches(editor.preview_elements.elements(), editor.find.query());
         let Some(index) = editor.find.select(way, matches.len()) else {
             return Task::none();
         };
@@ -684,13 +689,13 @@ fn find_popup(editor: &Editor) -> Element<'_, Message> {
     let total = find_match_count(editor);
     let counter = editor.find.is_active().then(|| {
         if total == 0 {
-            (
-                "no match".to_owned(),
-                Color::from_rgb(0.9, 0.45, 0.4),
-            )
+            ("no match".to_owned(), Color::from_rgb(0.9, 0.45, 0.4))
         } else {
             let current = editor.find.current(total).map_or(1, |index| index + 1);
-            (format!("{}/{}", current, total), Color::from_rgb(0.5, 0.5, 0.5))
+            (
+                format!("{}/{}", current, total),
+                Color::from_rgb(0.5, 0.5, 0.5),
+            )
         }
     });
 
@@ -705,12 +710,7 @@ fn find_popup(editor: &Editor) -> Element<'_, Message> {
     .align_y(alignment::Vertical::Center);
 
     if let Some((counter, color)) = counter {
-        card_row = card_row.push(
-            text(counter)
-                .font(EDITOR_FONT)
-                .size(12)
-                .color(color),
-        );
+        card_row = card_row.push(text(counter).font(EDITOR_FONT).size(12).color(color));
     }
 
     // ▲ steps back, ▼ steps forward — the mouse path of Enter and
@@ -746,6 +746,338 @@ fn find_popup(editor: &Editor) -> Element<'_, Message> {
         .align_y(alignment::Vertical::Top)
         .padding(16)
         .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardGuardAction {
+    Pass,
+    Capture,
+    OpenHelp,
+    CloseHelp,
+    CloseFind,
+    CloseNote,
+}
+
+fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAction {
+    // Do not let an active input method commit or alter pre-edit text behind
+    // the modal help window.
+    if keymap.help_open() && matches!(event, iced::Event::InputMethod(_)) {
+        return KeyboardGuardAction::Capture;
+    }
+
+    let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        modified_key,
+        modifiers,
+        repeat,
+        ..
+    }) = event
+    else {
+        return KeyboardGuardAction::Pass;
+    };
+
+    if keymap.help_open() {
+        return if !repeat
+            && matches!(
+                modified_key.as_ref(),
+                keyboard::Key::Named(keyboard::key::Named::Escape)
+            ) {
+            KeyboardGuardAction::CloseHelp
+        } else {
+            KeyboardGuardAction::Capture
+        };
+    }
+
+    if !repeat
+        && !modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(modified_key.as_ref(), keyboard::Key::Character("?"))
+    {
+        return KeyboardGuardAction::OpenHelp;
+    }
+
+    if !repeat
+        && !modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(
+            modified_key.as_ref(),
+            keyboard::Key::Named(keyboard::key::Named::Escape)
+        )
+    {
+        if keymap.find_open() {
+            return KeyboardGuardAction::CloseFind;
+        }
+        if keymap.note_open() {
+            return KeyboardGuardAction::CloseNote;
+        }
+    }
+
+    KeyboardGuardAction::Pass
+}
+
+/// Wraps the complete interface and intercepts help keys before focused
+/// widgets can consume them. While help is open, no key press reaches the
+/// interface underneath; Escape closes help without unfocusing the field
+/// that was active before it opened.
+fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<'a, Message> {
+    struct KeyboardGuard<'a> {
+        content: Element<'a, Message>,
+        keymap: Keymap,
+    }
+
+    impl Widget<Message, Theme, Renderer> for KeyboardGuard<'_> {
+        fn tag(&self) -> iced::advanced::widget::tree::Tag {
+            self.content.as_widget().tag()
+        }
+
+        fn state(&self) -> iced::advanced::widget::tree::State {
+            self.content.as_widget().state()
+        }
+
+        fn children(&self) -> Vec<Tree> {
+            self.content.as_widget().children()
+        }
+
+        fn diff(&self, tree: &mut Tree) {
+            self.content.as_widget().diff(tree);
+        }
+
+        fn size(&self) -> Size<Length> {
+            self.content.as_widget().size()
+        }
+
+        fn size_hint(&self) -> Size<Length> {
+            self.content.as_widget().size_hint()
+        }
+
+        fn layout(
+            &mut self,
+            tree: &mut Tree,
+            renderer: &Renderer,
+            limits: &layout::Limits,
+        ) -> layout::Node {
+            self.content.as_widget_mut().layout(tree, renderer, limits)
+        }
+
+        fn draw(
+            &self,
+            tree: &Tree,
+            renderer: &mut Renderer,
+            theme: &Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+        ) {
+            self.content
+                .as_widget()
+                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        }
+
+        fn operate(
+            &mut self,
+            tree: &mut Tree,
+            layout: Layout<'_>,
+            renderer: &Renderer,
+            operation: &mut dyn Operation,
+        ) {
+            self.content
+                .as_widget_mut()
+                .operate(tree, layout, renderer, operation);
+        }
+
+        fn update(
+            &mut self,
+            tree: &mut Tree,
+            event: &iced::Event,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            renderer: &Renderer,
+            clipboard: &mut dyn Clipboard,
+            shell: &mut Shell<'_, Message>,
+            viewport: &Rectangle,
+        ) {
+            match keyboard_guard_action(self.keymap, event) {
+                KeyboardGuardAction::OpenHelp => shell.publish(Message::OpenHelp),
+                KeyboardGuardAction::CloseHelp => shell.publish(Message::CloseHelp),
+                KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
+                KeyboardGuardAction::CloseNote => shell.publish(Message::CloseNotePopup),
+                KeyboardGuardAction::Capture => {}
+                KeyboardGuardAction::Pass => {
+                    self.content.as_widget_mut().update(
+                        tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+                    );
+                    return;
+                }
+            }
+
+            shell.capture_event();
+        }
+
+        fn mouse_interaction(
+            &self,
+            tree: &Tree,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+            renderer: &Renderer,
+        ) -> mouse::Interaction {
+            self.content
+                .as_widget()
+                .mouse_interaction(tree, layout, cursor, viewport, renderer)
+        }
+
+        fn overlay<'b>(
+            &'b mut self,
+            tree: &'b mut Tree,
+            layout: Layout<'b>,
+            renderer: &Renderer,
+            viewport: &Rectangle,
+            translation: Vector,
+        ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
+            self.content
+                .as_widget_mut()
+                .overlay(tree, layout, renderer, viewport, translation)
+        }
+    }
+
+    Element::new(KeyboardGuard { content, keymap })
+}
+
+/// Every keyboard shortcut handled by the application, kept next to the
+/// help popup so the displayed list cannot drift from the user-facing
+/// shortcut vocabulary.
+const HELP_SHORTCUTS: &[(&str, &str)] = &[
+    ("?", "Open this shortcuts help window."),
+    (
+        "Esc",
+        "Close help/popups, leave visual mode, or unfocus a text field.",
+    ),
+    ("Ctrl + O", "Open a Markdown file."),
+    ("Ctrl + P", "Toggle between writing and preview mode."),
+    (
+        "Ctrl + S",
+        "Save the document; save the note when its popup is open.",
+    ),
+    ("Ctrl + F", "Open find in the document."),
+    ("Ctrl + G", "Find the next match while find is open."),
+    ("Ctrl + B", "Show or hide the comments sidebar."),
+    ("Ctrl + N", "Jump to the next saved comment in preview."),
+    (
+        "Ctrl + A",
+        "Select all text in the focused editor or field.",
+    ),
+    ("Ctrl + C", "Copy selected text."),
+    ("Ctrl + X", "Cut selected text."),
+    ("Ctrl + V", "Paste text."),
+    (
+        "Arrow keys",
+        "Move the focused text cursor, or the caret in preview.",
+    ),
+    (
+        "Shift + movement keys",
+        "Extend a focused selection while moving.",
+    ),
+    (
+        "Ctrl + ← / →",
+        "Move by words in the focused editor or field.",
+    ),
+    (
+        "Ctrl + Shift + ← / →",
+        "Extend the focused selection by words.",
+    ),
+    ("Home / End", "Move to the start or end of a line or field."),
+    (
+        "Ctrl + Home / End",
+        "Move to the start or end of the source document.",
+    ),
+    ("Page Up / Page Down", "Move by pages in the source editor."),
+    (
+        "Backspace / Delete",
+        "Delete text before or after the focused cursor.",
+    ),
+    (
+        "h/H · j/J · k/K · l/L",
+        "Move the preview caret left, down, up, or right.",
+    ),
+    ("w/W", "Move to the next word start in preview."),
+    ("b/B", "Move to the previous word start in preview."),
+    ("e/E", "Move to the next word end in preview."),
+    ("g then e/E", "Move to the previous word end in preview."),
+    ("g then g", "Jump to the first preview element."),
+    ("G", "Jump to the last preview element."),
+    ("v/V", "Toggle visual selection mode in preview."),
+    ("c/C", "Open a note popup at the preview caret."),
+    (
+        "Enter",
+        "Insert a line break, or find the next match while find is open.",
+    ),
+    (
+        "Shift + Enter",
+        "Find the previous match while find is open.",
+    ),
+];
+
+/// A centered, read-only shortcuts window. Both the card and its backdrop
+/// capture clicks so the editing surface below cannot receive them.
+fn help_popup() -> Element<'static, Message> {
+    let rows: Vec<Element<'static, Message>> = HELP_SHORTCUTS
+        .iter()
+        .map(|(shortcut, description)| {
+            row![
+                container(
+                    text(*shortcut)
+                        .font(EDITOR_FONT)
+                        .size(13)
+                        .color(Color::WHITE)
+                )
+                .width(Length::Fixed(210.0)),
+                text(*description)
+                    .font(EDITOR_FONT)
+                    .size(13)
+                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+            ]
+            .spacing(12)
+            .align_y(alignment::Vertical::Center)
+            .width(Length::Fill)
+            .into()
+        })
+        .collect();
+
+    let card = mouse_area(
+        container(
+            column![
+                text("Keyboard shortcuts")
+                    .font(EDITOR_FONT)
+                    .size(16)
+                    .color(Color::WHITE),
+                text("Press Esc to close")
+                    .font(EDITOR_FONT)
+                    .size(12)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                scrollable(column(rows).spacing(9).width(Length::Fill))
+                    .height(Length::Fixed(480.0)),
+            ]
+            .spacing(12)
+            .width(Length::Fill),
+        )
+        .width(Length::Fixed(650.0))
+        .padding(20)
+        .style(note_card_style),
+    )
+    .on_press(Message::HelpCardPressed);
+
+    mouse_area(
+        container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .style(note_backdrop_style),
+    )
+    .on_press(Message::CloseHelp)
+    .on_scroll(|_| Message::HelpCardPressed)
+    .into()
 }
 
 /// Whether the comments sidebar is showing: the manual `Ctrl+B` override
@@ -1019,7 +1351,10 @@ impl<'a> PreviewViewer<'a> {
             }),
             caret: focused.then_some(self.caret_column),
             id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
-            commented: matches!(self.comments.mark_for(element), Mark::Commented | Mark::Active),
+            commented: matches!(
+                self.comments.mark_for(element),
+                Mark::Commented | Mark::Active
+            ),
             active_comment: self.comments.mark_for(element) == Mark::Active,
             find: interactive_text::FindHighlights {
                 matches: if self.find_query.is_empty() {
@@ -1091,7 +1426,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     // The current find match, resolved against the live elements so the
     // viewer can paint it in its distinct color.
-    let find_matches = find::preview_matches(editor.preview_elements.elements(), editor.find.query());
+    let find_matches =
+        find::preview_matches(editor.preview_elements.elements(), editor.find.query());
     let current_match = editor
         .find
         .current(find_matches.len())
@@ -1279,7 +1615,14 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         layers = layers.push(find_popup(editor));
     }
 
-    layers.into()
+    // Help is the topmost, read-only layer. The content below remains in the
+    // same stack and no focus task is issued, so cursor and selections resume
+    // exactly where they were after Escape closes the overlay.
+    if editor.keymap.help_open() {
+        layers = layers.push(help_popup());
+    }
+
+    keyboard_guard(layers.into(), editor.keymap)
 }
 
 /// The comments sidebar: a full-height panel with a scrollable list of
@@ -1774,7 +2117,8 @@ mod tests {
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::{
-        forward_file_change, may_change_file, replace_source_text, update, Editor, Message,
+        forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
+        Editor, KeyboardGuardAction, Message, HELP_SHORTCUTS,
     };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
@@ -1796,6 +2140,123 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+        }
+    }
+
+    /// Help does not move the source cursor/selection or the preview
+    /// caret/visual anchor when it opens and closes.
+    #[test]
+    fn help_preserves_underlying_editor_state() {
+        use iced::widget::text_editor::{Cursor, Position};
+
+        let mut source = Editor {
+            content: iced::widget::text_editor::Content::with_text("first\nsecond"),
+            markdown: iced::widget::markdown::Content::parse("first\nsecond"),
+            path: None,
+            keymap: Keymap::new(false),
+            caret: Caret::new(),
+            preview_elements: ElementMap::parse("first\nsecond"),
+            visual_anchor: None,
+            note_text: iced::widget::text_editor::Content::new(),
+            comments: Comments::new(),
+            sidebar_override: None,
+            find: find::Find::new(),
+        };
+        source.content.move_to(Cursor {
+            position: Position { line: 1, column: 3 },
+            selection: Some(Position { line: 0, column: 1 }),
+        });
+        let before = source.content.cursor();
+        let _ = update(&mut source, Message::OpenHelp);
+        let _ = update(&mut source, Message::CloseHelp);
+        assert_eq!(source.content.cursor(), before);
+
+        let mut preview = editor_at(
+            "first\n\nsecond",
+            CaretPosition {
+                element: 1,
+                column: 2,
+            },
+        );
+        preview.visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        let caret = preview.caret.position();
+        let anchor = preview.visual_anchor;
+        let _ = update(&mut preview, Message::OpenHelp);
+        let _ = update(&mut preview, Message::CloseHelp);
+        assert_eq!(preview.caret.position(), caret);
+        assert_eq!(preview.visual_anchor, anchor);
+    }
+
+    /// The root keyboard guard claims `?` before any focused input can edit,
+    /// swallows every key press while help is open, and owns Escape so the
+    /// focused widget underneath never receives an unfocus event.
+    #[test]
+    fn help_guard_captures_keys_before_focused_widgets() {
+        use iced::keyboard::{key, Location, Modifiers};
+
+        let pressed = |key: iced::keyboard::Key, modifiers| {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
+                location: Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            })
+        };
+
+        let question = pressed(iced::keyboard::Key::Character("?".into()), Modifiers::SHIFT);
+        let write = Keymap::new(false);
+        assert_eq!(
+            keyboard_guard_action(write, &question),
+            KeyboardGuardAction::OpenHelp
+        );
+
+        let typing = pressed(
+            iced::keyboard::Key::Character("x".into()),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            keyboard_guard_action(write, &typing),
+            KeyboardGuardAction::Pass
+        );
+        let mut help = write;
+        help.note(&Message::OpenHelp);
+        assert_eq!(
+            keyboard_guard_action(help, &typing),
+            KeyboardGuardAction::Capture
+        );
+
+        let escape = pressed(
+            iced::keyboard::Key::Named(key::Named::Escape),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            keyboard_guard_action(help, &escape),
+            KeyboardGuardAction::CloseHelp
+        );
+
+        let mut find = write;
+        find.note(&Message::OpenFind);
+        assert_eq!(
+            keyboard_guard_action(find, &escape),
+            KeyboardGuardAction::CloseFind
+        );
+    }
+
+    /// Help includes both application commands and the standard editing
+    /// shortcuts supplied by iced's text widgets.
+    #[test]
+    fn help_lists_standard_editing_shortcuts() {
+        for shortcut in ["Ctrl + A", "Ctrl + C", "Ctrl + X", "Ctrl + V"] {
+            assert!(
+                HELP_SHORTCUTS.iter().any(|(key, _)| *key == shortcut),
+                "missing {shortcut}"
+            );
         }
     }
 
@@ -1855,7 +2316,9 @@ mod tests {
         let _ = update(&mut editor, Message::SaveNote);
 
         assert_eq!(editor.comments.mark_for(1), Mark::Active);
-        let cards = editor.comments.cards(markdown, editor.preview_elements.elements());
+        let cards = editor
+            .comments
+            .cards(markdown, editor.preview_elements.elements());
         assert!(cards[0].quote.contains("```"));
     }
 
@@ -1899,7 +2362,10 @@ mod tests {
         editor.keymap.note(&Message::TogglePreview);
         let _ = update(&mut editor, Message::CommentCardPressed(0));
 
-        assert_eq!(editor.content.cursor().position, Position { line: 4, column: 0 });
+        assert_eq!(
+            editor.content.cursor().position,
+            Position { line: 4, column: 0 }
+        );
     }
 
     /// Escaping the note popup discards the draft: the next `c` opens a

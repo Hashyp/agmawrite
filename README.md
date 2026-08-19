@@ -27,4 +27,6 @@ In preview, a white caret marks the current rendered text element. Navigation su
 
 `Ctrl + F` opens a find popup in the top right corner, in any mode. The query matches case-insensitively and selects matches live: in write mode each match becomes the editor's selection and all matches tint amber; in the preview the caret jumps to the match and matches paint as amber highlights with the current one in a brighter shade. A counter shows the current match as `n/m` (or "no match"). Enter and `Ctrl + G` step to the next match, Shift + Enter to the previous one, wrapping around; ▲/▼ buttons do the same by mouse. Escape closes the popup.
 
+Press `?` at any time to open a centered, read-only keyboard shortcuts help window. It captures input without changing the editor underneath; `Esc` closes it and restores the previous mode, cursor, selection, and popup state.
+
 Built on iced 0.14 and its `markdown` widget. The iA Writer Mono S font is bundled under the SIL Open Font License; see `fonts/OFL.txt`.

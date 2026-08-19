@@ -48,6 +48,9 @@ pub struct Keymap {
     layer: Layer,
     note_open: bool,
     find_open: bool,
+    /// Whether the help overlay is open. This is deliberately kept out of
+    /// [`Keymap::mode`] so opening help does not change the underlying mode.
+    help_open: bool,
     preview_only: bool,
     /// Whether a lone `g` is awaiting its second key of a `gg`/`ge`
     /// sequence.
@@ -66,6 +69,7 @@ impl Keymap {
             },
             note_open: false,
             find_open: false,
+            help_open: false,
             preview_only,
             pending_g: false,
         }
@@ -108,6 +112,12 @@ impl Keymap {
         self.find_open
     }
 
+    /// Whether the help overlay is open. The mode itself remains unchanged
+    /// while help is visible.
+    pub fn help_open(&self) -> bool {
+        self.help_open
+    }
+
     /// Whether visual mode is active — motions extend the selection.
     pub fn visual(&self) -> bool {
         matches!(self.layer, Layer::Visual)
@@ -129,6 +139,30 @@ impl Keymap {
         else {
             return None;
         };
+
+        // Help is a read-only modal overlay. It takes the question-mark
+        // shortcut before any other popup or mode can interpret it, and
+        // swallows every key except Escape. No underlying editor state is
+        // touched while it is open.
+        if self.help_open {
+            return match modified_key.as_ref() {
+                keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
+                    Some(Message::CloseHelp)
+                }
+                _ => None,
+            };
+        }
+
+        // `?` opens help from every mode, including while another popup is
+        // open. The existing popup and editor state remains underneath it.
+        if !modifiers.control()
+            && !modifiers.alt()
+            && !modifiers.logo()
+            && !repeat
+            && matches!(modified_key.as_ref(), keyboard::Key::Character("?"))
+        {
+            return Some(Message::OpenHelp);
+        }
 
         // The note popup swallows plain keys for its text area; only Escape
         // closes it and Ctrl+S saves the comment.
@@ -247,8 +281,19 @@ impl Keymap {
     /// land exactly like the key-driven ones.
     pub fn note(&mut self, message: &Message) {
         // Any message other than arming the prefix ends a pending `gg`/`ge`
-        // sequence, like any other key would.
-        self.pending_g = matches!(message, Message::PreviewGPressed);
+        // sequence, like any other key would. Help is transparent to this
+        // state: opening and closing it must not alter what was underneath.
+        if !matches!(
+            message,
+            Message::PreviewGPressed
+                | Message::OpenHelp
+                | Message::CloseHelp
+                | Message::HelpCardPressed
+        ) {
+            self.pending_g = false;
+        } else if matches!(message, Message::PreviewGPressed) {
+            self.pending_g = true;
+        }
 
         match message {
             Message::FileLoaded(Some(_)) => {
@@ -278,6 +323,8 @@ impl Keymap {
             Message::CloseNotePopup | Message::SaveNote => self.note_open = false,
             Message::OpenFind => self.find_open = true,
             Message::CloseFind => self.find_open = false,
+            Message::OpenHelp => self.help_open = true,
+            Message::CloseHelp => self.help_open = false,
             Message::PreviewCancel => {
                 if matches!(self.layer, Layer::Visual) {
                     self.layer = Layer::View;
@@ -584,7 +631,39 @@ mod tests {
         ));
 
         keymap.note(&Message::CloseFind);
-        assert!(keymap.handle(key_press_with("g", Modifiers::CTRL, false)).is_none());
+        assert!(keymap
+            .handle(key_press_with("g", Modifiers::CTRL, false))
+            .is_none());
+    }
+
+    /// Help opens from every underlying mode, swallows keys while visible,
+    /// closes with Escape, and leaves a pending preview prefix untouched.
+    #[test]
+    fn help_is_a_transparent_modal_overlay() {
+        let mut write = Keymap::new(false);
+        assert_eq!(write.mode(), Mode::Write);
+        assert!(matches!(
+            write.handle(key_press("?", false)),
+            Some(Message::OpenHelp)
+        ));
+        write.note(&Message::OpenHelp);
+        assert!(write.help_open());
+        assert_eq!(write.mode(), Mode::Write);
+        assert!(write.handle(key_press("j", false)).is_none());
+        assert!(matches!(write.handle(escape()), Some(Message::CloseHelp)));
+        write.note(&Message::CloseHelp);
+        assert!(!write.help_open());
+        assert_eq!(write.mode(), Mode::Write);
+
+        let mut view = viewing();
+        view.note(&Message::PreviewGPressed);
+        view.note(&Message::OpenHelp);
+        assert_eq!(view.mode(), Mode::View);
+        view.note(&Message::CloseHelp);
+        assert!(matches!(
+            view.handle(key_press("g", false)),
+            Some(Message::MovePreviewJump(Jump::First))
+        ));
     }
 
     /// Ctrl+S saves the document in write and view mode; with the note
