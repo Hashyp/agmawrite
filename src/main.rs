@@ -8,7 +8,7 @@ mod preview;
 mod theme;
 
 use comments::{Comments, Mark, Span};
-use keymap::{Keymap, Mode};
+use keymap::{is_help_chord, Keymap, Mode};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
 
@@ -32,6 +32,8 @@ const PREVIEW_CARET_ID: &str = "preview-caret";
 const NOTE_EDITOR_ID: &str = "note-editor";
 /// The id of the find popup's query field, focused when the popup opens.
 const FIND_INPUT_ID: &str = "find-input";
+/// The id of the help window's search field, focused when the window opens.
+const HELP_INPUT_ID: &str = "help-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
 /// canvas size.
 const ICON_DESIGN_SIZE: f32 = 16.0;
@@ -70,6 +72,9 @@ struct Editor {
     sidebar_override: Option<bool>,
     /// The find popup's state: the query and the current match.
     find: find::Find,
+    /// The help window's search query, filtering the shortcuts list live;
+    /// it clears when the window closes so every search starts fresh.
+    help_query: String,
     /// The contents as last loaded or saved — the baseline the
     /// unsaved-changes detection compares against.
     saved_contents: String,
@@ -134,6 +139,7 @@ enum Message {
     OpenHelp,
     CloseHelp,
     HelpCardPressed,
+    HelpQueryChanged(String),
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
@@ -921,9 +927,25 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::FindNext => return select_find_match(editor, find::Way::Next),
         Message::FindPrevious => return select_find_match(editor, find::Way::Previous),
-        // Help is read-only: opening and closing it deliberately do not
-        // focus, move, or otherwise update the underlying application state.
-        Message::OpenHelp | Message::CloseHelp | Message::HelpCardPressed => {}
+        // The help window only ever owns focus: opening focuses its search
+        // field, and closing clears the query and hands focus back to the
+        // field underneath — the editor state itself never changes.
+        Message::OpenHelp => return focus(Id::new(HELP_INPUT_ID)),
+        Message::CloseHelp => {
+            editor.help_query.clear();
+
+            if editor.keymap.find_open() {
+                return focus(Id::new(FIND_INPUT_ID));
+            }
+            if editor.keymap.note_open() {
+                return focus(Id::new(NOTE_EDITOR_ID));
+            }
+            if !editor.keymap.preview() {
+                return focus(Id::new(SOURCE_EDITOR_ID));
+            }
+        }
+        Message::HelpQueryChanged(query) => editor.help_query = query,
+        Message::HelpCardPressed => {}
         // Clicks on the card itself are swallowed so they neither close the
         // popup nor reach the preview beneath.
         Message::NoteCardPressed => {}
@@ -1097,11 +1119,10 @@ enum KeyboardGuardAction {
 }
 
 fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAction {
-    // Do not let an active input method commit or alter pre-edit text behind
-    // a modal window.
-    if (keymap.help_open() || keymap.unsaved_open())
-        && matches!(event, iced::Event::InputMethod(_))
-    {
+    // Do not let an active input method commit or alter pre-edit text
+    // behind the unsaved-changes dialog. The help window's search field
+    // takes input-method events like any text input.
+    if keymap.unsaved_open() && matches!(event, iced::Event::InputMethod(_)) {
         return KeyboardGuardAction::Capture;
     }
 
@@ -1116,15 +1137,28 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
     };
 
     if keymap.help_open() {
-        return if !repeat
-            && matches!(
+        // The help window's search field owns typing while the overlay is
+        // open (focus lives on it, so nothing beneath reacts). Only the
+        // closers — Escape and the Ctrl + ? toggle — and Tab, which would
+        // otherwise wander focus beneath the overlay, are claimed.
+        if !repeat {
+            if matches!(
                 modified_key.as_ref(),
                 keyboard::Key::Named(keyboard::key::Named::Escape)
+            ) || is_help_chord(&modified_key.as_ref(), modifiers)
+            {
+                return KeyboardGuardAction::CloseHelp;
+            }
+
+            if matches!(
+                modified_key.as_ref(),
+                keyboard::Key::Named(keyboard::key::Named::Tab)
             ) {
-            KeyboardGuardAction::CloseHelp
-        } else {
-            KeyboardGuardAction::Capture
-        };
+                return KeyboardGuardAction::Capture;
+            }
+        }
+
+        return KeyboardGuardAction::Pass;
     }
 
     // The unsaved-changes dialog captures every key press so the editing
@@ -1141,12 +1175,7 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
         };
     }
 
-    if !repeat
-        && !modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(modified_key.as_ref(), keyboard::Key::Character("?"))
-    {
+    if !repeat && is_help_chord(&modified_key.as_ref(), modifiers) {
         return KeyboardGuardAction::OpenHelp;
     }
 
@@ -1170,10 +1199,11 @@ fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAc
     KeyboardGuardAction::Pass
 }
 
-/// Wraps the complete interface and intercepts help keys before focused
-/// widgets can consume them. While help is open, no key press reaches the
-/// interface underneath; Escape closes help without unfocusing the field
-/// that was active before it opened.
+/// Wraps the complete interface and intercepts the help chord before
+/// focused widgets can consume it. While help is open, every key press but
+/// the closers and Tab reaches the window's search field — focus lives on
+/// the overlay, so the interface underneath never reacts; closing returns
+/// focus to the field that was active before it opened.
 fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<'a, Message> {
     struct KeyboardGuard<'a> {
         content: Element<'a, Message>,
@@ -1304,7 +1334,7 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
 /// help popup so the displayed list cannot drift from the user-facing
 /// shortcut vocabulary.
 const HELP_SHORTCUTS: &[(&str, &str)] = &[
-    ("?", "Open this shortcuts help window."),
+    ("Ctrl + ?", "Open this shortcuts help window."),
     (
         "Esc",
         "Close help/popups, leave visual mode, or unfocus a text field.",
@@ -1397,31 +1427,60 @@ const HELP_SHORTCUTS: &[(&str, &str)] = &[
     ),
 ];
 
-/// A centered, read-only shortcuts window. Both the card and its backdrop
-/// capture clicks so the editing surface below cannot receive them.
-fn help_popup(palette: Palette) -> Element<'static, Message> {
-    let rows: Vec<Element<'static, Message>> = HELP_SHORTCUTS
+/// The help window's incremental search: the shortcut rows matching
+/// `query` — the key or the description containing it,
+/// ASCII-case-insensitively like find. An empty query keeps the whole
+/// list.
+fn help_matches(query: &str) -> Vec<(&'static str, &'static str)> {
+    HELP_SHORTCUTS
         .iter()
-        .map(|(shortcut, description)| {
-            row![
-                container(
-                    text(*shortcut)
+        .filter(|(shortcut, description)| {
+            query.is_empty()
+                || !editing::byte_matches(shortcut, query).is_empty()
+                || !editing::byte_matches(description, query).is_empty()
+        })
+        .map(|(shortcut, description)| (*shortcut, *description))
+        .collect()
+}
+
+/// A centered shortcuts window with incremental search: typing filters the
+/// list down to the shortcuts and descriptions matching the query. Both
+/// the card and its backdrop capture clicks so the editing surface below
+/// cannot receive them.
+fn help_popup(query: &str, palette: Palette) -> Element<'static, Message> {
+    let matches = help_matches(query);
+    let list: Element<'static, Message> = if matches.is_empty() {
+        text("No matching shortcuts")
+            .font(EDITOR_FONT)
+            .size(13)
+            .color(palette.dark_foreground)
+            .into()
+    } else {
+        let rows: Vec<Element<'static, Message>> = matches
+            .into_iter()
+            .map(|(shortcut, description)| {
+                row![
+                    container(
+                        text(shortcut)
+                            .font(EDITOR_FONT)
+                            .size(13)
+                            .color(palette.foreground)
+                    )
+                    .width(Length::Fixed(240.0)),
+                    text(description)
                         .font(EDITOR_FONT)
                         .size(13)
-                        .color(palette.foreground)
-                )
-                .width(Length::Fixed(240.0)),
-                text(*description)
-                    .font(EDITOR_FONT)
-                    .size(13)
-                    .color(palette.light_foreground),
-            ]
-            .spacing(12)
-            .align_y(alignment::Vertical::Center)
-            .width(Length::Fill)
-            .into()
-        })
-        .collect();
+                        .color(palette.light_foreground),
+                ]
+                .spacing(12)
+                .align_y(alignment::Vertical::Center)
+                .width(Length::Fill)
+                .into()
+            })
+            .collect();
+
+        column(rows).spacing(9).width(Length::Fill).into()
+    };
 
     let card = mouse_area(
         container(
@@ -1430,12 +1489,17 @@ fn help_popup(palette: Palette) -> Element<'static, Message> {
                     .font(EDITOR_FONT)
                     .size(16)
                     .color(palette.foreground),
-                text("Press Esc to close")
+                text("Esc or Ctrl + ? closes")
                     .font(EDITOR_FONT)
                     .size(12)
                     .color(palette.dark_foreground),
-                scrollable(column(rows).spacing(9).width(Length::Fill))
-                    .height(Length::Fixed(480.0)),
+                text_input("Search shortcuts…", query)
+                    .id(Id::new(HELP_INPUT_ID))
+                    .on_input(Message::HelpQueryChanged)
+                    .font(EDITOR_FONT)
+                    .size(13)
+                    .padding(6),
+                scrollable(list).height(Length::Fixed(440.0)),
             ]
             .spacing(12)
             .width(Length::Fill),
@@ -2153,11 +2217,12 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         layers = layers.push(unsaved_dialog(editor.pending_unsaved, palette));
     }
 
-    // Help is the topmost, read-only layer. The content below remains in the
-    // same stack and no focus task is issued, so cursor and selections resume
-    // exactly where they were after Escape closes the overlay.
+    // Help is the topmost layer. The content below remains in the same
+    // stack; opening focuses the window's search field and closing hands
+    // focus back, so cursor and selections resume exactly where they were
+    // after Escape closes the overlay.
     if editor.keymap.help_open() {
-        layers = layers.push(help_popup(palette));
+        layers = layers.push(help_popup(&editor.help_query, palette));
     }
 
     keyboard_guard(layers.into(), editor.keymap)
@@ -2974,6 +3039,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         comments: Comments::new(),
         sidebar_override: None,
         find: find::Find::new(),
+        help_query: String::new(),
         saved_contents: contents.clone().unwrap_or_default(),
         pending_unsaved: None,
         editing_comment: None,
@@ -3032,8 +3098,8 @@ mod tests {
     use super::keymap::{Keymap, Mode};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::{
-        forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
-        Editor, KeyboardGuardAction, Message, HELP_SHORTCUTS,
+        forward_file_change, help_matches, keyboard_guard_action, may_change_file,
+        replace_source_text, update, Editor, KeyboardGuardAction, Message, HELP_SHORTCUTS,
     };
     use super::theme::Palette;
     use super::{is_modified, UnsavedAction};
@@ -3057,6 +3123,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            help_query: String::new(),
             saved_contents: contents.to_owned(),
             pending_unsaved: None,
             editing_comment: None,
@@ -3082,6 +3149,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            help_query: String::new(),
             saved_contents: "first\nsecond".to_owned(),
             pending_unsaved: None,
             editing_comment: None,
@@ -3115,11 +3183,12 @@ mod tests {
         assert_eq!(preview.visual_anchor, anchor);
     }
 
-    /// The root keyboard guard claims `?` before any focused input can edit,
-    /// swallows every key press while help is open, and owns Escape so the
-    /// focused widget underneath never receives an unfocus event.
+    /// The root keyboard guard claims the `Ctrl + ?` chord before any
+    /// focused input can edit, and while help is open it only claims the
+    /// closers (Escape, the chord) and Tab — every other key press reaches
+    /// the window's search field, and input-method events reach it too.
     #[test]
-    fn help_guard_captures_keys_before_focused_widgets() {
+    fn help_guard_routes_keys_to_the_help_window() {
         use iced::keyboard::{key, Location, Modifiers};
 
         let pressed = |key: iced::keyboard::Key, modifiers| {
@@ -3134,27 +3203,50 @@ mod tests {
             })
         };
 
-        let question = pressed(iced::keyboard::Key::Character("?".into()), Modifiers::SHIFT);
         let write = Keymap::new(false);
+
+        // A plain `?` (Shift + /) types into the editor like any character.
+        let question = pressed(iced::keyboard::Key::Character("?".into()), Modifiers::SHIFT);
+        assert_eq!(keyboard_guard_action(write, &question), KeyboardGuardAction::Pass);
+
+        // The chord opens help — both the `?` and the `/` spelling.
+        let chord =
+            pressed(iced::keyboard::Key::Character("?".into()), Modifiers::CTRL | Modifiers::SHIFT);
+        assert_eq!(keyboard_guard_action(write, &chord), KeyboardGuardAction::OpenHelp);
+        let slash_chord = pressed(iced::keyboard::Key::Character("/".into()), Modifiers::CTRL);
         assert_eq!(
-            keyboard_guard_action(write, &question),
+            keyboard_guard_action(write, &slash_chord),
             KeyboardGuardAction::OpenHelp
         );
+
+        // While help is open, typing and input-method events reach the
+        // window's search field; Tab stays captured so focus cannot wander
+        // beneath the overlay; Escape and the chord close.
+        let mut help = write;
+        help.note(&Message::OpenHelp);
 
         let typing = pressed(
             iced::keyboard::Key::Character("x".into()),
             Modifiers::default(),
         );
+        assert_eq!(keyboard_guard_action(help, &typing), KeyboardGuardAction::Pass);
         assert_eq!(
-            keyboard_guard_action(write, &typing),
+            keyboard_guard_action(help, &chord),
+            KeyboardGuardAction::CloseHelp
+        );
+        assert_eq!(
+            keyboard_guard_action(
+                help,
+                &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
+            ),
             KeyboardGuardAction::Pass
         );
-        let mut help = write;
-        help.note(&Message::OpenHelp);
-        assert_eq!(
-            keyboard_guard_action(help, &typing),
-            KeyboardGuardAction::Capture
+
+        let tab = pressed(
+            iced::keyboard::Key::Named(key::Named::Tab),
+            Modifiers::default(),
         );
+        assert_eq!(keyboard_guard_action(help, &tab), KeyboardGuardAction::Capture);
 
         let escape = pressed(
             iced::keyboard::Key::Named(key::Named::Escape),
@@ -3165,12 +3257,10 @@ mod tests {
             KeyboardGuardAction::CloseHelp
         );
 
+        // Escape with the find popup open still closes find.
         let mut find = write;
         find.note(&Message::OpenFind);
-        assert_eq!(
-            keyboard_guard_action(find, &escape),
-            KeyboardGuardAction::CloseFind
-        );
+        assert_eq!(keyboard_guard_action(find, &escape), KeyboardGuardAction::CloseFind);
     }
 
     /// Help includes both application commands and the standard editing
@@ -3183,6 +3273,63 @@ mod tests {
                 "missing {shortcut}"
             );
         }
+
+        // The help window's own chord leads the list.
+        assert_eq!(HELP_SHORTCUTS[0].0, "Ctrl + ?");
+    }
+
+    /// The help window's search filters the list incrementally: an empty
+    /// query keeps everything, a query matches the key or the description
+    /// case-insensitively, and a query nothing matches empties the list.
+    #[test]
+    fn help_search_filters_the_shortcut_list() {
+        assert_eq!(help_matches("").len(), HELP_SHORTCUTS.len());
+
+        // Matching is case-insensitive over both columns.
+        for query in ["preview", "PREVIEW", "Ctrl"] {
+            let matches = help_matches(query);
+            assert!(
+                !matches.is_empty(),
+                "'{query}' should match some shortcuts"
+            );
+            assert!(matches.iter().all(|(key, description)| {
+                key.to_lowercase().contains(&query.to_lowercase())
+                    || description
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+            }));
+        }
+
+        // A query matching only descriptions still filters the list.
+        assert!(help_matches("sidebar")
+            .iter()
+            .all(|(_, description)| description.to_lowercase().contains("sidebar")));
+
+        // A query matching a key by its label works too.
+        assert!(help_matches("page up")
+            .iter()
+            .any(|(key, _)| key.to_lowercase().contains("page up")));
+
+        assert!(help_matches("no shortcut has this text").is_empty());
+    }
+
+    /// The help window's query lives in the editor and clears when the
+    /// window closes, so every search starts fresh.
+    #[test]
+    fn help_search_clears_when_the_window_closes() {
+        let mut editor = editor_at(
+            "first\n\nsecond",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+
+        let _ = update(&mut editor, Message::HelpQueryChanged("gg".to_owned()));
+        assert_eq!(editor.help_query, "gg");
+
+        let _ = update(&mut editor, Message::CloseHelp);
+        assert_eq!(editor.help_query, "");
     }
 
     /// Saving the popup note stores a comment anchored at the caret and
@@ -3468,6 +3615,7 @@ mod tests {
             comments: Comments::new(),
             sidebar_override: None,
             find: find::Find::new(),
+            help_query: String::new(),
             saved_contents: "- item".to_owned(),
             pending_unsaved: None,
             editing_comment: None,

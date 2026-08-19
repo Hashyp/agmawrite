@@ -14,6 +14,17 @@ use iced::keyboard;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 use crate::Message;
 
+/// Whether a key press is the help chord: `Ctrl + ?` — `Ctrl + /` counts
+/// too, since `?` is shifted `/` on US layouts and some platforms report
+/// the unshifted character. The keymap and the keyboard guard both read
+/// this, so they agree by construction.
+pub fn is_help_chord(key: &keyboard::Key<&str>, modifiers: &keyboard::Modifiers) -> bool {
+    modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(key, keyboard::Key::Character("?" | "/"))
+}
+
 /// The highest a pending count may grow: `99999j` and `9999999999j` both
 /// scroll to the document's end instead of overflowing.
 const MAX_COUNT: u32 = 99_999;
@@ -179,15 +190,18 @@ impl Keymap {
             return None;
         };
 
-        // Help is a read-only modal overlay. It takes the question-mark
-        // shortcut before any other popup or mode can interpret it, and
-        // swallows every key except Escape. No underlying editor state is
-        // touched while it is open.
+        // Help is a read-only modal overlay. It takes the Ctrl+? shortcut
+        // before any other popup or mode can interpret it; Escape and the
+        // chord itself toggle it closed. Every other key press is left to
+        // the help window's search field, which receives it through the
+        // widget tree — no underlying editor state is touched while it is
+        // open.
         if self.help_open {
             return match modified_key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
                     Some(Message::CloseHelp)
                 }
+                key if !repeat && is_help_chord(&key, &modifiers) => Some(Message::CloseHelp),
                 _ => None,
             };
         }
@@ -204,14 +218,10 @@ impl Keymap {
             };
         }
 
-        // `?` opens help from every mode, including while another popup is
-        // open. The existing popup and editor state remains underneath it.
-        if !modifiers.control()
-            && !modifiers.alt()
-            && !modifiers.logo()
-            && !repeat
-            && matches!(modified_key.as_ref(), keyboard::Key::Character("?"))
-        {
+        // Ctrl+? opens help from every mode, including while another popup
+        // is open. The existing popup and editor state remains underneath
+        // it.
+        if !repeat && is_help_chord(&modified_key.as_ref(), &modifiers) {
             return Some(Message::OpenHelp);
         }
 
@@ -783,26 +793,53 @@ mod tests {
             .is_none());
     }
 
-    /// Help opens from every underlying mode, swallows keys while visible,
-    /// closes with Escape, and leaves a pending preview prefix untouched.
+    /// Help is a modal overlay: `Ctrl + ?` opens it from every mode
+    /// (`Ctrl + /` is the same chord on US layouts, where `?` is shifted
+    /// `/`), a plain `?` no longer does, Escape and the `Ctrl + ?` toggle
+    /// close it, plain keys reach the window's search field through the
+    /// widget tree instead of the keymap, and a pending preview prefix
+    /// survives underneath.
     #[test]
     fn help_is_a_transparent_modal_overlay() {
         let mut write = Keymap::new(false);
         assert_eq!(write.mode(), Mode::Write);
+
+        // A plain `?` no longer opens help — in write mode it types.
+        assert!(write.handle(key_press("?", false)).is_none());
+
         assert!(matches!(
-            write.handle(key_press("?", false)),
+            write.handle(key_press_with("?", Modifiers::CTRL, false)),
+            Some(Message::OpenHelp)
+        ));
+        assert!(matches!(
+            write.handle(key_press_with("/", Modifiers::CTRL, false)),
             Some(Message::OpenHelp)
         ));
         write.note(&Message::OpenHelp);
         assert!(write.help_open());
         assert_eq!(write.mode(), Mode::Write);
-        assert!(write.handle(key_press("j", false)).is_none());
+
+        // Every key but the closers is left to the help window's search
+        // field, which receives it through the widget tree.
+        for key in ["j", "g", "?", "x"] {
+            assert!(
+                write.handle(key_press(key, false)).is_none(),
+                "'{key}' should reach the help search field, not the keymap"
+            );
+        }
+
+        // Escape closes; the chord toggles closed too.
         assert!(matches!(write.handle(escape()), Some(Message::CloseHelp)));
+        assert!(matches!(
+            write.handle(key_press_with("?", Modifiers::CTRL, false)),
+            Some(Message::CloseHelp)
+        ));
         write.note(&Message::CloseHelp);
         assert!(!write.help_open());
         assert_eq!(write.mode(), Mode::Write);
 
         let mut view = viewing();
+        assert!(view.handle(key_press("?", false)).is_none());
         view.note(&Message::PreviewGPressed);
         view.note(&Message::OpenHelp);
         assert_eq!(view.mode(), Mode::View);

@@ -44,6 +44,12 @@ preview and anchored comments.
 - **Keymap** — the input mode stack (write, view, visual, note, find) plus
   the pending `g` sequence, owned by the keymap module. Key handling and
   the mode badge read it, so they agree by construction.
+- **Help window** — the shortcuts overlay `Ctrl + ?` toggles (`Ctrl + /`
+  is the same chord on US layouts): a modal over the current mode whose
+  search field filters the shortcut list live, case-insensitively, over
+  both the key and its description. Escape (or the chord again) closes
+  it, clearing the query so the next search starts fresh; the mode,
+  cursor, and popups underneath resume untouched.
 - **Element map** — the numbered preview elements, owned by the preview
   module (`ElementMap`) together with the claim protocol the Markdown
   viewer uses per rendered item — the viewer claims, it never counts.
