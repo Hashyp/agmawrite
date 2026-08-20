@@ -1,35 +1,32 @@
 mod cli;
-mod command;
 mod comments;
 mod document;
 mod editing;
 mod find;
 mod help;
 mod highlight;
+mod input;
 mod interactive_text;
-mod keymap;
 mod preview;
 mod theme;
 mod ui;
 mod watch;
 
 use cli::{Args, ParseOutcome};
-use command::{
-    Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
+use input::{
+    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, Keymap, Mode,
+    PreviewCommand, Transition,
 };
-use keymap::{Keymap, Mode, Transition};
 use theme::Palette;
 use ui::icons::{OpenFileIcon, PreviewIcon, SaveIcon, WriteIcon, ICON_BUTTON_SIZE, ICON_SIZE};
 
-use iced::advanced::widget::{Operation, Tree};
-use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
 use iced::widget::{
     button, canvas, column, container, operation::focus, operation::focus_next, row, stack, text,
     text_editor, tooltip, Id, Space,
 };
 use iced::{
-    alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
-    Rectangle, Renderer, Size, Subscription, Task, Theme, Vector,
+    alignment, application, keyboard, Background, Border, Color, Element, Font, Length,
+    Subscription, Task, Theme,
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -107,6 +104,20 @@ fn message_for_command(command: Command) -> Message {
             HelpCommand::Open => Message::OpenHelp,
             HelpCommand::Close => Message::Help(help::Message::Close),
         },
+    }
+}
+
+/// Maps input-local guard actions at the app boundary.
+fn message_for_guard_action(action: GuardAction) -> Message {
+    match action {
+        GuardAction::OpenHelp => Message::OpenHelp,
+        GuardAction::CloseHelp => Message::Help(help::Message::Close),
+        GuardAction::CloseFind => Message::Find(find::Message::Close),
+        GuardAction::CloseNote => Message::Comments(comments::Message::CloseComposer),
+        GuardAction::CancelUnsaved => Message::Document(document::Message::UnsavedCancel),
+        GuardAction::Pass | GuardAction::Capture => {
+            unreachable!("non-dispatch guard actions are handled inside input::guard")
+        }
     }
 }
 
@@ -360,222 +371,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     }
 
     Task::none()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyboardGuardAction {
-    Pass,
-    Capture,
-    OpenHelp,
-    CloseHelp,
-    CloseFind,
-    CloseNote,
-    CancelUnsaved,
-}
-
-fn keyboard_guard_action(keymap: Keymap, event: &iced::Event) -> KeyboardGuardAction {
-    // Help owns its chord and modal keyboard policy. It sits above every
-    // other modal, so its decisions have first refusal here.
-    match help::event_action(keymap.help_open(), event) {
-        help::EventAction::Open => return KeyboardGuardAction::OpenHelp,
-        help::EventAction::Close => return KeyboardGuardAction::CloseHelp,
-        help::EventAction::Capture => return KeyboardGuardAction::Capture,
-        help::EventAction::Pass => {}
-    }
-
-    // While Help is open, passed events belong to its focused search field,
-    // never to another modal beneath it.
-    if keymap.help_open() {
-        return KeyboardGuardAction::Pass;
-    }
-
-    // Do not let an active input method commit or alter pre-edit text
-    // behind the unsaved-changes dialog.
-    if keymap.unsaved_open() && matches!(event, iced::Event::InputMethod(_)) {
-        return KeyboardGuardAction::Capture;
-    }
-
-    let iced::Event::Keyboard(keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        repeat,
-        ..
-    }) = event
-    else {
-        return KeyboardGuardAction::Pass;
-    };
-
-    // The unsaved-changes dialog captures every key press so the editing
-    // surface beneath cannot react; Escape cancels it.
-    if keymap.unsaved_open() {
-        return if !repeat
-            && matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-            ) {
-            KeyboardGuardAction::CancelUnsaved
-        } else {
-            KeyboardGuardAction::Capture
-        };
-    }
-
-    if !repeat
-        && !modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(
-            modified_key.as_ref(),
-            keyboard::Key::Named(keyboard::key::Named::Escape)
-        )
-    {
-        if keymap.find_open() {
-            return KeyboardGuardAction::CloseFind;
-        }
-        if keymap.note_open() {
-            return KeyboardGuardAction::CloseNote;
-        }
-    }
-
-    KeyboardGuardAction::Pass
-}
-
-/// Wraps the complete interface and intercepts the help chord before
-/// focused widgets can consume it. While help is open, every key press but
-/// the closers and Tab reaches the window's search field — focus lives on
-/// the overlay, so the interface underneath never reacts; closing returns
-/// focus to the field that was active before it opened.
-fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<'a, Message> {
-    struct KeyboardGuard<'a> {
-        content: Element<'a, Message>,
-        keymap: Keymap,
-    }
-
-    impl Widget<Message, Theme, Renderer> for KeyboardGuard<'_> {
-        fn tag(&self) -> iced::advanced::widget::tree::Tag {
-            self.content.as_widget().tag()
-        }
-
-        fn state(&self) -> iced::advanced::widget::tree::State {
-            self.content.as_widget().state()
-        }
-
-        fn children(&self) -> Vec<Tree> {
-            self.content.as_widget().children()
-        }
-
-        fn diff(&self, tree: &mut Tree) {
-            self.content.as_widget().diff(tree);
-        }
-
-        fn size(&self) -> Size<Length> {
-            self.content.as_widget().size()
-        }
-
-        fn size_hint(&self) -> Size<Length> {
-            self.content.as_widget().size_hint()
-        }
-
-        fn layout(
-            &mut self,
-            tree: &mut Tree,
-            renderer: &Renderer,
-            limits: &layout::Limits,
-        ) -> layout::Node {
-            self.content.as_widget_mut().layout(tree, renderer, limits)
-        }
-
-        fn draw(
-            &self,
-            tree: &Tree,
-            renderer: &mut Renderer,
-            theme: &Theme,
-            style: &renderer::Style,
-            layout: Layout<'_>,
-            cursor: mouse::Cursor,
-            viewport: &Rectangle,
-        ) {
-            self.content
-                .as_widget()
-                .draw(tree, renderer, theme, style, layout, cursor, viewport);
-        }
-
-        fn operate(
-            &mut self,
-            tree: &mut Tree,
-            layout: Layout<'_>,
-            renderer: &Renderer,
-            operation: &mut dyn Operation,
-        ) {
-            self.content
-                .as_widget_mut()
-                .operate(tree, layout, renderer, operation);
-        }
-
-        fn update(
-            &mut self,
-            tree: &mut Tree,
-            event: &iced::Event,
-            layout: Layout<'_>,
-            cursor: mouse::Cursor,
-            renderer: &Renderer,
-            clipboard: &mut dyn Clipboard,
-            shell: &mut Shell<'_, Message>,
-            viewport: &Rectangle,
-        ) {
-            match keyboard_guard_action(self.keymap, event) {
-                KeyboardGuardAction::OpenHelp => shell.publish(Message::OpenHelp),
-                KeyboardGuardAction::CloseHelp => {
-                    shell.publish(Message::Help(help::Message::Close))
-                }
-                KeyboardGuardAction::CloseFind => {
-                    shell.publish(Message::Find(find::Message::Close))
-                }
-                KeyboardGuardAction::CloseNote => {
-                    shell.publish(Message::Comments(comments::Message::CloseComposer))
-                }
-                KeyboardGuardAction::CancelUnsaved => {
-                    shell.publish(Message::Document(document::Message::UnsavedCancel))
-                }
-                KeyboardGuardAction::Capture => {}
-                KeyboardGuardAction::Pass => {
-                    self.content.as_widget_mut().update(
-                        tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-                    );
-                    return;
-                }
-            }
-
-            shell.capture_event();
-        }
-
-        fn mouse_interaction(
-            &self,
-            tree: &Tree,
-            layout: Layout<'_>,
-            cursor: mouse::Cursor,
-            viewport: &Rectangle,
-            renderer: &Renderer,
-        ) -> mouse::Interaction {
-            self.content
-                .as_widget()
-                .mouse_interaction(tree, layout, cursor, viewport, renderer)
-        }
-
-        fn overlay<'b>(
-            &'b mut self,
-            tree: &'b mut Tree,
-            layout: Layout<'b>,
-            renderer: &Renderer,
-            viewport: &Rectangle,
-            translation: Vector,
-        ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
-            self.content
-                .as_widget_mut()
-                .overlay(tree, layout, renderer, viewport, translation)
-        }
-    }
-
-    Element::new(KeyboardGuard { content, keymap })
 }
 
 fn editor_style(
@@ -859,7 +654,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         };
     }
 
-    keyboard_guard(layers.into(), editor.keymap)
+    input::guard(layers.into(), editor.keymap, message_for_guard_action)
 }
 
 /// A small badge naming the current mode, placed next to the open icon in
@@ -993,13 +788,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> iced::Result {
 mod tests {
     use super::comments::{self, Mark};
     use super::find;
-    use super::keymap::{Keymap, Transition};
+    use super::input::{Keymap, Transition};
     use super::preview::{self, CaretPosition};
     use super::theme::Palette;
-    use super::{
-        keyboard_guard_action, root_layer_order, update, Editor, KeyboardGuardAction, Message,
-        RootLayer,
-    };
+    use super::{root_layer_order, update, Editor, Message, RootLayer};
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -1310,103 +1102,6 @@ mod tests {
                 RootLayer::Unsaved,
                 RootLayer::Help
             ]
-        );
-    }
-
-    /// The root keyboard guard claims the `Ctrl + ?` chord before any
-    /// focused input can edit, and while help is open it only claims the
-    /// closers (Escape, the chord) and Tab — every other key press reaches
-    /// the window's search field, and input-method events reach it too.
-    #[test]
-    fn help_guard_routes_keys_to_the_help_window() {
-        use iced::keyboard::{key, Location, Modifiers};
-
-        let pressed = |key: iced::keyboard::Key, modifiers| {
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: key.clone(),
-                modified_key: key,
-                physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-                location: Location::Standard,
-                modifiers,
-                text: None,
-                repeat: false,
-            })
-        };
-
-        let write = Keymap::new(false);
-
-        // A plain `?` (Shift + /) types into the editor like any character.
-        let question = pressed(iced::keyboard::Key::Character("?".into()), Modifiers::SHIFT);
-        assert_eq!(
-            keyboard_guard_action(write, &question),
-            KeyboardGuardAction::Pass
-        );
-
-        // The chord opens help — both the `?` and the `/` spelling.
-        let chord = pressed(
-            iced::keyboard::Key::Character("?".into()),
-            Modifiers::CTRL | Modifiers::SHIFT,
-        );
-        assert_eq!(
-            keyboard_guard_action(write, &chord),
-            KeyboardGuardAction::OpenHelp
-        );
-        let slash_chord = pressed(iced::keyboard::Key::Character("/".into()), Modifiers::CTRL);
-        assert_eq!(
-            keyboard_guard_action(write, &slash_chord),
-            KeyboardGuardAction::OpenHelp
-        );
-
-        // While help is open, typing and input-method events reach the
-        // window's search field; Tab stays captured so focus cannot wander
-        // beneath the overlay; Escape and the chord close.
-        let mut help = write;
-        help.note(Transition::HelpOpened);
-
-        let typing = pressed(
-            iced::keyboard::Key::Character("x".into()),
-            Modifiers::default(),
-        );
-        assert_eq!(
-            keyboard_guard_action(help, &typing),
-            KeyboardGuardAction::Pass
-        );
-        assert_eq!(
-            keyboard_guard_action(help, &chord),
-            KeyboardGuardAction::CloseHelp
-        );
-        assert_eq!(
-            keyboard_guard_action(
-                help,
-                &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
-            ),
-            KeyboardGuardAction::Pass
-        );
-
-        let tab = pressed(
-            iced::keyboard::Key::Named(key::Named::Tab),
-            Modifiers::default(),
-        );
-        assert_eq!(
-            keyboard_guard_action(help, &tab),
-            KeyboardGuardAction::Capture
-        );
-
-        let escape = pressed(
-            iced::keyboard::Key::Named(key::Named::Escape),
-            Modifiers::default(),
-        );
-        assert_eq!(
-            keyboard_guard_action(help, &escape),
-            KeyboardGuardAction::CloseHelp
-        );
-
-        // Escape with the find popup open still closes find.
-        let mut find = write;
-        find.note(Transition::FindOpened);
-        assert_eq!(
-            keyboard_guard_action(find, &escape),
-            KeyboardGuardAction::CloseFind
         );
     }
 

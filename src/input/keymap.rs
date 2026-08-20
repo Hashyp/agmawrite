@@ -4,14 +4,14 @@
 //! The mode is a small stack: write or view at the base, visual mode as a
 //! layer over view, and the note popup floating on top of either. [`Keymap`]
 //! owns the stack plus the pending `g` of a `gg`/`ge` sequence, behind two
-//! entry points: [`Keymap::handle`] turns a key event into an optional app
-//! message, and [`Keymap::note`] keeps the stack in sync with
-//! message-driven transitions (button clicks, backdrop clicks) so the two
+//! entry points: [`Keymap::handle`] turns a key event into an optional
+//! semantic command, and [`Keymap::note`] keeps the stack in sync with
+//! transition-driven changes (button clicks, backdrop clicks) so the two
 //! never disagree.
 
 use iced::keyboard;
 
-use crate::command::{
+use super::command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use crate::help;
@@ -500,10 +500,10 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
-    use super::{Keymap, Mode, Transition};
-    use crate::command::{
+    use super::super::command::{
         Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
     };
+    use super::{Keymap, Mode, Transition};
     use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
     use iced::keyboard::{self, key, Modifiers};
 

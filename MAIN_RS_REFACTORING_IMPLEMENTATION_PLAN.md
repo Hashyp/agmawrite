@@ -572,7 +572,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** shared modal code is neutral and imports no feature state/message.
 
-## Task 23 — Extract the keyboard guard into the input package
+## Task 23 — Extract the keyboard guard into the input package ✅ Completed
 
 **Goal:** move modal event interception out of app without introducing another reverse dependency.
 
