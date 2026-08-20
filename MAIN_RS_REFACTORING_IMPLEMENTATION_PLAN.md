@@ -128,7 +128,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 1: Establish safe boundaries
 
-## Task 1 — Decouple the keymap from root `Message`
+## Task 1 — Decouple the keymap from root `Message` ✅ Completed
 
 **Goal:** remove the current `use crate::Message` dependency from `src/keymap.rs` without changing key behavior.
 

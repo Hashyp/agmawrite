@@ -1,3 +1,4 @@
+mod command;
 mod comments;
 mod editing;
 mod find;
@@ -8,8 +9,11 @@ mod keymap;
 mod preview;
 mod theme;
 
+use command::{
+    Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
+};
 use comments::{Comments, Mark, Span};
-use keymap::{Keymap, Mode};
+use keymap::{Keymap, Mode, Transition};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
 
@@ -139,13 +143,81 @@ enum Message {
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
-    UnsavedChanges,
     UnsavedCardPressed,
     UnsavedCancel,
     UnsavedSave,
     UnsavedDiscard,
     WindowCloseRequested(iced::window::Id),
     PaletteChanged,
+}
+
+/// Maps the input layer's semantic command into the application's current
+/// root message vocabulary.
+fn message_for_command(command: Command) -> Message {
+    match command {
+        Command::Document(command) => match command {
+            DocumentCommand::Open => Message::OpenFile,
+            DocumentCommand::Save => Message::SaveFile,
+            DocumentCommand::CancelUnsaved => Message::UnsavedCancel,
+        },
+        Command::Preview(command) => match command {
+            PreviewCommand::Toggle => Message::TogglePreview,
+            PreviewCommand::Move(motion, count) => Message::MovePreviewCursor(motion, count),
+            PreviewCommand::MoveWord(motion, count) => Message::MovePreviewWord(motion, count),
+            PreviewCommand::Jump(jump, count) => Message::MovePreviewJump(jump, count),
+            PreviewCommand::ArmG => Message::PreviewGPressed,
+            PreviewCommand::ArmZ => Message::PreviewZPressed,
+            PreviewCommand::Count(digit) => Message::PreviewCountPressed(digit),
+            PreviewCommand::Cancel => Message::PreviewCancel,
+            PreviewCommand::ToggleVisual => Message::ToggleVisualMode,
+            PreviewCommand::ScrollPage(page, count) => Message::ScrollPreviewPage(page, count),
+            PreviewCommand::ScrollCaret(placement) => Message::ScrollPreviewCaret(placement),
+        },
+        Command::Comments(command) => match command {
+            CommentsCommand::OpenNote => Message::OpenNotePopup,
+            CommentsCommand::CloseNote => Message::CloseNotePopup,
+            CommentsCommand::SaveNote => Message::SaveNote,
+            CommentsCommand::EditActive => Message::EditActiveComment,
+            CommentsCommand::Next => Message::NextComment,
+            CommentsCommand::ToggleSidebar => Message::ToggleSidebar,
+            CommentsCommand::AddGlobal => Message::AddGlobalComment,
+            CommentsCommand::Publish => Message::PublishPressed,
+        },
+        Command::Find(command) => match command {
+            FindCommand::Open => Message::OpenFind,
+            FindCommand::Close => Message::CloseFind,
+            FindCommand::Next => Message::FindNext,
+            FindCommand::Previous => Message::FindPrevious,
+        },
+        Command::Help(command) => match command {
+            HelpCommand::Open => Message::OpenHelp,
+            HelpCommand::Close => Message::Help(help::Message::Close),
+        },
+    }
+}
+
+/// Projects root activity onto the keymap's input-local transition model.
+fn input_transition(message: &Message) -> Transition {
+    match message {
+        Message::FileLoaded(Some(_)) => Transition::DocumentLoaded,
+        Message::TogglePreview => Transition::PreviewToggled,
+        Message::ToggleVisualMode => Transition::VisualToggled,
+        Message::PreviewCancel => Transition::PreviewCancelled,
+        Message::PreviewGPressed => Transition::GArmed,
+        Message::PreviewZPressed => Transition::ZArmed,
+        Message::PreviewCountPressed(digit) => Transition::CountPressed(*digit),
+        Message::OpenNotePopup => Transition::NoteOpened,
+        Message::CloseNotePopup | Message::SaveNote => Transition::NoteClosed,
+        Message::OpenFind => Transition::FindOpened,
+        Message::CloseFind => Transition::FindClosed,
+        Message::OpenHelp => Transition::HelpOpened,
+        Message::Help(help::Message::Close) => Transition::HelpClosed,
+        Message::Help(_) => Transition::HelpActivity,
+        Message::UnsavedCancel | Message::UnsavedSave | Message::UnsavedDiscard => {
+            Transition::UnsavedClosed
+        }
+        _ => Transition::Activity,
+    }
 }
 
 struct OpenFileIcon;
@@ -422,7 +494,8 @@ async fn pick_save_path() -> Option<std::path::PathBuf> {
 fn subscription(editor: &Editor) -> Subscription<Message> {
     let keys = keyboard::listen()
         .with(editor.keymap)
-        .filter_map(|(keymap, event)| keymap.handle(event));
+        .filter_map(|(keymap, event)| keymap.handle(event))
+        .map(message_for_command);
 
     // The close request arrives as a message instead of exiting, so the
     // unsaved-changes dialog can intercept it; a clean window closes.
@@ -632,7 +705,7 @@ fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
 /// Shows the unsaved-changes dialog guarding `action`.
 fn show_unsaved(editor: &mut Editor, action: UnsavedAction) {
     editor.pending_unsaved = Some(action);
-    editor.keymap.note(&Message::UnsavedChanges);
+    editor.keymap.note(Transition::UnsavedOpened);
 }
 
 /// Starts saving — straight to a known path, or through the save dialog.
@@ -655,7 +728,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     // save started from the open popup still lands after the keymap has
     // marked the popup closed.
     let note_was_open = editor.keymap.note_open();
-    editor.keymap.note(&message);
+    editor.keymap.note(input_transition(&message));
 
     match message {
         Message::Edit(action) => return edit_source(editor, action),
@@ -739,9 +812,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             }
         }
         Message::PaletteChanged => editor.palette = Palette::current(),
-        // The dialog state itself lives in the keymap and pending_unsaved;
-        // the message only ever comes from show_unsaved, which set both.
-        Message::UnsavedChanges => {}
         Message::FileChangedExternally => {
             let Some(path) = &editor.path else {
                 return Task::none();
@@ -867,7 +937,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             if let Some(text) = editor.comments.active_text().map(str::to_owned) {
                 editor.note_text = text_editor::Content::with_text(&text);
                 editor.editing_comment = editor.comments.active_entry();
-                editor.keymap.note(&Message::OpenNotePopup);
+                editor.keymap.note(Transition::NoteOpened);
 
                 return focus(Id::new(NOTE_EDITOR_ID));
             }
@@ -900,7 +970,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             if editor.editing_comment == Some((thread, entry)) {
                 editor.editing_comment = None;
                 editor.note_text = text_editor::Content::new();
-                editor.keymap.note(&Message::CloseNotePopup);
+                editor.keymap.note(Transition::NoteClosed);
             }
         }
         Message::ResolveComment(thread) => editor.comments.resolve(thread),
@@ -2886,7 +2956,7 @@ fn main() -> iced::Result {
 mod tests {
     use super::comments::{Comments, Mark};
     use super::find;
-    use super::keymap::{Keymap, Mode};
+    use super::keymap::{Keymap, Mode, Transition};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::{
         forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
@@ -2897,7 +2967,7 @@ mod tests {
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
-        keymap.note(&Message::TogglePreview);
+        keymap.note(Transition::PreviewToggled);
 
         let mut caret = Caret::new();
         caret.place(position);
@@ -3014,7 +3084,7 @@ mod tests {
         // window's search field; Tab stays captured so focus cannot wander
         // beneath the overlay; Escape and the chord close.
         let mut help = write;
-        help.note(&Message::OpenHelp);
+        help.note(Transition::HelpOpened);
 
         let typing = pressed(
             iced::keyboard::Key::Character("x".into()),
@@ -3050,7 +3120,7 @@ mod tests {
 
         // Escape with the find popup open still closes find.
         let mut find = write;
-        find.note(&Message::OpenFind);
+        find.note(Transition::FindOpened);
         assert_eq!(keyboard_guard_action(find, &escape), KeyboardGuardAction::CloseFind);
     }
 
@@ -3064,7 +3134,7 @@ mod tests {
         };
         let mut editor = editor_at("# Title\n\nbody", position);
         editor.note_text = iced::widget::text_editor::Content::with_text("  fix this  \n");
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
 
         let _ = update(&mut editor, Message::SaveNote);
 
@@ -3084,7 +3154,7 @@ mod tests {
         assert_eq!(editor.comments.cycle(), Some(position));
 
         // An empty note only closes the popup; the first comment stays.
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
         editor.note_text = iced::widget::text_editor::Content::with_text("   ");
         let _ = update(&mut editor, Message::SaveNote);
         assert_eq!(editor.comments.len(), 1);
@@ -3105,7 +3175,7 @@ mod tests {
             },
         );
         editor.note_text = iced::widget::text_editor::Content::with_text("about the code");
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
 
         let _ = update(&mut editor, Message::SaveNote);
 
@@ -3131,7 +3201,7 @@ mod tests {
             },
         );
         editor.note_text = iced::widget::text_editor::Content::with_text("note");
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
         let _ = update(&mut editor, Message::SaveNote);
 
         // The caret wanders off before the card is clicked.
@@ -3153,7 +3223,7 @@ mod tests {
 
         // In write mode the source cursor lands on the anchored element's
         // source instead.
-        editor.keymap.note(&Message::TogglePreview);
+        editor.keymap.note(Transition::PreviewToggled);
         let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
 
         assert_eq!(
@@ -3173,7 +3243,7 @@ mod tests {
                 column: 0,
             },
         );
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
         editor.note_text = iced::widget::text_editor::Content::with_text("half-written");
 
         let _ = update(&mut editor, Message::CloseNotePopup);
@@ -3215,7 +3285,7 @@ mod tests {
                 column: 0,
             },
         );
-        editor.keymap.note(&Message::OpenFind);
+        editor.keymap.note(Transition::FindOpened);
         assert!(editor.keymap.find_open());
 
         // In the preview, the caret jumps to the match's element.
@@ -3240,7 +3310,7 @@ mod tests {
 
         // In write mode, the match becomes the editor's selection and
         // Enter walks the matches.
-        editor.keymap.note(&Message::TogglePreview);
+        editor.keymap.note(Transition::PreviewToggled);
         let _ = update(&mut editor, Message::FindQueryChanged("text".to_owned()));
         let cursor = editor.content.cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
@@ -3635,7 +3705,7 @@ mod tests {
         };
 
         let mut keymap = Keymap::new(false);
-        keymap.note(&Message::UnsavedChanges);
+        keymap.note(Transition::UnsavedOpened);
 
         let typing = pressed(
             iced::keyboard::Key::Character("x".into()),
@@ -3688,7 +3758,7 @@ mod tests {
             column: 3,
         });
 
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
         editor.note_text =
             iced::widget::text_editor::Content::with_text("about the span");
         let _ = update(&mut editor, Message::SaveNote);
@@ -3721,7 +3791,7 @@ mod tests {
             },
         );
         editor.note_text = iced::widget::text_editor::Content::with_text("first");
-        editor.keymap.note(&Message::OpenNotePopup);
+        editor.keymap.note(Transition::NoteOpened);
         let _ = update(&mut editor, Message::SaveNote);
 
         // Without an active comment (deleted below), Enter is a no-op;
@@ -3769,7 +3839,7 @@ mod tests {
         );
 
         for text in ["root", "reply"] {
-            editor.keymap.note(&Message::OpenNotePopup);
+            editor.keymap.note(Transition::NoteOpened);
             editor.note_text = iced::widget::text_editor::Content::with_text(text);
             let _ = update(&mut editor, Message::SaveNote);
         }
