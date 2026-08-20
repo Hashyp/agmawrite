@@ -233,7 +233,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** no root code compares live text to `saved_contents` directly.
 
-## Task 5 — Centralize source replacement and preview projection refresh
+## Task 5 — Centralize source replacement and preview projection refresh ✅ Completed
 
 **Goal:** remove the repeated manual synchronization of source, Markdown content, element map, and caret before moving the document reducer.
 

@@ -676,6 +676,67 @@ fn start_save(editor: &Editor) -> Task<Message> {
     }
 }
 
+/// Why the source and its temporary preview projection are being synchronized.
+/// Each reason carries the policy that currently belongs to the app; Task 14
+/// will move these operations behind `preview::State`.
+enum SourceSynchronization<'a> {
+    InitialLoad,
+    FileLoad {
+        path: std::path::PathBuf,
+        contents: &'a str,
+    },
+    ExternalReplacement(&'a str),
+    EnterPreview,
+}
+
+/// Coordinates source replacement with every derived preview value. Returns
+/// whether the refreshed caret should be revealed in the current viewport.
+fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization<'_>) -> bool {
+    let (reset_document_bound_state, clear_visual_selection, place_from_source, reveal) =
+        match reason {
+            SourceSynchronization::InitialLoad => (true, true, false, false),
+            SourceSynchronization::FileLoad { path, contents } => {
+                editor.document.load(path, contents);
+                (true, true, false, false)
+            }
+            SourceSynchronization::ExternalReplacement(contents) => {
+                // Our own saves fire the watcher too. An unchanged source
+                // leaves the preview caret and every projection untouched.
+                if !editor.document.replace_external(contents) {
+                    return false;
+                }
+
+                (false, false, false, editor.keymap.preview())
+            }
+            SourceSynchronization::EnterPreview => (false, true, true, true),
+        };
+
+    let contents = editor.document.text();
+    editor.markdown = markdown::Content::parse(&contents);
+    editor.preview_elements = ElementMap::parse(&contents);
+
+    if place_from_source {
+        editor.caret.move_to_source_cursor(
+            editor.document.content(),
+            editor.preview_elements.elements(),
+        );
+    } else {
+        editor.caret = Caret::new();
+    }
+
+    if clear_visual_selection {
+        editor.visual_anchor = None;
+    }
+
+    if reset_document_bound_state {
+        editor.note_text = text_editor::Content::new();
+        editor.comments = Comments::new();
+        editor.editing_comment = None;
+    }
+
+    reveal
+}
+
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     // The note popup's text area owns the draft until the popup closes; a
     // save started from the open popup still lands after the keymap has
@@ -697,14 +758,13 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             return Task::perform(open_file(), Message::FileLoaded);
         }
         Message::FileLoaded(Some((path, contents))) => {
-            editor.document.load(path, &contents);
-            editor.preview_elements = ElementMap::parse(&contents);
-            editor.caret = Caret::new();
-            editor.visual_anchor = None;
-            editor.note_text = text_editor::Content::new();
-            editor.comments = Comments::new();
-            editor.editing_comment = None;
-            editor.markdown = markdown::Content::parse(&contents);
+            synchronize_source(
+                editor,
+                SourceSynchronization::FileLoad {
+                    path,
+                    contents: &contents,
+                },
+            );
         }
         Message::FileLoaded(None) => {}
         Message::SaveFile => return start_save(editor),
@@ -774,35 +834,26 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            if editor.document.replace_external(&contents) {
-                editor.markdown = markdown::Content::parse(&contents);
-                editor.preview_elements = ElementMap::parse(&contents);
-                editor.caret = Caret::new();
-
-                if editor.keymap.preview() {
-                    return reveal_preview_caret();
-                }
+            if synchronize_source(
+                editor,
+                SourceSynchronization::ExternalReplacement(&contents),
+            ) {
+                return reveal_preview_caret();
             }
         }
         Message::TogglePreview => {
             if !editor.keymap.preview_only() {
-                editor.visual_anchor = None;
-
                 if editor.keymap.preview() {
-                    let contents = editor.document.text();
-                    editor.preview_elements = ElementMap::parse(&contents);
-                    editor.caret.move_to_source_cursor(
-                        editor.document.content(),
-                        editor.preview_elements.elements(),
-                    );
-                    editor.markdown = markdown::Content::parse(&contents);
+                    if synchronize_source(editor, SourceSynchronization::EnterPreview) {
+                        return reveal_preview_caret();
+                    }
+                } else {
+                    editor.visual_anchor = None;
 
-                    return reveal_preview_caret();
+                    // Switching back to write mode: the editor content kept its
+                    // cursor, it only needs focus for the caret to show again.
+                    return focus(Id::new(SOURCE_EDITOR_ID));
                 }
-
-                // Switching back to write mode: the editor content kept its
-                // cursor, it only needs focus for the caret to show again.
-                return focus(Id::new(SOURCE_EDITOR_ID));
             }
         }
         Message::LinkClicked(_uri) => {
@@ -2780,23 +2831,15 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             }
         });
 
-    let preview_elements = contents
-        .as_deref()
-        .map(ElementMap::parse)
-        .unwrap_or_default();
-
-    let editor = Editor {
+    let mut editor = Editor {
         document: document::State::new(
             contents.as_deref().unwrap_or_default(),
             args.path.as_ref().map(std::path::PathBuf::from),
         ),
-        markdown: contents
-            .as_deref()
-            .map(markdown::Content::parse)
-            .unwrap_or_default(),
+        markdown: markdown::Content::new(),
         keymap: Keymap::new(args.preview),
         caret: Caret::new(),
-        preview_elements,
+        preview_elements: ElementMap::default(),
         visual_anchor: None,
         note_text: text_editor::Content::new(),
         comments: Comments::new(),
@@ -2806,6 +2849,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         editing_comment: None,
         palette: Palette::current(),
     };
+    synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
 
     let task = if args.preview {
         Task::none()
@@ -2859,8 +2903,8 @@ mod tests {
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::theme::Palette;
     use super::{
-        forward_file_change, keyboard_guard_action, may_change_file, update, Editor,
-        KeyboardGuardAction, Message,
+        forward_file_change, keyboard_guard_action, may_change_file, synchronize_source, update,
+        Editor, KeyboardGuardAction, Message, SourceSynchronization,
     };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
@@ -2885,6 +2929,208 @@ mod tests {
             editing_comment: None,
             palette: Palette::default(),
         }
+    }
+
+    fn assert_projection_matches(editor: &Editor, contents: &str) {
+        let expected_elements = ElementMap::parse(contents);
+        assert_eq!(
+            editor.preview_elements.elements(),
+            expected_elements.elements()
+        );
+
+        let expected_markdown = iced::widget::markdown::Content::parse(contents);
+        assert_eq!(
+            format!("{:?}", editor.markdown.items()),
+            format!("{:?}", expected_markdown.items())
+        );
+    }
+
+    #[test]
+    fn initial_load_policy_builds_projection_and_clears_document_state() {
+        let contents = "# Fresh\n\nbody";
+        let mut editor = editor_at(
+            contents,
+            CaretPosition {
+                element: 1,
+                column: 2,
+            },
+        );
+        editor.markdown = iced::widget::markdown::Content::parse("stale");
+        editor.preview_elements = ElementMap::parse("stale");
+        editor.visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        editor.comments.save("old note", editor.caret.position());
+        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
+        editor.editing_comment = Some((0, 0));
+
+        let reveal = synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
+
+        assert!(!reveal);
+        assert_projection_matches(&editor, contents);
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 0,
+                column: 0,
+            }
+        );
+        assert!(editor.visual_anchor.is_none());
+        assert!(editor.comments.is_empty());
+        assert_eq!(editor.note_text.text(), "");
+        assert!(editor.editing_comment.is_none());
+    }
+
+    #[test]
+    fn file_load_policy_replaces_source_and_resets_document_bound_state() {
+        let mut editor = editor_at(
+            "old",
+            CaretPosition {
+                element: 0,
+                column: 2,
+            },
+        );
+        editor.visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        editor.comments.save("old note", editor.caret.position());
+        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
+        editor.editing_comment = Some((0, 0));
+        let path = std::path::PathBuf::from("/tmp/task-5-loaded.md");
+        let contents = "# Loaded\n\nnew body";
+
+        let reveal = synchronize_source(
+            &mut editor,
+            SourceSynchronization::FileLoad {
+                path: path.clone(),
+                contents,
+            },
+        );
+
+        assert!(!reveal);
+        assert_eq!(editor.document.path(), Some(path.as_path()));
+        assert_eq!(editor.document.text(), contents);
+        assert!(!editor.document.is_modified());
+        assert_projection_matches(&editor, contents);
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 0,
+                column: 0,
+            }
+        );
+        assert!(editor.visual_anchor.is_none());
+        assert!(editor.comments.is_empty());
+        assert_eq!(editor.note_text.text(), "");
+        assert!(editor.editing_comment.is_none());
+    }
+
+    #[test]
+    fn external_replacement_policy_preserves_source_cursor_and_live_context() {
+        use iced::widget::text_editor::{Cursor, Position};
+
+        let mut editor = editor_at(
+            "# Old\n\nold body",
+            CaretPosition {
+                element: 1,
+                column: 3,
+            },
+        );
+        editor.document.move_to(Cursor {
+            position: Position { line: 2, column: 3 },
+            selection: Some(Position { line: 0, column: 2 }),
+        });
+        let source_cursor = editor.document.content().cursor();
+        let visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        editor.visual_anchor = visual_anchor;
+        editor.comments.save("keep me", editor.caret.position());
+        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
+        editor.editing_comment = Some((0, 0));
+        let contents = "# New\n\nnew body";
+
+        let reveal = synchronize_source(
+            &mut editor,
+            SourceSynchronization::ExternalReplacement(contents),
+        );
+
+        assert!(reveal);
+        assert_eq!(editor.document.content().cursor(), source_cursor);
+        assert_projection_matches(&editor, contents);
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 0,
+                column: 0,
+            }
+        );
+        assert_eq!(editor.visual_anchor, visual_anchor);
+        assert_eq!(editor.comments.len(), 1);
+        assert_eq!(editor.note_text.text(), "draft");
+        assert_eq!(editor.editing_comment, Some((0, 0)));
+
+        editor.caret.place(CaretPosition {
+            element: 1,
+            column: 2,
+        });
+        assert!(!synchronize_source(
+            &mut editor,
+            SourceSynchronization::ExternalReplacement(contents),
+        ));
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 1,
+                column: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn entering_preview_policy_projects_edits_and_places_caret_from_source() {
+        use iced::widget::text_editor::{Cursor, Position};
+
+        let mut editor = editor_at(
+            "stale",
+            CaretPosition {
+                element: 0,
+                column: 3,
+            },
+        );
+        editor.keymap.note(Transition::PreviewToggled);
+        let contents = "first\n\nsecond\n\nthird";
+        editor
+            .document
+            .load("/tmp/task-5-preview.md".into(), contents);
+        editor.document.move_to(Cursor {
+            position: Position { line: 4, column: 2 },
+            selection: Some(Position { line: 2, column: 1 }),
+        });
+        let source_cursor = editor.document.content().cursor();
+        editor.visual_anchor = Some(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        editor.comments.save("keep me", editor.caret.position());
+
+        let reveal = synchronize_source(&mut editor, SourceSynchronization::EnterPreview);
+
+        assert!(reveal);
+        assert_eq!(editor.document.content().cursor(), source_cursor);
+        assert_projection_matches(&editor, contents);
+        assert_eq!(
+            editor.caret.position(),
+            CaretPosition {
+                element: 2,
+                column: 0,
+            }
+        );
+        assert!(editor.visual_anchor.is_none());
+        assert_eq!(editor.comments.len(), 1);
     }
 
     /// Help does not move the source cursor/selection or the preview
