@@ -38,7 +38,7 @@ impl Help {
         match message {
             Message::QueryChanged(query) => self.query = query,
             Message::Close => self.query.clear(),
-            Message::CardPressed => {}
+            Message::Open | Message::CardPressed => {}
         }
     }
 }
@@ -46,6 +46,7 @@ impl Help {
 /// Events produced by widgets inside the Help window.
 #[derive(Debug, Clone)]
 pub enum Message {
+    Open,
     QueryChanged(String),
     CardPressed,
     Close,

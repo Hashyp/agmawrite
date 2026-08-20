@@ -623,7 +623,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 8: Final composition cleanup
 
-## Task 26 — Move the composition root to `app/mod.rs` and finish nested messages
+## Task 26 — Move the composition root to `app/mod.rs` and finish nested messages ✅ Completed
 
 **Goal:** reach the target state/message shape after feature ownership is established.
 
