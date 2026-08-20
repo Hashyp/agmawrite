@@ -1,3 +1,6 @@
+mod app {
+    pub(crate) mod shell;
+}
 mod cli;
 mod comments;
 mod document;
@@ -19,9 +22,7 @@ use input::{
 };
 use theme::Palette;
 
-use iced::widget::{
-    column, container, operation::focus, operation::focus_next, row, stack, text_editor, Id, Space,
-};
+use iced::widget::{operation::focus, operation::focus_next, text_editor, Id};
 use iced::{
     application, keyboard, Background, Border, Element, Font, Length, Subscription, Task, Theme,
 };
@@ -393,20 +394,27 @@ fn editor_style(
     }
 }
 
-/// Stable bottom-to-top ordering of the root editing surface and modal
-/// layers. The view consumes this order directly when constructing its
-/// stack, so integration tests can assert the same composition contract.
+/// Stable bottom-to-top feature composition, including the input guard that
+/// wraps every visual layer. Integration tests assert this app-owned order;
+/// shell only receives the resulting elements.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootLayer {
-    EditingSurface,
+    Base,
+    Note,
     Find,
     Unsaved,
     Help,
+    InputGuard,
 }
 
+#[cfg(test)]
 fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
-    let mut layers = vec![RootLayer::EditingSurface];
+    let mut layers = vec![RootLayer::Base];
 
+    if editor.keymap.note_open() {
+        layers.push(RootLayer::Note);
+    }
     if editor.keymap.find_open() {
         layers.push(RootLayer::Find);
     }
@@ -417,6 +425,7 @@ fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
         layers.push(RootLayer::Help);
     }
 
+    layers.push(RootLayer::InputGuard);
     layers
 }
 
@@ -462,19 +471,14 @@ fn view(editor: &Editor) -> Element<'_, Message> {
             .into()
     };
 
-    // The note popup floats above the editing area; the backdrop closes it
-    // on click and shields the area beneath from events. The stack keeps
-    // the editing surface as its base layer whether or not the popup is
-    // open, so toggling the popup never rebuilds the tree beneath it and
-    // the preview keeps its scroll position and caret.
-    let mut editing_stack = stack![base_area];
-
-    if editor.keymap.note_open() {
-        editing_stack = editing_stack
-            .push(comments::composer::view(&editor.comments, palette).map(Message::Comments));
-    }
-
-    let editing_area: Element<'_, Message> = editing_stack.into();
+    // Feature order remains explicit here. The note is stacked inside the
+    // editor region to preserve its existing backdrop bounds and the stable
+    // preview tree beneath it.
+    let note = editor
+        .keymap
+        .note_open()
+        .then(|| comments::composer::view(&editor.comments, palette).map(Message::Comments));
+    let editing_area = app::shell::stack_layers(base_area, note);
 
     let toolbar = ui::toolbar::view(ui::toolbar::Model::new(
         editor.keymap.preview(),
@@ -484,40 +488,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         palette,
     ))
     .map(message_for_toolbar);
-
-    // The main column: top margin, the writing area, and the bottom
-    // controls. It fills the space between the window's 5% side margins,
-    // which stay symmetric whether or not the sidebar is showing.
-    let main = column![
-        Space::new()
-            .width(Length::Fill)
-            .height(Length::FillPortion(1)),
-        container(editing_area)
-            .width(Length::Fill)
-            .height(Length::FillPortion(8)),
-        toolbar,
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill);
-
-    // The editor keeps its symmetric 5% margins; the comments sidebar sits
-    // to the right of them, flush with the window's edge. When it is
-    // hidden, a slim rail marks where it collapsed to and brings it back.
-    let main_with_margins = row![
-        Space::new()
-            .width(Length::FillPortion(5))
-            .height(Length::Fill),
-        container(main)
-            .width(Length::FillPortion(90))
-            .height(Length::Fill),
-        Space::new()
-            .width(Length::FillPortion(5))
-            .height(Length::Fill),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill);
-
-    let sidebar_area = comments::sidebar::view(
+    let sidebar = comments::sidebar::view(
         &editor.comments,
         comments::sidebar::ViewContext {
             source: &source,
@@ -527,49 +498,28 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         },
     )
     .map(Message::Comments);
+    let base = app::shell::layout(editing_area, toolbar, sidebar, palette.background);
 
-    let content: Element<'_, Message> = container(
-        row![container(main_with_margins)
-            .width(Length::Fill)
-            .height(Length::Fill)]
-        .push(sidebar_area)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(move |_theme| background_style(&palette))
-    .into();
+    // Root overlays stay bottom-to-top: find, unsaved changes, then Help.
+    // The input guard wraps the finished stack last and therefore has first
+    // refusal for keyboard events without becoming a visual layer itself.
+    let find = editor
+        .keymap
+        .find_open()
+        .then(|| find::view(&editor.find, find_surface, palette).map(Message::Find));
+    let unsaved = editor.document.pending_action().and_then(|action| {
+        editor
+            .keymap
+            .unsaved_open()
+            .then(|| document::unsaved_view::view(action, palette).map(Message::Document))
+    });
+    let help = editor
+        .keymap
+        .help_open()
+        .then(|| help::view(&editor.help, palette).map(Message::Help));
+    let layers = app::shell::stack_layers(base, find.into_iter().chain(unsaved).chain(help));
 
-    // Root layers are pushed in their stable bottom-to-top order. Help is
-    // topmost; unsaved changes remains beneath it and above find and the
-    // persistent editing surface, preserving the trees and focus below.
-    let mut layers = stack![content];
-    for layer in root_layer_order(editor).into_iter().skip(1) {
-        layers = match layer {
-            RootLayer::EditingSurface => unreachable!("the editing surface is always first"),
-            RootLayer::Find => {
-                layers.push(find::view(&editor.find, find_surface, palette).map(Message::Find))
-            }
-            RootLayer::Unsaved => {
-                let action = editor
-                    .document
-                    .pending_action()
-                    .expect("a visible unsaved modal has a pending action");
-                layers.push(document::unsaved_view::view(action, palette).map(Message::Document))
-            }
-            RootLayer::Help => layers.push(help::view(&editor.help, palette).map(Message::Help)),
-        };
-    }
-
-    input::guard(layers.into(), editor.keymap, message_for_guard_action)
-}
-
-fn background_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(palette.background)),
-        ..Default::default()
-    }
+    input::guard(layers, editor.keymap, message_for_guard_action)
 }
 
 fn boot(args: &Args) -> (Editor, Task<Message>) {
@@ -986,9 +936,48 @@ mod tests {
         assert_eq!(
             root_layer_order(&editor),
             vec![
-                RootLayer::EditingSurface,
+                RootLayer::Base,
                 RootLayer::Unsaved,
-                RootLayer::Help
+                RootLayer::Help,
+                RootLayer::InputGuard,
+            ]
+        );
+    }
+
+    #[test]
+    fn root_features_keep_base_note_find_unsaved_help_guard_order() {
+        use iced::widget::text_editor::{Action, Edit};
+
+        let mut editor = editor_at(
+            "draft",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::Edit(Action::Edit(Edit::Insert(
+                '!',
+            )))),
+        );
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::OpenRequested),
+        );
+        editor.keymap.note(Transition::NoteOpened);
+        editor.keymap.note(Transition::FindOpened);
+        editor.keymap.note(Transition::HelpOpened);
+
+        assert_eq!(
+            root_layer_order(&editor),
+            vec![
+                RootLayer::Base,
+                RootLayer::Note,
+                RootLayer::Find,
+                RootLayer::Unsaved,
+                RootLayer::Help,
+                RootLayer::InputGuard,
             ]
         );
     }

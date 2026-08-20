@@ -606,7 +606,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app does not construct open/save/preview buttons or format the mode badge.
 
-## Task 25 — Extract root shell layout
+## Task 25 — Extract root shell layout ✅ Completed
 
 **Goal:** leave app view responsible for composition decisions, not layout mechanics.
 
