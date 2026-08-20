@@ -312,7 +312,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 3: Complete comments extraction
 
-## Task 9 — Turn `comments.rs` into a package without behavior changes
+## Task 9 — Turn `comments.rs` into a package without behavior changes ✅ Completed
 
 **Goal:** separate the already-strong domain model from the upcoming controller and views.
 
