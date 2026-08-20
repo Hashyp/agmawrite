@@ -89,15 +89,7 @@ struct Editor {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Edit(text_editor::Action),
-    OpenFile,
-    FileLoaded(Option<(std::path::PathBuf, String)>),
-    SaveFile,
-    SavePathChosen(Option<std::path::PathBuf>),
-    /// The save finished — carrying the exact snapshot that was written,
-    /// so edits made while the save ran are not mistaken for saved.
-    FileSaved(Result<std::path::PathBuf, String>, String),
-    DocumentWatch(document::watch::Event),
+    Document(document::Message),
     TogglePreview,
     LinkClicked(markdown::Uri),
     MovePreviewCursor(Motion, usize),
@@ -132,11 +124,6 @@ enum Message {
     FindQueryChanged(String),
     FindNext,
     FindPrevious,
-    UnsavedCardPressed,
-    UnsavedCancel,
-    UnsavedSave,
-    UnsavedDiscard,
-    WindowCloseRequested(iced::window::Id),
     PaletteChanged,
 }
 
@@ -144,11 +131,11 @@ enum Message {
 /// root message vocabulary.
 fn message_for_command(command: Command) -> Message {
     match command {
-        Command::Document(command) => match command {
-            DocumentCommand::Open => Message::OpenFile,
-            DocumentCommand::Save => Message::SaveFile,
-            DocumentCommand::CancelUnsaved => Message::UnsavedCancel,
-        },
+        Command::Document(command) => Message::Document(match command {
+            DocumentCommand::Open => document::Message::OpenRequested,
+            DocumentCommand::Save => document::Message::SaveRequested,
+            DocumentCommand::CancelUnsaved => document::Message::UnsavedCancel,
+        }),
         Command::Preview(command) => match command {
             PreviewCommand::Toggle => Message::TogglePreview,
             PreviewCommand::Move(motion, count) => Message::MovePreviewCursor(motion, count),
@@ -188,7 +175,7 @@ fn message_for_command(command: Command) -> Message {
 /// Projects root activity onto the keymap's input-local transition model.
 fn input_transition(message: &Message) -> Transition {
     match message {
-        Message::FileLoaded(Some(_)) => Transition::DocumentLoaded,
+        Message::Document(document::Message::OpenLoaded(Some(_))) => Transition::DocumentLoaded,
         Message::TogglePreview => Transition::PreviewToggled,
         Message::ToggleVisualMode => Transition::VisualToggled,
         Message::PreviewCancel => Transition::PreviewCancelled,
@@ -202,9 +189,11 @@ fn input_transition(message: &Message) -> Transition {
         Message::OpenHelp => Transition::HelpOpened,
         Message::Help(help::Message::Close) => Transition::HelpClosed,
         Message::Help(_) => Transition::HelpActivity,
-        Message::UnsavedCancel | Message::UnsavedSave | Message::UnsavedDiscard => {
-            Transition::UnsavedClosed
-        }
+        Message::Document(
+            document::Message::UnsavedCancel
+            | document::Message::UnsavedSave
+            | document::Message::UnsavedDiscard,
+        ) => Transition::UnsavedClosed,
         _ => Transition::Activity,
     }
 }
@@ -451,15 +440,17 @@ fn subscription(editor: &Editor) -> Subscription<Message> {
         .filter_map(|(keymap, event)| keymap.handle(event))
         .map(message_for_command);
 
-    // The close request arrives as a message instead of exiting, so the
-    // unsaved-changes dialog can intercept it; a clean window closes.
-    let close = iced::window::close_requests().map(Message::WindowCloseRequested);
+    // Close requests and file changes enter the document feature as local
+    // messages, then cross the app boundary through one nested variant.
+    let close = iced::window::close_requests()
+        .map(document::Message::CloseRequested)
+        .map(Message::Document);
 
     match editor.document.path() {
         Some(path) => Subscription::batch([
             keys,
             close,
-            document::watch::subscription(path).map(Message::DocumentWatch),
+            document::subscription(path).map(Message::Document),
             watch_palette(),
         ]),
         None => Subscription::batch([keys, close, watch_palette()]),
@@ -484,66 +475,25 @@ fn watch_palette() -> Subscription<Message> {
     })
 }
 
-/// Runs the action the unsaved-changes dialog was guarding.
-fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
-    match action {
-        UnsavedAction::OpenFile => Task::perform(document::io::open(), Message::FileLoaded),
-        UnsavedAction::CloseWindow(id) => iced::window::close(id),
-    }
-}
-
-/// Shows the unsaved-changes dialog guarding `action`.
-fn show_unsaved(editor: &mut Editor, action: UnsavedAction) {
-    editor.document.set_pending_action(action);
-    editor.keymap.note(Transition::UnsavedOpened);
-}
-
-/// Starts saving — straight to a known path, or through the save dialog.
-/// The save carries a snapshot of the contents: whatever the user types
-/// while it runs stays unsaved, not silently swallowed by the completion.
-fn start_save(editor: &Editor) -> Task<Message> {
-    match editor.document.path() {
-        Some(path) => {
-            let snapshot = editor.document.text();
-            Task::perform(
-                document::io::save(path.to_path_buf(), snapshot.clone()),
-                move |result| Message::FileSaved(result, snapshot),
-            )
-        }
-        None => Task::perform(document::io::pick_save_path(), Message::SavePathChosen),
-    }
-}
-
 /// Why the source and its temporary preview projection are being synchronized.
 /// Each reason carries the policy that currently belongs to the app; Task 14
 /// will move these operations behind `preview::State`.
-enum SourceSynchronization<'a> {
+enum SourceSynchronization {
     InitialLoad,
-    FileLoad {
-        path: std::path::PathBuf,
-        contents: &'a str,
-    },
-    ExternalReplacement(&'a str),
+    SourceReplaced(document::SourceReplacement),
     EnterPreview,
 }
 
 /// Coordinates source replacement with every derived preview value. Returns
 /// whether the refreshed caret should be revealed in the current viewport.
-fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization<'_>) -> bool {
+fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization) -> bool {
     let (reset_document_bound_state, clear_visual_selection, place_from_source, reveal) =
         match reason {
             SourceSynchronization::InitialLoad => (true, true, false, false),
-            SourceSynchronization::FileLoad { path, contents } => {
-                editor.document.load(path, contents);
+            SourceSynchronization::SourceReplaced(document::SourceReplacement::Loaded) => {
                 (true, true, false, false)
             }
-            SourceSynchronization::ExternalReplacement(contents) => {
-                // Our own saves fire the watcher too. An unchanged source
-                // leaves the preview caret and every projection untouched.
-                if !editor.document.replace_external(contents) {
-                    return false;
-                }
-
+            SourceSynchronization::SourceReplaced(document::SourceReplacement::External) => {
                 (false, false, false, editor.keymap.preview())
             }
             SourceSynchronization::EnterPreview => (false, true, true, true),
@@ -575,6 +525,27 @@ fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization<'_>) ->
     reveal
 }
 
+fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Message> {
+    match event {
+        document::Event::SourceReplaced { reason } => {
+            if synchronize_source(editor, SourceSynchronization::SourceReplaced(reason)) {
+                reveal_preview_caret()
+            } else {
+                Task::none()
+            }
+        }
+        document::Event::CloseWindow(id) => iced::window::close(id),
+        document::Event::UnsavedVisibilityChanged(visible) => {
+            editor.keymap.note(if visible {
+                Transition::UnsavedOpened
+            } else {
+                Transition::UnsavedClosed
+            });
+            Task::none()
+        }
+    }
+}
+
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     // The note popup's text area owns the draft until the popup closes; a
     // save started from the open popup still lands after the keymap has
@@ -583,102 +554,14 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     editor.keymap.note(input_transition(&message));
 
     match message {
-        Message::Edit(action) => return edit_source(editor, action),
-        Message::OpenFile => {
-            // Opening a new file over unsaved changes would lose them:
-            // the dialog asks first, and only a clean document opens
-            // straight away.
-            if editor.document.is_modified() {
-                show_unsaved(editor, UnsavedAction::OpenFile);
-                return Task::none();
-            }
+        Message::Document(message) => {
+            let document::Update { task, event } = document::update(&mut editor.document, message);
+            let event_task =
+                event.map_or_else(Task::none, |event| handle_document_event(editor, event));
 
-            return Task::perform(document::io::open(), Message::FileLoaded);
-        }
-        Message::FileLoaded(Some((path, contents))) => {
-            synchronize_source(
-                editor,
-                SourceSynchronization::FileLoad {
-                    path,
-                    contents: &contents,
-                },
-            );
-        }
-        Message::FileLoaded(None) => {}
-        Message::SaveFile => return start_save(editor),
-        Message::SavePathChosen(Some(path)) => {
-            editor.document.set_path(path.clone());
-
-            let snapshot = editor.document.text();
-
-            return Task::perform(document::io::save(path, snapshot.clone()), move |result| {
-                Message::FileSaved(result, snapshot)
-            });
-        }
-        Message::SavePathChosen(None) => {
-            // The save dialog was cancelled: whatever waited on the save
-            // is off, the document stays as it is.
-            editor.document.clear_pending_action();
-        }
-        Message::FileSaved(Ok(_path), snapshot) => {
-            // Only what was actually written counts as saved: the baseline
-            // is the snapshot the save carried, not the live editor.
-            editor.document.mark_saved(snapshot);
-
-            // Whatever the unsaved dialog was guarding proceeds now that
-            // the saved revision is clean — unless the user typed while
-            // the save ran, in which case the newer edits are still
-            // unsaved and the dialog asks again.
-            if let Some(action) = editor.document.take_pending_action() {
-                if !editor.document.is_modified() {
-                    return run_unsaved_action(action);
-                }
-
-                show_unsaved(editor, action);
-            }
-        }
-        Message::FileSaved(Err(error), _snapshot) => {
-            eprintln!("agmawrite: {error}");
-            editor.document.clear_pending_action();
-        }
-        // Clicks on the dialog card are swallowed so they neither cancel
-        // the dialog nor reach the editing surface beneath.
-        Message::UnsavedCardPressed => {}
-        Message::UnsavedCancel => editor.document.clear_pending_action(),
-        Message::UnsavedSave => return start_save(editor),
-        Message::UnsavedDiscard => {
-            if let Some(action) = editor.document.take_pending_action() {
-                return run_unsaved_action(action);
-            }
-        }
-        Message::WindowCloseRequested(id) => {
-            // Closing over unsaved changes asks first; a clean window
-            // closes.
-            if editor.document.is_modified() {
-                show_unsaved(editor, UnsavedAction::CloseWindow(id));
-            } else {
-                return iced::window::close(id);
-            }
+            return Task::batch([task.map(Message::Document), event_task]);
         }
         Message::PaletteChanged => editor.palette = Palette::current(),
-        Message::DocumentWatch(document::watch::Event::ChangedExternally) => {
-            let Some(path) = editor.document.path() else {
-                return Task::none();
-            };
-
-            // Our own saves fire the watcher too; reload only when the
-            // contents actually differ.
-            let Ok(contents) = document::io::read(path) else {
-                return Task::none();
-            };
-
-            if synchronize_source(
-                editor,
-                SourceSynchronization::ExternalReplacement(&contents),
-            ) {
-                return reveal_preview_caret();
-            }
-        }
         Message::TogglePreview => {
             if !editor.keymap.preview_only() {
                 if editor.keymap.preview() {
@@ -1180,7 +1063,9 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
                 }
                 KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
                 KeyboardGuardAction::CloseNote => shell.publish(Message::CloseNotePopup),
-                KeyboardGuardAction::CancelUnsaved => shell.publish(Message::UnsavedCancel),
+                KeyboardGuardAction::CancelUnsaved => {
+                    shell.publish(Message::Document(document::Message::UnsavedCancel))
+                }
                 KeyboardGuardAction::Capture => {}
                 KeyboardGuardAction::Pass => {
                     self.content.as_widget_mut().update(
@@ -1229,47 +1114,6 @@ fn sidebar_shown(editor: &Editor) -> bool {
     editor
         .sidebar_override
         .unwrap_or(!editor.comments.is_empty())
-}
-
-/// Applies a source edit action. Pressing Enter on a list line continues
-/// the list — the marker, indented like the current item, starts the new
-/// line — and pressing it on an empty item removes the marker and ends
-/// the list.
-fn edit_source(editor: &mut Editor, action: text_editor::Action) -> Task<Message> {
-    use text_editor::{Action, Edit};
-
-    if !matches!(action, Action::Edit(Edit::Enter)) {
-        editor.document.perform(action);
-        return Task::none();
-    }
-
-    let cursor = editor.document.content().cursor().position;
-    let before = editor.document.content().line(cursor.line).map(|line| {
-        line.text
-            .char_indices()
-            .nth(cursor.column)
-            .map_or(line.text.as_ref(), |(index, _)| &line.text[..index])
-            .to_owned()
-    });
-
-    match before.as_deref().map(editing::continuation) {
-        Some(editing::Continuation::Continue(prefix)) => {
-            editor.document.perform(action);
-            editor
-                .document
-                .perform(Action::Edit(Edit::Paste(std::sync::Arc::new(prefix))));
-        }
-        Some(editing::Continuation::Outdent(count)) => {
-            for _ in 0..count {
-                editor.document.perform(Action::Edit(Edit::Backspace));
-            }
-
-            editor.document.perform(action);
-        }
-        _ => editor.document.perform(action),
-    }
-
-    Task::none()
 }
 
 /// Saves the note popup text as a comment — editing the comment the popup
@@ -1743,7 +1587,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     } else {
         text_editor(editor.document.content())
             .id(Id::new(SOURCE_EDITOR_ID))
-            .on_action(Message::Edit)
+            .on_action(|action| Message::Document(document::Message::Edit(action)))
             .font(EDITOR_FONT)
             .size(20)
             .height(Length::Fill)
@@ -1776,7 +1620,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 .width(Length::Fixed(ICON_SIZE))
                 .height(Length::Fixed(ICON_SIZE)),
         )
-        .on_press(Message::OpenFile)
+        .on_press(Message::Document(document::Message::OpenRequested))
         .width(Length::Fixed(ICON_BUTTON_SIZE))
         .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
@@ -1827,7 +1671,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
                 .width(Length::Fixed(ICON_SIZE))
                 .height(Length::Fixed(ICON_SIZE)),
         )
-        .on_press(Message::SaveFile)
+        .on_press(Message::Document(document::Message::SaveRequested))
         .width(Length::Fixed(ICON_BUTTON_SIZE))
         .height(Length::Fixed(ICON_BUTTON_SIZE))
         .padding(0)
@@ -2573,7 +2417,7 @@ fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'
                             .size(14)
                             .color(palette.light_foreground),
                     )
-                    .on_press(Message::UnsavedCancel)
+                    .on_press(Message::Document(document::Message::UnsavedCancel))
                     .padding([6, 12])
                     .style(move |theme, status| popup_button_style(&palette, theme, status)),
                     Space::new().width(Length::Fill),
@@ -2583,7 +2427,7 @@ fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'
                             .size(14)
                             .color(palette.foreground),
                     )
-                    .on_press(Message::UnsavedSave)
+                    .on_press(Message::Document(document::Message::UnsavedSave))
                     .padding([6, 12])
                     .style(move |theme, status| popup_button_style(&palette, theme, status)),
                     button(
@@ -2592,7 +2436,7 @@ fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'
                             .size(14)
                             .color(palette.red),
                     )
-                    .on_press(Message::UnsavedDiscard)
+                    .on_press(Message::Document(document::Message::UnsavedDiscard))
                     .padding([6, 12])
                     .style(move |theme, status| popup_button_style(&palette, theme, status)),
                 ]
@@ -2605,7 +2449,7 @@ fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'
         .padding(16)
         .style(move |_theme| note_card_style(&palette)),
     )
-    .on_press(Message::UnsavedCardPressed);
+    .on_press(Message::Document(document::Message::UnsavedCardPressed));
 
     mouse_area(
         container(card)
@@ -2614,7 +2458,7 @@ fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'
             .center(Length::Fill)
             .style(note_backdrop_style),
     )
-    .on_press(Message::UnsavedCancel)
+    .on_press(Message::Document(document::Message::UnsavedCancel))
     .into()
 }
 
@@ -2735,7 +2579,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::comments::{Comments, Mark};
-    use super::document::UnsavedAction;
     use super::find;
     use super::keymap::{Keymap, Mode, Transition};
     use super::preview::{Caret, CaretPosition, ElementMap};
@@ -2839,15 +2682,14 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/task-5-loaded.md");
         let contents = "# Loaded\n\nnew body";
 
-        let reveal = synchronize_source(
+        let _ = update(
             &mut editor,
-            SourceSynchronization::FileLoad {
-                path: path.clone(),
-                contents,
-            },
+            Message::Document(super::document::Message::OpenLoaded(Some((
+                path.clone(),
+                contents.to_owned(),
+            )))),
         );
 
-        assert!(!reveal);
         assert_eq!(editor.document.path(), Some(path.as_path()));
         assert_eq!(editor.document.text(), contents);
         assert!(!editor.document.is_modified());
@@ -2869,13 +2711,31 @@ mod tests {
     fn external_replacement_policy_preserves_source_cursor_and_live_context() {
         use iced::widget::text_editor::{Cursor, Position};
 
+        let old_contents = "# Old\n\nold body";
         let mut editor = editor_at(
-            "# Old\n\nold body",
+            old_contents,
             CaretPosition {
                 element: 1,
                 column: 3,
             },
         );
+        let path = std::env::temp_dir().join(format!(
+            "agmawrite-external-{}-{:?}.md",
+            std::process::id(),
+            iced::window::Id::unique()
+        ));
+        std::fs::write(&path, old_contents).unwrap();
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::OpenLoaded(Some((
+                path.clone(),
+                old_contents.to_owned(),
+            )))),
+        );
+        editor.caret.place(CaretPosition {
+            element: 1,
+            column: 3,
+        });
         editor.document.move_to(Cursor {
             position: Position { line: 2, column: 3 },
             selection: Some(Position { line: 0, column: 2 }),
@@ -2890,13 +2750,13 @@ mod tests {
         editor.note_text = iced::widget::text_editor::Content::with_text("draft");
         editor.editing_comment = Some((0, 0));
         let contents = "# New\n\nnew body";
+        std::fs::write(&path, contents).unwrap();
 
-        let reveal = synchronize_source(
+        let _ = update(
             &mut editor,
-            SourceSynchronization::ExternalReplacement(contents),
+            Message::Document(super::document::Message::ExternalChange),
         );
 
-        assert!(reveal);
         assert_eq!(editor.document.content().cursor(), source_cursor);
         assert_projection_matches(&editor, contents);
         assert_eq!(
@@ -2915,10 +2775,10 @@ mod tests {
             element: 1,
             column: 2,
         });
-        assert!(!synchronize_source(
+        let _ = update(
             &mut editor,
-            SourceSynchronization::ExternalReplacement(contents),
-        ));
+            Message::Document(super::document::Message::ExternalChange),
+        );
         assert_eq!(
             editor.caret.position(),
             CaretPosition {
@@ -2926,6 +2786,7 @@ mod tests {
                 column: 2,
             }
         );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2941,9 +2802,13 @@ mod tests {
         );
         editor.keymap.note(Transition::PreviewToggled);
         let contents = "first\n\nsecond\n\nthird";
-        editor
-            .document
-            .load("/tmp/task-5-preview.md".into(), contents);
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::OpenLoaded(Some((
+                "/tmp/task-5-preview.md".into(),
+                contents.to_owned(),
+            )))),
+        );
         editor.document.move_to(Cursor {
             position: Position { line: 4, column: 2 },
             selection: Some(Position { line: 2, column: 1 }),
@@ -3323,255 +3188,6 @@ mod tests {
         let _ = update(&mut editor, Message::FindPrevious);
         let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
-    }
-
-    /// Enter on a list line continues the list; Enter on an empty item
-    /// removes the marker and ends it.
-    #[test]
-    fn enter_continues_lists() {
-        use iced::widget::text_editor::{Action, Cursor, Edit, Position};
-
-        let mut editor = Editor {
-            document: super::document::State::new("- item", None),
-            markdown: iced::widget::markdown::Content::parse("- item"),
-            keymap: Keymap::new(false),
-            caret: Caret::new(),
-            preview_elements: ElementMap::parse("- item"),
-            visual_anchor: None,
-            note_text: iced::widget::text_editor::Content::new(),
-            comments: Comments::new(),
-            sidebar_override: None,
-            find: find::Find::new(),
-            help: super::help::Help::new(),
-            editing_comment: None,
-            palette: Palette::default(),
-        };
-        editor.document.move_to(Cursor {
-            position: Position { line: 0, column: 6 },
-            selection: None,
-        });
-
-        let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
-
-        assert_eq!(editor.document.text(), "- item\n- ");
-        let cursor = editor.document.content().cursor();
-        assert_eq!(cursor.position, Position { line: 1, column: 2 });
-
-        // The new item is empty; Enter removes the marker and ends the list.
-        let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
-
-        assert_eq!(editor.document.text(), "- item\n\n");
-        assert_eq!(
-            editor.document.content().cursor().position,
-            Position { line: 2, column: 0 }
-        );
-    }
-
-    /// Opening a file over unsaved changes shows the dialog instead of the
-    /// file picker; answering it runs, cancels, or saves-then-runs the
-    /// guarded action.
-    #[test]
-    fn opening_over_unsaved_changes_asks_first() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        editor
-            .document
-            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-a.md"));
-
-        // A clean document opens straight away — no dialog state.
-        let _ = update(&mut editor, Message::OpenFile);
-        assert!(!editor.keymap.unsaved_open());
-        assert!(editor.document.pending_action().is_none());
-
-        // A modified document opens the dialog guarding the open.
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('!'),
-            )),
-        );
-        let _ = update(&mut editor, Message::OpenFile);
-        assert!(editor.keymap.unsaved_open());
-        assert_eq!(
-            editor.document.pending_action(),
-            Some(UnsavedAction::OpenFile)
-        );
-
-        // Cancel keeps the document open and unmodified-by-dialog.
-        let _ = update(&mut editor, Message::UnsavedCancel);
-        assert!(!editor.keymap.unsaved_open());
-        assert!(editor.document.pending_action().is_none());
-        assert!(editor.document.is_modified());
-
-        // Save answers by saving first; the guarded action waits for the
-        // save to land.
-        let _ = update(&mut editor, Message::OpenFile);
-        let _ = update(&mut editor, Message::UnsavedSave);
-        assert!(!editor.keymap.unsaved_open());
-        assert_eq!(
-            editor.document.pending_action(),
-            Some(UnsavedAction::OpenFile)
-        );
-        let saved = editor.document.text();
-        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
-        assert!(!editor.document.is_modified());
-        assert!(editor.document.pending_action().is_none());
-
-        // Discard drops the guard immediately — the action runs without
-        // saving.
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('?'),
-            )),
-        );
-        let _ = update(&mut editor, Message::OpenFile);
-        let _ = update(&mut editor, Message::UnsavedDiscard);
-        assert!(!editor.keymap.unsaved_open());
-        assert!(editor.document.pending_action().is_none());
-        // The changes stay in the editor — discarding the dialog only
-        // skips the save.
-        assert!(editor.document.is_modified());
-    }
-
-    /// A pending open proceeds only when the document still matches the
-    /// completed save, and asks again when a newer edit exists.
-    #[test]
-    fn pending_open_reopens_the_guard_after_a_stale_save() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        editor
-            .document
-            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-save.md"));
-
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('!'),
-            )),
-        );
-        let _ = update(&mut editor, Message::OpenFile);
-        assert!(editor.keymap.unsaved_open());
-        let _ = update(&mut editor, Message::UnsavedSave);
-
-        // The save finishes — but the user typed while it ran. The stale
-        // snapshot is what counts as saved, the newer edit does not.
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('?'),
-            )),
-        );
-        let snapshot = "# Title\n\nbody!".to_owned();
-        let _ = update(
-            &mut editor,
-            Message::FileSaved(Ok("saved".into()), snapshot),
-        );
-
-        // The guarded open did not run; the dialog asks about the newer
-        // unsaved edit instead.
-        assert!(editor.keymap.unsaved_open());
-        assert_eq!(
-            editor.document.pending_action(),
-            Some(UnsavedAction::OpenFile)
-        );
-
-        // Saving the current contents this time lets the action proceed.
-        let snapshot = editor.document.text();
-        let _ = update(&mut editor, Message::UnsavedSave);
-        let _ = update(
-            &mut editor,
-            Message::FileSaved(Ok("saved".into()), snapshot),
-        );
-        assert!(!editor.document.is_modified());
-        assert!(editor.document.pending_action().is_none());
-        assert!(!editor.keymap.unsaved_open());
-    }
-
-    /// A cancelled save dialog also cancels whatever waited on the save:
-    /// the guarded action never runs.
-    #[test]
-    fn cancelling_the_save_dialog_drops_the_guarded_action() {
-        let mut editor = editor_at(
-            "draft",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        // No path yet: saving goes through the save dialog.
-        assert!(editor.document.path().is_none());
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('!'),
-            )),
-        );
-
-        let _ = update(&mut editor, Message::OpenFile);
-        assert!(editor.keymap.unsaved_open());
-        let _ = update(&mut editor, Message::UnsavedSave);
-
-        // The user cancels the save dialog.
-        let _ = update(&mut editor, Message::SavePathChosen(None));
-        assert!(editor.document.pending_action().is_none());
-        assert!(editor.document.is_modified());
-    }
-
-    /// Closing the window over unsaved changes shows the dialog; a clean
-    /// document closes without one.
-    #[test]
-    fn closing_over_unsaved_changes_asks_first() {
-        let id = iced::window::Id::unique();
-
-        let mut editor = editor_at(
-            "clean",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        let _ = update(&mut editor, Message::WindowCloseRequested(id));
-        assert!(!editor.keymap.unsaved_open());
-
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('!'),
-            )),
-        );
-        let _ = update(&mut editor, Message::WindowCloseRequested(id));
-        assert!(editor.keymap.unsaved_open());
-        assert_eq!(
-            editor.document.pending_action(),
-            Some(UnsavedAction::CloseWindow(id))
-        );
-
-        // Escape cancels the close.
-        let _ = update(&mut editor, Message::UnsavedCancel);
-        assert!(!editor.keymap.unsaved_open());
-
-        // Save closes once the save landed: the guard clears with the
-        // action consumed.
-        let _ = update(&mut editor, Message::WindowCloseRequested(id));
-        editor
-            .document
-            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-b.md"));
-        let _ = update(&mut editor, Message::UnsavedSave);
-        let saved = editor.document.text();
-        let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
-        assert!(editor.document.pending_action().is_none());
-        assert!(!editor.document.is_modified());
     }
 
     /// While the unsaved dialog is open the editing surface beneath is

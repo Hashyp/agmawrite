@@ -267,7 +267,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** root/app code contains no `rfd`, `notify`, `std::fs::write`, or watcher-thread implementation.
 
-## Task 7 — Add the document reducer and nested document message
+## Task 7 — Add the document reducer and nested document message ✅ Completed
 
 **Goal:** make the document feature own edit/open/save/load/external-change/unsaved workflow transitions.
 
