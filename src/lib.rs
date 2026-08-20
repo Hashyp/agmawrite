@@ -17,14 +17,13 @@ use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use keymap::{Keymap, Mode, Transition};
-use preview::CaretPosition;
 use theme::Palette;
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
 use iced::widget::{
     button, canvas, column, container, operation::focus, operation::focus_next, row, stack, text,
-    text_editor, text_input, tooltip, Id, Space,
+    text_editor, tooltip, Id, Space,
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
@@ -32,8 +31,6 @@ use iced::{
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
-/// The id of the find popup's query field, focused when the popup opens.
-const FIND_INPUT_ID: &str = "find-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
 /// canvas size.
 const ICON_DESIGN_SIZE: f32 = 16.0;
@@ -54,8 +51,8 @@ struct Editor {
     /// Comment store and workflow state, including the note composer and
     /// sidebar visibility policy.
     comments: comments::State,
-    /// The find popup's state: the query and the current match.
-    find: find::Find,
+    /// The find popup's query and current match.
+    find: find::State,
     /// The shortcuts Help window's query state.
     help: help::Help,
     /// The omarchy color scheme the interface paints with.
@@ -67,13 +64,9 @@ enum Message {
     Document(document::Message),
     Preview(preview::Message),
     Comments(comments::Message),
-    OpenFind,
-    CloseFind,
+    Find(find::Message),
     OpenHelp,
     Help(help::Message),
-    FindQueryChanged(String),
-    FindNext,
-    FindPrevious,
     PaletteChanged,
 }
 
@@ -109,12 +102,12 @@ fn message_for_command(command: Command) -> Message {
             CommentsCommand::AddGlobal => comments::Message::AddDraftAsGlobal,
             CommentsCommand::Publish => comments::Message::PublishDraft,
         }),
-        Command::Find(command) => match command {
-            FindCommand::Open => Message::OpenFind,
-            FindCommand::Close => Message::CloseFind,
-            FindCommand::Next => Message::FindNext,
-            FindCommand::Previous => Message::FindPrevious,
-        },
+        Command::Find(command) => Message::Find(match command {
+            FindCommand::Open => find::Message::Open,
+            FindCommand::Close => find::Message::Close,
+            FindCommand::Next => find::Message::Next,
+            FindCommand::Previous => find::Message::Previous,
+        }),
         Command::Help(command) => match command {
             HelpCommand::Open => Message::OpenHelp,
             HelpCommand::Close => Message::Help(help::Message::Close),
@@ -138,8 +131,8 @@ fn input_transition(message: &Message) -> Transition {
         Message::Comments(comments::Message::CloseComposer | comments::Message::SaveComposer) => {
             Transition::NoteClosed
         }
-        Message::OpenFind => Transition::FindOpened,
-        Message::CloseFind => Transition::FindClosed,
+        Message::Find(find::Message::Open) => Transition::FindOpened,
+        Message::Find(find::Message::Close) => Transition::FindClosed,
         Message::OpenHelp => Transition::HelpOpened,
         Message::Help(help::Message::Close) => Transition::HelpClosed,
         Message::Help(_) => Transition::HelpActivity,
@@ -476,6 +469,19 @@ fn handle_comments_event(editor: &mut Editor, event: comments::Event) -> Task<Me
     }
 }
 
+fn handle_find_event(editor: &mut Editor, event: find::Event) -> Task<Message> {
+    match event {
+        find::Event::SelectSource(matched) => {
+            editor.document.apply_find_selection(matched);
+            Task::none()
+        }
+        find::Event::SelectPreview { element, range } => {
+            editor.preview.apply_find_selection(element, range);
+            preview::reveal_caret().map(Message::Preview)
+        }
+    }
+}
+
 fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     // The note popup's text area owns the draft until the popup closes; a
     // save started from the open popup still lands after the keymap has
@@ -523,22 +529,27 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
             return event.map_or_else(Task::none, |event| handle_comments_event(editor, event));
         }
-        Message::OpenFind => {
-            return focus(Id::new(FIND_INPUT_ID));
-        }
-        Message::CloseFind => {
-            // Give the source editor its focus back so its caret resumes.
-            if !editor.keymap.preview() {
-                return focus(Id::new(SOURCE_EDITOR_ID));
-            }
-        }
-        Message::FindQueryChanged(query) => {
-            editor.find.set_query(&query);
+        Message::Find(message) => {
+            let closes = matches!(message, find::Message::Close);
+            let source;
+            let surface = if editor.keymap.preview() {
+                find::Surface::Preview(editor.preview.elements())
+            } else {
+                source = editor.document.text();
+                find::Surface::Source(&source)
+            };
+            let find::Update { task, event } = find::update(&mut editor.find, message, surface);
+            let event_task =
+                event.map_or_else(Task::none, |event| handle_find_event(editor, event));
+            let restore_task = if closes && !editor.keymap.preview() {
+                // Give the source editor its focus back so its caret resumes.
+                focus(Id::new(SOURCE_EDITOR_ID))
+            } else {
+                Task::none()
+            };
 
-            return select_find_match(editor, find::Way::First);
+            return Task::batch([task.map(Message::Find), event_task, restore_task]);
         }
-        Message::FindNext => return select_find_match(editor, find::Way::Next),
-        Message::FindPrevious => return select_find_match(editor, find::Way::Previous),
         // Help owns its query and internal events. The root only composes
         // the window and restores whichever field was underneath it.
         Message::OpenHelp => return help::focus_input(),
@@ -548,7 +559,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
             if closed {
                 if editor.keymap.find_open() {
-                    return focus(Id::new(FIND_INPUT_ID));
+                    return find::focus_input().map(Message::Find);
                 }
                 if editor.keymap.note_open() {
                     return comments::focus_composer().map(Message::Comments);
@@ -561,133 +572,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
     }
 
     Task::none()
-}
-
-/// Selects the current find match, live as the query is typed and as
-/// navigation steps through the matches: in write mode the match becomes
-/// the editor's selection, in the preview the caret jumps to the match's
-/// element and the matches paint as highlights with the current one
-/// distinct.
-fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
-    if !editor.find.is_active() {
-        return Task::none();
-    }
-
-    if editor.keymap.preview() {
-        let matches = find::preview_matches(editor.preview.elements(), editor.find.query());
-        let Some(index) = editor.find.select(way, matches.len()) else {
-            return Task::none();
-        };
-
-        let (element, range) = matches[index].clone();
-        editor.preview.place_caret(CaretPosition {
-            element,
-            column: range.start,
-        });
-
-        return preview::reveal_caret().map(Message::Preview);
-    }
-
-    let source = editor.document.text();
-    let matches = editing::source_matches(&source, editor.find.query());
-    let Some(index) = editor.find.select(way, matches.len()) else {
-        return Task::none();
-    };
-
-    let editing::SourceMatch { line, columns } = matches[index].clone();
-    editor.document.move_to(text_editor::Cursor {
-        position: text_editor::Position {
-            line,
-            column: columns.start,
-        },
-        selection: Some(text_editor::Position {
-            line,
-            column: columns.end,
-        }),
-    });
-
-    Task::none()
-}
-
-/// All find matches of the mode's surface — the preview's elements or
-/// the source text — for the popup's live match counter.
-fn find_match_count(editor: &Editor) -> usize {
-    if !editor.find.is_active() {
-        return 0;
-    }
-
-    if editor.keymap.preview() {
-        find::preview_matches(editor.preview.elements(), editor.find.query()).len()
-    } else {
-        editing::source_matches(&editor.document.text(), editor.find.query()).len()
-    }
-}
-
-/// The find popup: a small card in the top right corner with the query
-/// field, a live `n/m` match counter, and ▲/▼ buttons stepping through
-/// the matches.
-fn find_popup(editor: &Editor, palette: Palette) -> Element<'_, Message> {
-    let total = find_match_count(editor);
-    let counter = editor.find.is_active().then(|| {
-        if total == 0 {
-            ("no match".to_owned(), palette.red)
-        } else {
-            let current = editor.find.current(total).map_or(1, |index| index + 1);
-            (format!("{}/{}", current, total), palette.dark_foreground)
-        }
-    });
-
-    let mut card_row = row![text_input("Search…", editor.find.query())
-        .id(Id::new(FIND_INPUT_ID))
-        .on_input(Message::FindQueryChanged)
-        .font(EDITOR_FONT)
-        .size(14)
-        .padding(6)
-        .width(Length::Fixed(220.0))]
-    .spacing(8)
-    .align_y(alignment::Vertical::Center);
-
-    if let Some((counter, color)) = counter {
-        card_row = card_row.push(text(counter).font(EDITOR_FONT).size(12).color(color));
-    }
-
-    // ▲ steps back, ▼ steps forward — the mouse path of Enter and
-    // Shift+Enter.
-    card_row = card_row
-        .push(
-            button(
-                text("▲")
-                    .font(EDITOR_FONT)
-                    .size(12)
-                    .color(palette.light_foreground),
-            )
-            .on_press(Message::FindPrevious)
-            .padding([4, 8])
-            .style(move |theme, status| modal_button_style(&palette, theme, status)),
-        )
-        .push(
-            button(
-                text("▼")
-                    .font(EDITOR_FONT)
-                    .size(12)
-                    .color(palette.light_foreground),
-            )
-            .on_press(Message::FindNext)
-            .padding([4, 8])
-            .style(move |theme, status| modal_button_style(&palette, theme, status)),
-        );
-
-    container(
-        container(card_row)
-            .padding(8)
-            .style(move |_theme| modal_card_style(&palette)),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(alignment::Horizontal::Right)
-    .align_y(alignment::Vertical::Top)
-    .padding(16)
-    .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -855,7 +739,9 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
                 KeyboardGuardAction::CloseHelp => {
                     shell.publish(Message::Help(help::Message::Close))
                 }
-                KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
+                KeyboardGuardAction::CloseFind => {
+                    shell.publish(Message::Find(find::Message::Close))
+                }
                 KeyboardGuardAction::CloseNote => {
                     shell.publish(Message::Comments(comments::Message::CloseComposer))
                 }
@@ -970,14 +856,17 @@ fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
 fn view(editor: &Editor) -> Element<'_, Message> {
     let palette = editor.palette;
 
+    let source = editor.document.text();
+    let find_surface = if editor.keymap.preview() {
+        find::Surface::Preview(editor.preview.elements())
+    } else {
+        find::Surface::Source(&source)
+    };
+
     let base_area: Element<'_, Message> = if editor.keymap.preview() {
-        // Resolve the current find result at the composition boundary and
-        // pass only read-only decoration data into the preview surface.
-        let find_matches = find::preview_matches(editor.preview.elements(), editor.find.query());
-        let current_match = editor
-            .find
-            .current(find_matches.len())
-            .and_then(|index| find_matches.get(index).cloned());
+        // The preview receives only the find feature's narrow read-only
+        // query and current-match projections.
+        let current_match = editor.find.current_preview_match(editor.preview.elements());
 
         preview::view(
             &editor.preview,
@@ -1137,7 +1026,6 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let source = editor.document.text();
     let sidebar_area = comments::sidebar::view(
         &editor.comments,
         comments::sidebar::ViewContext {
@@ -1169,7 +1057,9 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     for layer in root_layer_order(editor).into_iter().skip(1) {
         layers = match layer {
             RootLayer::EditingSurface => unreachable!("the editing surface is always first"),
-            RootLayer::Find => layers.push(find_popup(editor, palette)),
+            RootLayer::Find => {
+                layers.push(find::view(&editor.find, find_surface, palette).map(Message::Find))
+            }
             RootLayer::Unsaved => {
                 let action = editor
                     .document
@@ -1302,7 +1192,7 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         preview: preview::State::new(contents.as_deref().unwrap_or_default()),
         keymap: Keymap::new(args.preview),
         comments: comments::State::new(),
-        find: find::Find::new(),
+        find: find::State::new(),
         help: help::Help::new(),
         palette: Palette::current(),
     };
@@ -1374,7 +1264,7 @@ mod tests {
             preview,
             keymap,
             comments: comments::State::new(),
-            find: find::Find::new(),
+            find: find::State::new(),
             help: super::help::Help::new(),
             palette: Palette::default(),
         }
@@ -1602,7 +1492,7 @@ mod tests {
             preview: preview::State::new("first\nsecond"),
             keymap: Keymap::new(false),
             comments: comments::State::new(),
-            find: find::Find::new(),
+            find: find::State::new(),
             help: super::help::Help::new(),
             palette: Palette::default(),
         };
@@ -1821,12 +1711,10 @@ mod tests {
         );
     }
 
-    /// Typing in the find popup selects the first match right away: as an
-    /// editor selection in write mode, and as a caret jump in the preview.
-    /// Enter steps through the matches and wraps around; Shift+Enter
-    /// steps back.
+    /// The app applies find navigation to only the active editing surface:
+    /// preview events place its caret, while source events select source text.
     #[test]
-    fn find_selects_and_steps_through_matches() {
+    fn find_navigation_routes_to_source_and_preview_features() {
         use iced::widget::text_editor::Position;
 
         let mut editor = editor_at(
@@ -1837,49 +1725,32 @@ mod tests {
             },
         );
         editor.keymap.note(Transition::FindOpened);
-        assert!(editor.keymap.find_open());
 
-        // In the preview, the caret jumps to the match's element.
-        let _ = update(&mut editor, Message::FindQueryChanged("more".to_owned()));
+        let _ = update(
+            &mut editor,
+            Message::Find(find::Message::QueryChanged("more".to_owned())),
+        );
         assert_eq!(
             editor.preview.caret(),
             CaretPosition {
                 element: 2,
-                column: 0
+                column: 0,
             }
         );
-
-        // A single match: stepping wraps back onto itself.
-        let _ = update(&mut editor, Message::FindNext);
         assert_eq!(
-            editor.preview.caret(),
-            CaretPosition {
-                element: 2,
-                column: 0
-            }
+            editor.document.content().cursor().position,
+            Position { line: 0, column: 0 }
         );
 
-        // In write mode, the match becomes the editor's selection and
-        // Enter walks the matches.
         editor.keymap.note(Transition::PreviewToggled);
-        let _ = update(&mut editor, Message::FindQueryChanged("text".to_owned()));
+        let preview_caret = editor.preview.caret();
+        let _ = update(
+            &mut editor,
+            Message::Find(find::Message::QueryChanged("text".to_owned())),
+        );
         let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
         assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
-
-        let _ = update(&mut editor, Message::FindNext);
-        let cursor = editor.document.content().cursor();
-        assert_eq!(cursor.position, Position { line: 4, column: 5 });
-        assert_eq!(cursor.selection, Some(Position { line: 4, column: 9 }));
-
-        // Wraps around to the first match.
-        let _ = update(&mut editor, Message::FindNext);
-        let cursor = editor.document.content().cursor();
-        assert_eq!(cursor.position, Position { line: 2, column: 5 });
-
-        // And Shift+Enter steps back.
-        let _ = update(&mut editor, Message::FindPrevious);
-        let cursor = editor.document.content().cursor();
-        assert_eq!(cursor.position, Position { line: 4, column: 5 });
+        assert_eq!(editor.preview.caret(), preview_caret);
     }
 }

@@ -452,7 +452,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 5: Complete find extraction
 
-## Task 17 — Turn find into a complete feature
+## Task 17 — Turn find into a complete feature ✅ Completed
 
 **Goal:** move find messages, selection decisions, focus, counter, and popup into `find/`.
 

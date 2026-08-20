@@ -119,9 +119,17 @@ impl State {
         self.clear_visual_selection();
     }
 
-    /// Places the caret for app-coordinated comment or find navigation.
+    /// Places the caret for app-coordinated comment navigation.
     pub(crate) fn place_caret(&mut self, position: CaretPosition) {
         self.caret.place(position);
+    }
+
+    /// Applies an exact preview match selected by the find feature.
+    pub(crate) fn apply_find_selection(&mut self, element: usize, range: std::ops::Range<usize>) {
+        self.caret.place(CaretPosition {
+            element,
+            column: range.start,
+        });
     }
 
     /// Clears the fixed end of visual selection without changing the caret.

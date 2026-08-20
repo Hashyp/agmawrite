@@ -129,6 +129,20 @@ impl State {
         self.content.move_to(cursor);
     }
 
+    /// Applies an exact source match selected by the find feature.
+    pub(crate) fn apply_find_selection(&mut self, matched: crate::editing::SourceMatch) {
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: matched.line,
+                column: matched.columns.start,
+            },
+            selection: Some(text_editor::Position {
+                line: matched.line,
+                column: matched.columns.end,
+            }),
+        });
+    }
+
     /// Replaces the document with a newly loaded file and makes that text
     /// the saved baseline.
     fn load(&mut self, path: PathBuf, contents: &str) {
