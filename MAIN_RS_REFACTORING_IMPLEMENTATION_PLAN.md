@@ -434,7 +434,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app imports no advanced `Operation`, `Scrollable`, `Outcome`, `Rectangle`, or scroll IDs for preview behavior.
 
-## Task 16 — Extract the preview viewer and preview surface
+## Task 16 — Extract the preview viewer and preview surface ✅ Completed
 
 **Goal:** move rendered preview construction out of app while preserving current decorations.
 

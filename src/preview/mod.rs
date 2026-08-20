@@ -2,15 +2,15 @@
 
 mod model;
 mod scroll;
+mod viewer;
 
 use model::Caret;
 pub(crate) use model::{
     element_selection, CaretPosition, Claims, ElementMap, Jump, Motion, Page, Placement,
     PreviewElement, WordMotion,
 };
-pub(crate) use scroll::{
-    caret_id, place_caret_in_view, reveal_caret, scroll_by, scroll_page, scrollable_id,
-};
+pub(crate) use scroll::{place_caret_in_view, reveal_caret, scroll_by, scroll_page};
+pub(crate) use viewer::{view, ViewContext};
 
 use iced::widget::{markdown, text_editor};
 use iced::Task;

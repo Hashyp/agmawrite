@@ -22,10 +22,9 @@ use theme::Palette;
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
-use iced::widget::markdown::Catalog as _;
 use iced::widget::{
-    button, canvas, column, container, markdown, operation::focus, operation::focus_next, row,
-    scrollable, stack, text, text_editor, text_input, tooltip, Id, Space,
+    button, canvas, column, container, operation::focus, operation::focus_next, row, stack, text,
+    text_editor, text_input, tooltip, Id, Space,
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
@@ -919,32 +918,6 @@ fn editor_style(
     }
 }
 
-fn comment_colors(palette: &Palette) -> interactive_text::CommentColors {
-    interactive_text::CommentColors {
-        // Open comments keep the palette's warning/annotation color, while
-        // the active comment uses the same accent as its sidebar card.
-        commented_bar: palette.tint(palette.yellow, 0.75),
-        active_bar: palette.accent,
-        active_tint: palette.tint(palette.accent, 0.09),
-        commented_span_tint: palette.tint(palette.yellow, 0.22),
-    }
-}
-
-fn markdown_style(palette: &Palette) -> markdown::Style {
-    let theme = if palette.light {
-        &Theme::Light
-    } else {
-        &Theme::Dark
-    };
-
-    markdown::Style {
-        font: EDITOR_FONT,
-        inline_code_font: EDITOR_FONT,
-        code_block_font: EDITOR_FONT,
-        ..markdown::Style::from(theme)
-    }
-}
-
 fn icon_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         text_color: match status {
@@ -965,197 +938,6 @@ fn tooltip_style(_theme: &Theme) -> container::Style {
         },
         ..Default::default()
     }
-}
-
-struct PreviewViewer<'a> {
-    /// Claims the next numbered element per rendered item from the map —
-    /// the viewer never counts itself, so the numbering parity between the
-    /// parse walk and the viewer lives in the preview module alone.
-    claims: preview::Claims<'a>,
-    focused_element: usize,
-    caret_column: usize,
-    /// The `(anchor, caret)` endpoints of the visual-mode selection.
-    visual: Option<(CaretPosition, CaretPosition)>,
-    /// Saved comments, to know which elements carry one.
-    comments: &'a comments::State,
-    /// The find popup's query; its matches paint as highlights.
-    find_query: &'a str,
-    /// The current find match, as the element and range it lives in.
-    current_match: Option<(usize, std::ops::Range<usize>)>,
-    /// The color the caret and decorations paint with — the palette's
-    /// foreground.
-    text_color: Color,
-    /// The current theme's comment bar and tint colors.
-    comment_colors: interactive_text::CommentColors,
-}
-
-impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
-    fn on_link_click(url: markdown::Uri) -> Message {
-        Message::Preview(preview::Message::LinkClicked(url))
-    }
-
-    fn heading(
-        &self,
-        mut settings: markdown::Settings,
-        level: &'a markdown::HeadingLevel,
-        text: &'a markdown::Text,
-        _index: usize,
-    ) -> Element<'a, Message> {
-        settings.text_size = match level {
-            markdown::HeadingLevel::H1 => settings.h1_size,
-            markdown::HeadingLevel::H2 => settings.h2_size,
-            markdown::HeadingLevel::H3 => settings.h3_size,
-            markdown::HeadingLevel::H4 => settings.h4_size,
-            markdown::HeadingLevel::H5 => settings.h5_size,
-            markdown::HeadingLevel::H6 => settings.h6_size,
-        };
-        self.text_element(settings, text)
-    }
-
-    fn paragraph(
-        &self,
-        settings: markdown::Settings,
-        text: &markdown::Text,
-    ) -> Element<'a, Message> {
-        self.text_element(settings, text)
-    }
-
-    fn code_block(
-        &self,
-        settings: markdown::Settings,
-        _language: Option<&'a str>,
-        _code: &'a str,
-        lines: &'a [markdown::Text],
-    ) -> Element<'a, Message> {
-        // The map numbers code blocks like any element; if they ever
-        // disagree, fall back to the plain, non-interactive look.
-        let Some((element, preview_element)) = self.claims.claim() else {
-            return markdown::code_block(settings, lines, |uri| {
-                Message::Preview(preview::Message::LinkClicked(uri))
-            });
-        };
-
-        let decorations = self.decorations(element, preview_element);
-
-        // The code block keeps the default look — dark surface, inset —
-        // with the interactive code inside instead of the plain lines.
-        container(interactive_text::code(
-            settings,
-            preview_element.text(),
-            decorations.selection,
-            decorations.caret,
-            decorations.id,
-            decorations.commented,
-            decorations.active_comment,
-            decorations.comment_span,
-            self.comment_colors,
-            self.text_color,
-            decorations.find,
-        ))
-        .width(Length::Fill)
-        .padding(settings.code_size / 4.0)
-        .class(Theme::code_block())
-        .into()
-    }
-}
-
-impl<'a> PreviewViewer<'a> {
-    /// The decorations the claimed `element` carries: its slice of the
-    /// visual selection, the caret when focused, its comment mark and
-    /// anchored span, and its find matches.
-    fn decorations(
-        &self,
-        element: usize,
-        preview_element: &preview::PreviewElement,
-    ) -> Decorations {
-        let focused = self.focused_element == element;
-
-        Decorations {
-            selection: self.visual.and_then(|(anchor, caret)| {
-                preview::element_selection(anchor, caret, element, preview_element.len())
-            }),
-            caret: focused.then_some(self.caret_column),
-            id: focused.then(preview::caret_id),
-            commented: matches!(
-                self.comments.mark_for(element, preview_element.len()),
-                comments::Mark::Commented | comments::Mark::Active
-            ),
-            active_comment: self.comments.mark_for(element, preview_element.len())
-                == comments::Mark::Active,
-            comment_span: self
-                .comments
-                .anchor_selection_for(element, preview_element.len()),
-            find: interactive_text::FindHighlights {
-                matches: if self.find_query.is_empty() {
-                    Vec::new()
-                } else {
-                    editing::matches_in(preview_element.text(), self.find_query)
-                },
-                current: match self.current_match {
-                    Some((match_element, ref range)) if match_element == element => {
-                        Some(range.clone())
-                    }
-                    _ => None,
-                },
-            },
-        }
-    }
-
-    fn text_element(
-        &self,
-        settings: markdown::Settings,
-        text: &markdown::Text,
-    ) -> Element<'a, Message> {
-        // The map numbers elements exactly like the viewer numbers items;
-        // if they ever disagree the item renders plainly, without caret,
-        // selection, or comment mark.
-        let Some((element, preview_element)) = self.claims.claim() else {
-            return interactive_text::paragraph(
-                settings,
-                text,
-                None,
-                None,
-                None,
-                false,
-                false,
-                None,
-                self.comment_colors,
-                self.text_color,
-                interactive_text::FindHighlights::none(),
-            );
-        };
-
-        let decorations = self.decorations(element, preview_element);
-
-        interactive_text::paragraph(
-            settings,
-            text,
-            decorations.selection,
-            decorations.caret,
-            decorations.id,
-            decorations.commented,
-            decorations.active_comment,
-            decorations.comment_span,
-            self.comment_colors,
-            self.text_color,
-            decorations.find,
-        )
-    }
-}
-
-/// The interactive decorations of one preview element: its slice of the
-/// visual-mode selection, the caret when it is the focused element, its
-/// comment mark and anchored span, and its find highlights.
-struct Decorations {
-    selection: Option<std::ops::Range<usize>>,
-    caret: Option<usize>,
-    id: Option<Id>,
-    commented: bool,
-    active_comment: bool,
-    /// The selected-text span a comment was written for, when its anchor
-    /// is a span.
-    comment_span: Option<std::ops::Range<usize>>,
-    find: interactive_text::FindHighlights,
 }
 
 /// Stable bottom-to-top ordering of the root editing surface and modal
@@ -1187,43 +969,26 @@ fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
 
 fn view(editor: &Editor) -> Element<'_, Message> {
     let palette = editor.palette;
-    let position = editor.preview.caret();
-    let visual = editor.preview.visual_selection();
-
-    // The current find match, resolved against the live elements so the
-    // viewer can paint it in its distinct color.
-    let find_matches = find::preview_matches(editor.preview.elements(), editor.find.query());
-    let current_match = editor
-        .find
-        .current(find_matches.len())
-        .and_then(|index| find_matches.get(index).cloned());
 
     let base_area: Element<'_, Message> = if editor.keymap.preview() {
-        scrollable(
-            container(markdown::view_with(
-                editor.preview.markdown().items(),
-                markdown::Settings::with_text_size(20.0, markdown_style(&palette)),
-                &PreviewViewer {
-                    claims: editor.preview.claims(),
-                    focused_element: position.element,
-                    caret_column: position.column,
-                    visual,
-                    comments: &editor.comments,
-                    find_query: editor.find.query(),
-                    current_match,
-                    text_color: palette.foreground,
-                    comment_colors: comment_colors(&palette),
-                },
-            ))
-            .width(Length::Fill)
-            .padding([0, 8]),
+        // Resolve the current find result at the composition boundary and
+        // pass only read-only decoration data into the preview surface.
+        let find_matches = find::preview_matches(editor.preview.elements(), editor.find.query());
+        let current_match = editor
+            .find
+            .current(find_matches.len())
+            .and_then(|index| find_matches.get(index).cloned());
+
+        preview::view(
+            &editor.preview,
+            preview::ViewContext::new(
+                &editor.comments,
+                editor.find.query(),
+                current_match,
+                palette,
+            ),
         )
-        .id(preview::scrollable_id())
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Scrollbar::hidden(),
-        ))
-        .height(Length::Fill)
-        .into()
+        .map(Message::Preview)
     } else {
         text_editor(editor.document.content())
             .id(Id::new(SOURCE_EDITOR_ID))
