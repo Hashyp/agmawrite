@@ -1,14 +1,19 @@
 //! Preview feature state, reducer, and parsed caret model.
 
 mod model;
+mod scroll;
 
 use model::Caret;
 pub(crate) use model::{
     element_selection, CaretPosition, Claims, ElementMap, Jump, Motion, Page, Placement,
     PreviewElement, WordMotion,
 };
+pub(crate) use scroll::{
+    caret_id, place_caret_in_view, reveal_caret, scroll_by, scroll_page, scrollable_id,
+};
 
 use iced::widget::{markdown, text_editor};
+use iced::Task;
 
 /// Preview-local navigation and scrolling messages.
 #[derive(Debug, Clone)]
@@ -36,29 +41,35 @@ pub(crate) struct Context {
     pub(crate) visual_active: bool,
 }
 
-/// Semantic work that remains at the application boundary until preview
-/// scrolling and link handling are extracted in later tasks.
+/// Semantic work that remains at the application boundary.
 #[derive(Debug, Clone)]
 pub(crate) enum Event {
     ToggleRequested,
     OpenLink(markdown::Uri),
-    RevealCaret,
-    ScrollBy(f32),
-    ScrollPage(Page, usize),
-    ScrollCaret(Placement),
 }
 
 pub(crate) struct Update {
+    pub(crate) task: Task<Message>,
     pub(crate) event: Option<Event>,
 }
 
 impl Update {
     fn none() -> Self {
-        Self { event: None }
+        Self {
+            task: Task::none(),
+            event: None,
+        }
+    }
+
+    fn task(task: Task<Message>) -> Self {
+        Self { task, event: None }
     }
 
     fn event(event: Event) -> Self {
-        Self { event: Some(event) }
+        Self {
+            task: Task::none(),
+            event: Some(event),
+        }
     }
 }
 
@@ -145,8 +156,8 @@ impl Default for State {
     }
 }
 
-/// Applies one preview transition. Widget-tree scrolling remains an app-owned
-/// event until Task 15; navigation and visual state mutate only here.
+/// Applies one preview transition. Navigation and visual state mutate here;
+/// preview-local widget-tree tasks are constructed by [`scroll`].
 pub(crate) fn update(state: &mut State, message: Message, context: Context) -> Update {
     match message {
         Message::Toggle => Update::event(Event::ToggleRequested),
@@ -156,7 +167,7 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
                 .caret
                 .move_by(state.elements.elements(), motion, count)
             {
-                Update::event(Event::RevealCaret)
+                Update::task(reveal_caret())
             } else {
                 Update::none()
             }
@@ -166,14 +177,14 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
                 .caret
                 .move_word(state.elements.elements(), motion, count)
             {
-                Update::event(Event::RevealCaret)
+                Update::task(reveal_caret())
             } else {
                 Update::none()
             }
         }
         Message::Jump(jump, count) => {
             if state.caret.jump(state.elements.elements(), jump, count) {
-                Update::event(Event::RevealCaret)
+                Update::task(reveal_caret())
             } else {
                 Update::none()
             }
@@ -189,15 +200,15 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
             state.visual_anchor = context.visual_active.then(|| state.caret());
             Update::none()
         }
-        Message::ScrollBy(y) => Update::event(Event::ScrollBy(y)),
-        Message::ScrollPage(page, count) => Update::event(Event::ScrollPage(page, count)),
-        Message::ScrollCaret(placement) => Update::event(Event::ScrollCaret(placement)),
+        Message::ScrollBy(y) => Update::task(scroll_by(y)),
+        Message::ScrollPage(page, count) => Update::task(scroll_page(page, count)),
+        Message::ScrollCaret(placement) => Update::task(place_caret_in_view(placement)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{update, CaretPosition, Context, Event, Message, Motion, State, WordMotion};
+    use super::{update, CaretPosition, Context, Message, Motion, State, WordMotion};
     use iced::widget::{markdown, text_editor};
 
     fn at(element: usize, column: usize) -> CaretPosition {
@@ -256,34 +267,27 @@ mod tests {
     }
 
     #[test]
-    fn reducer_owns_navigation_counts_and_reveal_requests() {
+    fn reducer_owns_navigation_counts_and_keeps_scroll_work_local() {
         let mut state = State::new("one two\n\nthree\n\nfour");
         let context = Context {
             visual_active: false,
         };
 
-        assert!(matches!(
-            update(&mut state, Message::Move(Motion::Down, 2), context).event,
-            Some(Event::RevealCaret)
-        ));
+        let result = update(&mut state, Message::Move(Motion::Down, 2), context);
+        assert!(result.event.is_none());
         assert_eq!(state.caret(), at(2, 0));
 
         state.place_caret(at(0, 0));
-        assert!(matches!(
-            update(
-                &mut state,
-                Message::MoveWord(WordMotion::NextStart, 2),
-                context
-            )
-            .event,
-            Some(Event::RevealCaret)
-        ));
+        let result = update(
+            &mut state,
+            Message::MoveWord(WordMotion::NextStart, 2),
+            context,
+        );
+        assert!(result.event.is_none());
         assert_eq!(state.caret(), at(1, 0));
 
-        assert!(matches!(
-            update(&mut state, Message::Jump(super::Jump::Last, 0), context).event,
-            Some(Event::RevealCaret)
-        ));
+        let result = update(&mut state, Message::Jump(super::Jump::Last, 0), context);
+        assert!(result.event.is_none());
         assert_eq!(state.caret(), at(2, 0));
     }
 

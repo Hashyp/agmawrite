@@ -420,7 +420,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app does not mutate `Caret`, `ElementMap`, `markdown::Content`, or visual anchor fields directly.
 
-## Task 15 — Extract preview scroll operations
+## Task 15 — Extract preview scroll operations ✅ Completed
 
 **Goal:** move Iced widget-tree scrolling mechanics out of app.
 

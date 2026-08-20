@@ -17,17 +17,15 @@ use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use keymap::{Keymap, Mode, Transition};
-use preview::{CaretPosition, Page, Placement};
+use preview::CaretPosition;
 use theme::Palette;
 
-use iced::advanced::widget::operation::{Outcome, Scrollable};
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
 use iced::widget::markdown::Catalog as _;
 use iced::widget::{
-    button, canvas, column, container, markdown, operation::focus, operation::focus_next,
-    operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack, text, text_editor,
-    text_input, tooltip, Id, Space,
+    button, canvas, column, container, markdown, operation::focus, operation::focus_next, row,
+    scrollable, stack, text, text_editor, text_input, tooltip, Id, Space,
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
@@ -35,8 +33,6 @@ use iced::{
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
-const PREVIEW_SCROLL_ID: &str = "preview-scroll";
-const PREVIEW_CARET_ID: &str = "preview-caret";
 /// The id of the find popup's query field, focused when the popup opens.
 const FIND_INPUT_ID: &str = "find-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
@@ -49,9 +45,6 @@ const ICON_BUTTON_SIZE: f32 = 42.0;
 /// The id of the source text editor, refocused when switching back to
 /// write mode so the cursor reappears where it was left.
 const SOURCE_EDITOR_ID: &str = "source-editor";
-/// Margin kept between the preview caret and the viewport edges while scrolling.
-const CARET_MARGIN: f32 = 8.0;
-
 struct Editor {
     document: document::State,
     /// Parsed Markdown, numbered elements, caret, and visual selection.
@@ -407,7 +400,7 @@ fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Me
                     editor.preview.replace_source(&source);
 
                     if editor.keymap.preview() {
-                        reveal_preview_caret()
+                        preview::reveal_caret().map(Message::Preview)
                     } else {
                         Task::none()
                     }
@@ -438,7 +431,7 @@ fn handle_preview_event(editor: &mut Editor, event: preview::Event) -> Task<Mess
                 editor
                     .preview
                     .refresh_from_source(&source, editor.document.content());
-                reveal_preview_caret()
+                preview::reveal_caret().map(Message::Preview)
             } else {
                 editor.preview.clear_visual_selection();
                 focus(Id::new(SOURCE_EDITOR_ID))
@@ -447,31 +440,6 @@ fn handle_preview_event(editor: &mut Editor, event: preview::Event) -> Task<Mess
         preview::Event::OpenLink(_uri) => {
             // TODO: open links in the default browser
             Task::none()
-        }
-        preview::Event::RevealCaret => reveal_preview_caret(),
-        preview::Event::ScrollBy(y) => {
-            scroll_by(Id::new(PREVIEW_SCROLL_ID), AbsoluteOffset { x: 0.0, y })
-        }
-        preview::Event::ScrollPage(page, count) => iced::advanced::widget::operate(PageScroll {
-            scroll_id: Id::new(PREVIEW_SCROLL_ID),
-            viewport: None,
-            page,
-            count,
-        }),
-        preview::Event::ScrollCaret(placement) => {
-            let scroll = match placement {
-                Placement::Center => CaretScroll::Center,
-                Placement::Top => CaretScroll::Top,
-                Placement::Bottom => CaretScroll::Bottom,
-            };
-
-            iced::advanced::widget::operate(RevealCaret {
-                scroll_id: Id::new(PREVIEW_SCROLL_ID),
-                caret_id: Id::new(PREVIEW_CARET_ID),
-                viewport: None,
-                caret: None,
-                scroll,
-            })
         }
     }
 }
@@ -482,7 +450,7 @@ fn handle_comments_event(editor: &mut Editor, event: comments::Event) -> Task<Me
             if editor.keymap.preview() {
                 editor.preview.clear_visual_selection();
                 editor.preview.place_caret(anchor);
-                reveal_preview_caret()
+                preview::reveal_caret().map(Message::Preview)
             } else {
                 let source = editor.document.text();
                 let element = editor.preview.elements().get(anchor.element);
@@ -529,9 +497,12 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             let context = preview::Context {
                 visual_active: editor.keymap.visual(),
             };
-            let preview::Update { event } = preview::update(&mut editor.preview, message, context);
+            let preview::Update { task, event } =
+                preview::update(&mut editor.preview, message, context);
+            let event_task =
+                event.map_or_else(Task::none, |event| handle_preview_event(editor, event));
 
-            return event.map_or_else(Task::none, |event| handle_preview_event(editor, event));
+            return Task::batch([task.map(Message::Preview), event_task]);
         }
         Message::Comments(message) => {
             let closes_composer = matches!(
@@ -615,7 +586,7 @@ fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
             column: range.start,
         });
 
-        return reveal_preview_caret();
+        return preview::reveal_caret().map(Message::Preview);
     }
 
     let source = editor.document.text();
@@ -934,161 +905,6 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
     Element::new(KeyboardGuard { content, keymap })
 }
 
-/// Measures the preview scrollable and the caret element in the widget tree,
-/// then scrolls the minimum amount needed to bring the caret back into
-/// view, or the amount that places the caret as `zz`/`zt`/`zb` ask.
-///
-/// The page keeps its position once the caret is visible — unlike a
-/// proportional scroll, the caret can never outrun the end of the page.
-fn reveal_preview_caret() -> Task<Message> {
-    iced::advanced::widget::operate(RevealCaret {
-        scroll_id: Id::new(PREVIEW_SCROLL_ID),
-        caret_id: Id::new(PREVIEW_CARET_ID),
-        viewport: None,
-        caret: None,
-        scroll: CaretScroll::Reveal,
-    })
-}
-
-/// How a [`RevealCaret`] operation scrolls the caret into place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaretScroll {
-    /// The minimum scroll that brings the caret back into view.
-    Reveal,
-    /// `zz` — the caret lands in the middle of the viewport.
-    Center,
-    /// `zt` — the caret lands at the top of the viewport.
-    Top,
-    /// `zb` — the caret lands at the bottom of the viewport.
-    Bottom,
-}
-
-struct RevealCaret {
-    scroll_id: Id,
-    caret_id: Id,
-    viewport: Option<(Rectangle, Vector)>,
-    caret: Option<Rectangle>,
-    scroll: CaretScroll,
-}
-
-impl Operation<Message> for RevealCaret {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
-        operate(self);
-    }
-
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        _content_bounds: Rectangle,
-        translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
-        if Some(&self.scroll_id) == id {
-            self.viewport = Some((bounds, translation));
-        }
-    }
-
-    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        if Some(&self.caret_id) == id {
-            self.caret = Some(bounds);
-        }
-    }
-
-    fn finish(&self) -> Outcome<Message> {
-        let Some((viewport, translation)) = self.viewport else {
-            return Outcome::None;
-        };
-        let Some(caret) = self.caret else {
-            return Outcome::None;
-        };
-
-        // Child layouts live in unscrolled content space; the viewport shows
-        // them shifted up by the current translation.
-        let caret_top = caret.y - translation.y;
-        let caret_bottom = caret_top + caret.height;
-        let viewport_bottom = viewport.y + viewport.height;
-
-        let delta = match self.scroll {
-            CaretScroll::Reveal => {
-                if caret_top < viewport.y + CARET_MARGIN {
-                    caret_top - viewport.y - CARET_MARGIN
-                } else if caret_bottom > viewport_bottom - CARET_MARGIN {
-                    caret_bottom - viewport_bottom + CARET_MARGIN
-                } else {
-                    // Already visible; keep the page where it is.
-                    return Outcome::None;
-                }
-            }
-            // `zz` — the caret lands in the middle of the viewport.
-            CaretScroll::Center => {
-                let caret_middle = caret_top + caret.height / 2.0;
-                caret_middle - (viewport.y + viewport.height / 2.0)
-            }
-            // `zt` — the caret lands at the top of the viewport.
-            CaretScroll::Top => caret_top - viewport.y - CARET_MARGIN,
-            // `zb` — the caret lands at the bottom of the viewport.
-            CaretScroll::Bottom => caret_bottom - viewport_bottom + CARET_MARGIN,
-        };
-
-        if delta.abs() < 0.5 {
-            // Already there; keep the page where it is.
-            return Outcome::None;
-        }
-
-        Outcome::Some(Message::Preview(preview::Message::ScrollBy(delta)))
-    }
-}
-
-/// Measures the preview scrollable's viewport, then scrolls by whole or
-/// half pages — `Ctrl+D`/`Ctrl+U` and `PageDown`/`PageUp`, count times.
-struct PageScroll {
-    scroll_id: Id,
-    viewport: Option<Rectangle>,
-    page: Page,
-    count: usize,
-}
-
-impl Operation<Message> for PageScroll {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
-        operate(self);
-    }
-
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        _content_bounds: Rectangle,
-        _translation: Vector,
-        _state: &mut dyn Scrollable,
-    ) {
-        if Some(&self.scroll_id) == id {
-            self.viewport = Some(bounds);
-        }
-    }
-
-    fn finish(&self) -> Outcome<Message> {
-        let Some(viewport) = self.viewport else {
-            return Outcome::None;
-        };
-
-        // Like vim's scroll step, a page keeps a little context visible.
-        let full = (viewport.height - 2.0 * CARET_MARGIN).max(1.0);
-        let half = full / 2.0;
-
-        let (distance, sign) = match self.page {
-            Page::HalfDown => (half, 1.0),
-            Page::HalfUp => (half, -1.0),
-            Page::FullDown => (full, 1.0),
-            Page::FullUp => (full, -1.0),
-        };
-
-        Outcome::Some(Message::Preview(preview::Message::ScrollBy(
-            sign * distance * self.count.max(1) as f32,
-        )))
-    }
-}
-
 fn editor_style(
     palette: &Palette,
     _theme: &Theme,
@@ -1259,7 +1075,7 @@ impl<'a> PreviewViewer<'a> {
                 preview::element_selection(anchor, caret, element, preview_element.len())
             }),
             caret: focused.then_some(self.caret_column),
-            id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
+            id: focused.then(preview::caret_id),
             commented: matches!(
                 self.comments.mark_for(element, preview_element.len()),
                 comments::Mark::Commented | comments::Mark::Active
@@ -1402,7 +1218,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
             .width(Length::Fill)
             .padding([0, 8]),
         )
-        .id(Id::new(PREVIEW_SCROLL_ID))
+        .id(preview::scrollable_id())
         .direction(scrollable::Direction::Vertical(
             scrollable::Scrollbar::hidden(),
         ))
