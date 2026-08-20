@@ -16,7 +16,7 @@ use cli::{Args, ParseOutcome};
 use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
-use comments::{Comments, Mark, Span};
+use comments::Mark;
 use keymap::{Keymap, Mode, Transition};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
@@ -68,20 +68,13 @@ struct Editor {
     /// The fixed end of the visual-mode selection, as a caret position.
     /// `None` outside visual mode.
     visual_anchor: Option<CaretPosition>,
-    /// The text of the note popup.
-    note_text: text_editor::Content,
-    /// Saved comments, the active one, and the publish draft.
-    comments: Comments,
-    /// Manual override for the comments sidebar's visibility (`Ctrl+B`):
-    /// `None` follows the default — shown once there are comments.
-    sidebar_override: Option<bool>,
+    /// Comment store and workflow state, including the note composer and
+    /// sidebar visibility policy.
+    comments: comments::State,
     /// The find popup's state: the query and the current match.
     find: find::Find,
     /// The shortcuts Help window's query state.
     help: help::Help,
-    /// The comment the note popup edits, when it is open for editing an
-    /// existing comment instead of writing a fresh one.
-    editing_comment: Option<(usize, usize)>,
     /// The omarchy color scheme the interface paints with.
     palette: Palette,
 }
@@ -102,20 +95,7 @@ enum Message {
     ScrollPreviewBy(f32),
     ScrollPreviewPage(Page, usize),
     ScrollPreviewCaret(Placement),
-    OpenNotePopup,
-    CloseNotePopup,
-    EditNote(text_editor::Action),
-    SaveNote,
-    EditActiveComment,
-    NoteCardPressed,
-    CommentCardPressed(usize, usize),
-    DeleteComment(usize, usize),
-    ResolveComment(usize),
-    EditPublish(text_editor::Action),
-    PublishPressed,
-    AddGlobalComment,
-    NextComment,
-    ToggleSidebar,
+    Comments(comments::Message),
     OpenFind,
     CloseFind,
     OpenHelp,
@@ -148,16 +128,16 @@ fn message_for_command(command: Command) -> Message {
             PreviewCommand::ScrollPage(page, count) => Message::ScrollPreviewPage(page, count),
             PreviewCommand::ScrollCaret(placement) => Message::ScrollPreviewCaret(placement),
         },
-        Command::Comments(command) => match command {
-            CommentsCommand::OpenNote => Message::OpenNotePopup,
-            CommentsCommand::CloseNote => Message::CloseNotePopup,
-            CommentsCommand::SaveNote => Message::SaveNote,
-            CommentsCommand::EditActive => Message::EditActiveComment,
-            CommentsCommand::Next => Message::NextComment,
-            CommentsCommand::ToggleSidebar => Message::ToggleSidebar,
-            CommentsCommand::AddGlobal => Message::AddGlobalComment,
-            CommentsCommand::Publish => Message::PublishPressed,
-        },
+        Command::Comments(command) => Message::Comments(match command {
+            CommentsCommand::OpenNote => comments::Message::OpenComposer,
+            CommentsCommand::CloseNote => comments::Message::CloseComposer,
+            CommentsCommand::SaveNote => comments::Message::SaveComposer,
+            CommentsCommand::EditActive => comments::Message::EditActive,
+            CommentsCommand::Next => comments::Message::Cycle,
+            CommentsCommand::ToggleSidebar => comments::Message::ToggleSidebar,
+            CommentsCommand::AddGlobal => comments::Message::AddDraftAsGlobal,
+            CommentsCommand::Publish => comments::Message::PublishDraft,
+        }),
         Command::Find(command) => match command {
             FindCommand::Open => Message::OpenFind,
             FindCommand::Close => Message::CloseFind,
@@ -181,8 +161,10 @@ fn input_transition(message: &Message) -> Transition {
         Message::PreviewGPressed => Transition::GArmed,
         Message::PreviewZPressed => Transition::ZArmed,
         Message::PreviewCountPressed(digit) => Transition::CountPressed(*digit),
-        Message::OpenNotePopup => Transition::NoteOpened,
-        Message::CloseNotePopup | Message::SaveNote => Transition::NoteClosed,
+        Message::Comments(comments::Message::OpenComposer) => Transition::NoteOpened,
+        Message::Comments(comments::Message::CloseComposer | comments::Message::SaveComposer) => {
+            Transition::NoteClosed
+        }
         Message::OpenFind => Transition::FindOpened,
         Message::CloseFind => Transition::FindClosed,
         Message::OpenHelp => Transition::HelpOpened,
@@ -516,9 +498,7 @@ fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization) -> boo
     }
 
     if reset_document_bound_state {
-        editor.note_text = text_editor::Content::new();
-        editor.comments = Comments::new();
-        editor.editing_comment = None;
+        editor.comments = comments::State::new();
     }
 
     reveal
@@ -540,6 +520,39 @@ fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Me
             } else {
                 Transition::UnsavedClosed
             });
+            Task::none()
+        }
+    }
+}
+
+fn handle_comments_event(editor: &mut Editor, event: comments::Event) -> Task<Message> {
+    match event {
+        comments::Event::NavigateTo(anchor) => {
+            if editor.keymap.preview() {
+                editor.visual_anchor = None;
+                editor.caret.place(anchor);
+                reveal_preview_caret()
+            } else {
+                let source = editor.document.text();
+                let element = editor.preview_elements.elements().get(anchor.element);
+
+                if let Some(element) = element {
+                    editor.document.move_to(text_editor::Cursor {
+                        position: editing::position_at(&source, element.source().start),
+                        selection: None,
+                    });
+                    focus(Id::new(SOURCE_EDITOR_ID))
+                } else {
+                    Task::none()
+                }
+            }
+        }
+        comments::Event::FocusComposer => {
+            editor.keymap.note(Transition::NoteOpened);
+            focus(Id::new(NOTE_EDITOR_ID))
+        }
+        comments::Event::PublishRequested => {
+            // TODO: publish the comments
             Task::none()
         }
     }
@@ -642,61 +655,27 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 scroll,
             });
         }
-        Message::OpenNotePopup => {
-            return focus(Id::new(NOTE_EDITOR_ID));
-        }
-        Message::CloseNotePopup => {
-            // Dismissing the popup discards the draft, so the next note
-            // starts fresh instead of inheriting the escaped one.
-            editor.note_text = text_editor::Content::new();
-            editor.editing_comment = None;
-        }
-        Message::EditNote(action) => editor.note_text.perform(action),
-        Message::EditActiveComment => {
-            // Enter over the active comment opens it for editing, its text
-            // preloaded in the popup; without one, Enter does nothing.
-            if let Some(text) = editor.comments.active_text().map(str::to_owned) {
-                editor.note_text = text_editor::Content::with_text(&text);
-                editor.editing_comment = editor.comments.active_entry();
-                editor.keymap.note(Transition::NoteOpened);
+        Message::Comments(message) => {
+            let closes_composer = matches!(
+                &message,
+                comments::Message::DeleteComment(thread, entry)
+                    if editor.comments.editing_target() == Some((*thread, *entry))
+            );
+            let context = comments::Context {
+                caret: editor.caret.position(),
+                selection: editor
+                    .visual_anchor
+                    .map(|anchor| (anchor, editor.caret.position())),
+                composer_open: note_was_open,
+            };
+            let comments::Update { event } =
+                comments::update(&mut editor.comments, message, context);
 
-                return focus(Id::new(NOTE_EDITOR_ID));
-            }
-        }
-        Message::EditPublish(action) => editor.comments.edit_draft(action),
-        Message::AddGlobalComment => editor.comments.add_draft_as_global(),
-        Message::PublishPressed => {
-            // TODO: publish the comments
-        }
-        Message::NextComment => {
-            if let Some(anchor) = editor.comments.cycle() {
-                // Jump the caret to the comment and reveal it, so the mark
-                // is actually in view.
-                editor.visual_anchor = None;
-                editor.caret.place(anchor);
-
-                return reveal_preview_caret();
-            }
-        }
-        Message::SaveNote => {
-            if note_was_open {
-                save_note(editor);
-            }
-        }
-        Message::DeleteComment(thread, entry) => {
-            editor.comments.delete(thread, entry);
-
-            // Deleting the very comment the popup is editing closes the
-            // popup with a fresh note, like dismissing it would.
-            if editor.editing_comment == Some((thread, entry)) {
-                editor.editing_comment = None;
-                editor.note_text = text_editor::Content::new();
+            if closes_composer {
                 editor.keymap.note(Transition::NoteClosed);
             }
-        }
-        Message::ResolveComment(thread) => editor.comments.resolve(thread),
-        Message::ToggleSidebar => {
-            editor.sidebar_override = Some(!sidebar_shown(editor));
+
+            return event.map_or_else(Task::none, |event| handle_comments_event(editor, event));
         }
         Message::OpenFind => {
             return focus(Id::new(FIND_INPUT_ID));
@@ -729,35 +708,6 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                     return focus(Id::new(NOTE_EDITOR_ID));
                 }
                 if !editor.keymap.preview() {
-                    return focus(Id::new(SOURCE_EDITOR_ID));
-                }
-            }
-        }
-        // Clicks on the card itself are swallowed so they neither close the
-        // popup nor reach the preview beneath.
-        Message::NoteCardPressed => {}
-        Message::CommentCardPressed(thread, entry) => {
-            // Clicking a card makes its comment the active one and moves the
-            // cursor to the anchored element: the preview caret jumps there
-            // and the page reveals it; in write mode the source cursor lands
-            // on the element's source instead.
-            if let Some(anchor) = editor.comments.activate(thread, entry) {
-                if editor.keymap.preview() {
-                    editor.visual_anchor = None;
-                    editor.caret.place(anchor);
-
-                    return reveal_preview_caret();
-                }
-
-                let source = editor.document.text();
-                let element = editor.preview_elements.elements().get(anchor.element);
-
-                if let Some(element) = element {
-                    editor.document.move_to(text_editor::Cursor {
-                        position: editing::position_at(&source, element.source().start),
-                        selection: None,
-                    });
-
                     return focus(Id::new(SOURCE_EDITOR_ID));
                 }
             }
@@ -1061,7 +1011,9 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
                     shell.publish(Message::Help(help::Message::Close))
                 }
                 KeyboardGuardAction::CloseFind => shell.publish(Message::CloseFind),
-                KeyboardGuardAction::CloseNote => shell.publish(Message::CloseNotePopup),
+                KeyboardGuardAction::CloseNote => {
+                    shell.publish(Message::Comments(comments::Message::CloseComposer))
+                }
                 KeyboardGuardAction::CancelUnsaved => {
                     shell.publish(Message::Document(document::Message::UnsavedCancel))
                 }
@@ -1105,37 +1057,6 @@ fn keyboard_guard<'a>(content: Element<'a, Message>, keymap: Keymap) -> Element<
     }
 
     Element::new(KeyboardGuard { content, keymap })
-}
-
-/// Whether the comments sidebar is showing: the manual `Ctrl+B` override
-/// wins, otherwise it appears once there are comments.
-fn sidebar_shown(editor: &Editor) -> bool {
-    editor
-        .sidebar_override
-        .unwrap_or(!editor.comments.is_empty())
-}
-
-/// Saves the note popup text as a comment — editing the comment the popup
-/// was opened for, anchoring to the visual selection when there is one,
-/// or anchoring at the preview caret — then closes the popup with a fresh
-/// note. Empty notes are discarded.
-fn save_note(editor: &mut Editor) {
-    let text = editor.note_text.text();
-
-    if let Some((thread, entry)) = editor.editing_comment.take() {
-        editor.comments.activate(thread, entry);
-        editor.comments.edit_active(&text);
-    } else if let Some(anchor) = editor.visual_anchor {
-        // The popup opened over a visual selection: the comment anchors to
-        // exactly the selected text.
-        editor
-            .comments
-            .save_selection(&text, Span::new(anchor, editor.caret.position()));
-    } else {
-        editor.comments.save(&text, editor.caret.position());
-    }
-
-    editor.note_text = text_editor::Content::new();
 }
 
 /// Measures the preview scrollable and the caret element in the widget tree,
@@ -1365,7 +1286,7 @@ struct PreviewViewer<'a> {
     /// The `(anchor, caret)` endpoints of the visual-mode selection.
     visual: Option<(CaretPosition, CaretPosition)>,
     /// Saved comments, to know which elements carry one.
-    comments: &'a Comments,
+    comments: &'a comments::State,
     /// The find popup's query; its matches paint as highlights.
     find_query: &'a str,
     /// The current find match, as the element and range it lives in.
@@ -1757,7 +1678,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let sidebar_area: Element<'_, Message> = if sidebar_shown(editor) {
+    let sidebar_area: Element<'_, Message> = if editor.comments.sidebar_shown() {
         container(comments_sidebar(editor, palette))
             .width(Length::Fixed(SIDEBAR_WIDTH))
             .height(Length::Fill)
@@ -1830,7 +1751,7 @@ fn collapsed_sidebar_rail(editor: &Editor, palette: Palette) -> Element<'_, Mess
         .spacing(2)
         .align_x(alignment::Horizontal::Center),
     )
-    .on_press(Message::ToggleSidebar)
+    .on_press(Message::Comments(comments::Message::ToggleSidebar))
     .width(Length::Fill)
     .padding([10, 4])
     .style(move |theme, status| rail_button_style(palette, theme, status));
@@ -1930,7 +1851,7 @@ fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Mes
                         .size(13)
                         .color(palette.dark_foreground),
                     text_editor(editor.comments.draft())
-                        .on_action(Message::EditPublish)
+                        .on_action(|action| Message::Comments(comments::Message::EditDraft(action)))
                         .font(EDITOR_FONT)
                         .size(16)
                         .height(Length::Fixed(72.0))
@@ -1952,7 +1873,7 @@ fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Mes
                         .size(15)
                         .color(palette.foreground),
                 )
-                .on_press(Message::AddGlobalComment)
+                .on_press(Message::Comments(comments::Message::AddDraftAsGlobal))
                 .width(Length::Fill)
                 .padding([6, 12])
                 .style(move |_theme, status| add_button_style(&palette, status)),
@@ -1962,7 +1883,7 @@ fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Mes
                         .size(15)
                         .color(palette.foreground),
                 )
-                .on_press(Message::PublishPressed)
+                .on_press(Message::Comments(comments::Message::PublishDraft))
                 .width(Length::Fill)
                 .padding([6, 12])
                 .style(move |_theme, status| publish_button_style(&palette, status)),
@@ -2055,7 +1976,7 @@ fn comment_card(card: comments::CommentCard, palette: Palette) -> Element<'stati
                 .size(11)
                 .color(palette.light_foreground),
             )
-            .on_press(Message::ResolveComment(thread))
+            .on_press(Message::Comments(comments::Message::ResolveThread(thread)))
             .padding([2, 6])
             .style(move |theme, status| card_button_style(palette, theme, status)),
             button(
@@ -2064,7 +1985,9 @@ fn comment_card(card: comments::CommentCard, palette: Palette) -> Element<'stati
                     .size(11)
                     .color(palette.light_foreground),
             )
-            .on_press(Message::DeleteComment(thread, entry))
+            .on_press(Message::Comments(comments::Message::DeleteComment(
+                thread, entry,
+            )))
             .padding([2, 6])
             .style(move |theme, status| card_button_style(palette, theme, status)),
         ]
@@ -2079,7 +2002,9 @@ fn comment_card(card: comments::CommentCard, palette: Palette) -> Element<'stati
             .width(Length::Fill)
             .style(move |_theme| comment_card_style(&palette, card.active, card.resolved)),
     )
-    .on_press(Message::CommentCardPressed(thread, entry))
+    .on_press(Message::Comments(comments::Message::ActivateCard(
+        thread, entry,
+    )))
     .into();
 
     if card.depth == 0 {
@@ -2317,7 +2242,7 @@ fn background_style(palette: &Palette) -> container::Style {
 /// versions show as history, and Delete removes the comment.
 fn note_popup(editor: &Editor) -> Element<'_, Message> {
     let palette = editor.palette;
-    let editing = editor.editing_comment.is_some();
+    let editing = editor.comments.editing_target().is_some();
 
     let mut card_body = column![].spacing(12);
 
@@ -2347,9 +2272,9 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
     }
 
     card_body = card_body.push(
-        text_editor(&editor.note_text)
+        text_editor(editor.comments.composer())
             .id(Id::new(NOTE_EDITOR_ID))
-            .on_action(Message::EditNote)
+            .on_action(|action| Message::Comments(comments::Message::EditComposer(action)))
             .font(EDITOR_FONT)
             .size(20)
             .height(Length::Fixed(160.0))
@@ -2363,16 +2288,18 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
             .size(14)
             .color(palette.light_foreground),
     )
-    .on_press(Message::CloseNotePopup)
+    .on_press(Message::Comments(comments::Message::CloseComposer))
     .padding([6, 12])
     .style(move |theme, status| popup_button_style(&palette, theme, status))]
     .width(Length::Fill);
 
     // Deleting from the edit popup removes the comment outright.
-    if let Some((thread, entry)) = editor.editing_comment {
+    if let Some((thread, entry)) = editor.comments.editing_target() {
         buttons = buttons.push(
             button(text("Delete").font(EDITOR_FONT).size(14).color(palette.red))
-                .on_press(Message::DeleteComment(thread, entry))
+                .on_press(Message::Comments(comments::Message::DeleteComment(
+                    thread, entry,
+                )))
                 .padding([6, 12])
                 .style(move |theme, status| popup_button_style(&palette, theme, status)),
         );
@@ -2385,7 +2312,7 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
                 .size(14)
                 .color(palette.foreground),
         )
-        .on_press(Message::SaveNote)
+        .on_press(Message::Comments(comments::Message::SaveComposer))
         .padding([6, 12])
         .style(move |theme, status| popup_button_style(&palette, theme, status)),
     );
@@ -2398,7 +2325,7 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
             .padding(16)
             .style(move |_theme| note_card_style(&palette)),
     )
-    .on_press(Message::NoteCardPressed);
+    .on_press(Message::Comments(comments::Message::ComposerCardPressed));
 
     mouse_area(
         container(card)
@@ -2407,7 +2334,7 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
             .center(Length::Fill)
             .style(note_backdrop_style),
     )
-    .on_press(Message::CloseNotePopup)
+    .on_press(Message::Comments(comments::Message::CloseComposer))
     .into()
 }
 
@@ -2472,12 +2399,9 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         caret: Caret::new(),
         preview_elements: ElementMap::default(),
         visual_anchor: None,
-        note_text: text_editor::Content::new(),
-        comments: Comments::new(),
-        sidebar_override: None,
+        comments: comments::State::new(),
         find: find::Find::new(),
         help: help::Help::new(),
-        editing_comment: None,
         palette: Palette::current(),
     };
     synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
@@ -2527,9 +2451,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> iced::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::comments::{Comments, Mark};
+    use super::comments::{self, Mark};
     use super::find;
-    use super::keymap::{Keymap, Mode, Transition};
+    use super::keymap::{Keymap, Transition};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::theme::Palette;
     use super::{
@@ -2551,14 +2475,40 @@ mod tests {
             caret,
             preview_elements: ElementMap::parse(contents),
             visual_anchor: None,
-            note_text: iced::widget::text_editor::Content::new(),
-            comments: Comments::new(),
-            sidebar_override: None,
+            comments: comments::State::new(),
             find: find::Find::new(),
             help: super::help::Help::new(),
-            editing_comment: None,
             palette: Palette::default(),
         }
+    }
+
+    fn set_composer_text(editor: &mut Editor, text: &str) {
+        let _ = update(
+            editor,
+            Message::Comments(comments::Message::EditComposer(
+                iced::widget::text_editor::Action::SelectAll,
+            )),
+        );
+        let _ = update(
+            editor,
+            Message::Comments(comments::Message::EditComposer(
+                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(
+                    std::sync::Arc::new(text.to_owned()),
+                )),
+            )),
+        );
+    }
+
+    fn save_comment(editor: &mut Editor, text: &str) {
+        editor.keymap.note(Transition::NoteOpened);
+        set_composer_text(editor, text);
+        let _ = update(editor, Message::Comments(comments::Message::SaveComposer));
+    }
+
+    fn prepare_comment_edit(editor: &mut Editor, saved: &str, draft: &str) {
+        save_comment(editor, saved);
+        let _ = update(editor, Message::Comments(comments::Message::EditActive));
+        set_composer_text(editor, draft);
     }
 
     fn assert_projection_matches(editor: &Editor, contents: &str) {
@@ -2591,9 +2541,7 @@ mod tests {
             element: 0,
             column: 1,
         });
-        editor.comments.save("old note", editor.caret.position());
-        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
-        editor.editing_comment = Some((0, 0));
+        prepare_comment_edit(&mut editor, "old note", "draft");
 
         let reveal = synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
 
@@ -2608,8 +2556,8 @@ mod tests {
         );
         assert!(editor.visual_anchor.is_none());
         assert!(editor.comments.is_empty());
-        assert_eq!(editor.note_text.text(), "");
-        assert!(editor.editing_comment.is_none());
+        assert_eq!(editor.comments.composer().text(), "");
+        assert!(editor.comments.editing_target().is_none());
     }
 
     #[test]
@@ -2625,9 +2573,7 @@ mod tests {
             element: 0,
             column: 1,
         });
-        editor.comments.save("old note", editor.caret.position());
-        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
-        editor.editing_comment = Some((0, 0));
+        prepare_comment_edit(&mut editor, "old note", "draft");
         let path = std::path::PathBuf::from("/tmp/task-5-loaded.md");
         let contents = "# Loaded\n\nnew body";
 
@@ -2652,8 +2598,8 @@ mod tests {
         );
         assert!(editor.visual_anchor.is_none());
         assert!(editor.comments.is_empty());
-        assert_eq!(editor.note_text.text(), "");
-        assert!(editor.editing_comment.is_none());
+        assert_eq!(editor.comments.composer().text(), "");
+        assert!(editor.comments.editing_target().is_none());
     }
 
     #[test]
@@ -2695,9 +2641,7 @@ mod tests {
             column: 1,
         });
         editor.visual_anchor = visual_anchor;
-        editor.comments.save("keep me", editor.caret.position());
-        editor.note_text = iced::widget::text_editor::Content::with_text("draft");
-        editor.editing_comment = Some((0, 0));
+        prepare_comment_edit(&mut editor, "keep me", "draft");
         let contents = "# New\n\nnew body";
         std::fs::write(&path, contents).unwrap();
 
@@ -2717,8 +2661,8 @@ mod tests {
         );
         assert_eq!(editor.visual_anchor, visual_anchor);
         assert_eq!(editor.comments.len(), 1);
-        assert_eq!(editor.note_text.text(), "draft");
-        assert_eq!(editor.editing_comment, Some((0, 0)));
+        assert_eq!(editor.comments.composer().text(), "draft");
+        assert_eq!(editor.comments.editing_target(), Some((0, 0)));
 
         editor.caret.place(CaretPosition {
             element: 1,
@@ -2767,7 +2711,7 @@ mod tests {
             element: 0,
             column: 1,
         });
-        editor.comments.save("keep me", editor.caret.position());
+        save_comment(&mut editor, "keep me");
 
         let reveal = synchronize_source(&mut editor, SourceSynchronization::EnterPreview);
 
@@ -2798,12 +2742,9 @@ mod tests {
             caret: Caret::new(),
             preview_elements: ElementMap::parse("first\nsecond"),
             visual_anchor: None,
-            note_text: iced::widget::text_editor::Content::new(),
-            comments: Comments::new(),
-            sidebar_override: None,
+            comments: comments::State::new(),
             find: find::Find::new(),
             help: super::help::Help::new(),
-            editing_comment: None,
             palette: Palette::default(),
         };
         source.document.move_to(Cursor {
@@ -2966,68 +2907,6 @@ mod tests {
         );
     }
 
-    /// Saving the popup note stores a comment anchored at the caret and
-    /// resets the popup; empty notes are discarded.
-    #[test]
-    fn saving_a_note_adds_a_comment() {
-        let position = CaretPosition {
-            element: 1,
-            column: 2,
-        };
-        let mut editor = editor_at("# Title\n\nbody", position);
-        editor.note_text = iced::widget::text_editor::Content::with_text("  fix this  \n");
-        editor.keymap.note(Transition::NoteOpened);
-
-        let _ = update(&mut editor, Message::SaveNote);
-
-        assert!(!editor.keymap.note_open());
-        assert_eq!(editor.note_text.text(), "");
-        assert_eq!(editor.comments.len(), 1);
-        assert_eq!(
-            editor
-                .comments
-                .cards("# Title\n\nbody", editor.preview_elements.elements())[0]
-                .text,
-            "fix this"
-        );
-        // The freshly saved comment is the active one, anchored at the
-        // caret position (element 1, column 2).
-        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
-        assert_eq!(editor.comments.cycle(), Some(position));
-
-        // An empty note only closes the popup; the first comment stays.
-        editor.keymap.note(Transition::NoteOpened);
-        editor.note_text = iced::widget::text_editor::Content::with_text("   ");
-        let _ = update(&mut editor, Message::SaveNote);
-        assert_eq!(editor.comments.len(), 1);
-        assert!(!editor.keymap.note_open());
-    }
-
-    /// A note saved while the caret is inside a fenced code block anchors
-    /// on the code element: it carries the comment mark and its card
-    /// quotes the fenced source.
-    #[test]
-    fn comments_anchor_on_code_blocks() {
-        let markdown = "text\n\n```\ncode line\n```\n\nafter";
-        let mut editor = editor_at(
-            markdown,
-            CaretPosition {
-                element: 1,
-                column: 4,
-            },
-        );
-        editor.note_text = iced::widget::text_editor::Content::with_text("about the code");
-        editor.keymap.note(Transition::NoteOpened);
-
-        let _ = update(&mut editor, Message::SaveNote);
-
-        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
-        let cards = editor
-            .comments
-            .cards(markdown, editor.preview_elements.elements());
-        assert!(cards[0].quote.contains("```"));
-    }
-
     /// Clicking a comment card activates its comment and moves the cursor
     /// to the anchored element: the preview caret jumps there, and in
     /// write mode the source cursor lands on the element's source.
@@ -3042,9 +2921,7 @@ mod tests {
                 column: 3,
             },
         );
-        editor.note_text = iced::widget::text_editor::Content::with_text("note");
-        editor.keymap.note(Transition::NoteOpened);
-        let _ = update(&mut editor, Message::SaveNote);
+        save_comment(&mut editor, "note");
 
         // The caret wanders off before the card is clicked.
         editor.caret.place(CaretPosition {
@@ -3052,7 +2929,10 @@ mod tests {
             column: 0,
         });
 
-        let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
+        let _ = update(
+            &mut editor,
+            Message::Comments(comments::Message::ActivateCard(0, 0)),
+        );
 
         assert_eq!(
             editor.caret.position(),
@@ -3066,50 +2946,15 @@ mod tests {
         // In write mode the source cursor lands on the anchored element's
         // source instead.
         editor.keymap.note(Transition::PreviewToggled);
-        let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
+        let _ = update(
+            &mut editor,
+            Message::Comments(comments::Message::ActivateCard(0, 0)),
+        );
 
         assert_eq!(
             editor.document.content().cursor().position,
             Position { line: 4, column: 0 }
         );
-    }
-
-    /// Escaping the note popup discards the draft: the next `c` opens a
-    /// fresh popup instead of the half-written note.
-    #[test]
-    fn dismissing_the_note_popup_resets_its_text() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        editor.keymap.note(Transition::NoteOpened);
-        editor.note_text = iced::widget::text_editor::Content::with_text("half-written");
-
-        let _ = update(&mut editor, Message::CloseNotePopup);
-
-        assert!(!editor.keymap.note_open());
-        assert_eq!(editor.note_text.text(), "");
-        assert!(editor.comments.is_empty());
-    }
-
-    /// `Ctrl+S` with the popup closed saves no note.
-    #[test]
-    fn save_note_without_popup_is_a_no_op() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-
-        let _ = update(&mut editor, Message::SaveNote);
-
-        assert!(editor.comments.is_empty());
-        assert_eq!(editor.keymap.mode(), Mode::View);
     }
 
     /// Typing in the find popup selects the first match right away: as an
@@ -3172,163 +3017,5 @@ mod tests {
         let _ = update(&mut editor, Message::FindPrevious);
         let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
-    }
-
-    /// A note saved while visual mode holds a selection anchors to exactly
-    /// the selected text: the covered elements carry the mark, the card
-    /// quotes the joined source, and the active span reports its slices.
-    #[test]
-    fn notes_over_a_selection_comment_the_selected_text() {
-        let mut editor = editor_at(
-            "alpha\n\nbeta\n\ngamma",
-            CaretPosition {
-                element: 1,
-                column: 1,
-            },
-        );
-
-        // Visual mode anchors at the caret, which wanders to (2, 3).
-        editor.visual_anchor = Some(CaretPosition {
-            element: 1,
-            column: 1,
-        });
-        editor.caret.place(CaretPosition {
-            element: 2,
-            column: 3,
-        });
-
-        editor.keymap.note(Transition::NoteOpened);
-        editor.note_text = iced::widget::text_editor::Content::with_text("about the span");
-        let _ = update(&mut editor, Message::SaveNote);
-
-        assert_eq!(editor.comments.mark_for(1, 32), Mark::Active);
-        assert_eq!(editor.comments.mark_for(2, 32), Mark::Active);
-        assert_eq!(editor.comments.mark_for(0, 32), Mark::None);
-
-        let cards = editor
-            .comments
-            .cards("alpha\n\nbeta\n\ngamma", editor.preview_elements.elements());
-        assert_eq!(cards[0].quote, "eta gam");
-
-        // The active selection anchor reports the covered slices.
-        assert_eq!(editor.comments.anchor_selection_for(1, 4), Some(1..4));
-        assert_eq!(editor.comments.anchor_selection_for(2, 5), Some(0..3));
-    }
-
-    /// Enter over the active comment opens the note popup for editing —
-    /// the text preloaded, the popup titled so — and saving updates the
-    /// comment while keeping the old text as history. Without an active
-    /// comment, Enter does nothing at all.
-    #[test]
-    fn enter_edits_the_active_comment_end_to_end() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 1,
-                column: 0,
-            },
-        );
-        editor.note_text = iced::widget::text_editor::Content::with_text("first");
-        editor.keymap.note(Transition::NoteOpened);
-        let _ = update(&mut editor, Message::SaveNote);
-
-        // Without an active comment (deleted below), Enter is a no-op;
-        // here the fresh comment is active, so Enter opens it for editing.
-        let _ = update(&mut editor, Message::EditActiveComment);
-        assert!(editor.keymap.note_open());
-        assert_eq!(editor.editing_comment, Some((0, 0)));
-        assert_eq!(editor.note_text.text(), "first");
-
-        // Saving the edited text updates the comment and keeps history.
-        editor.note_text = iced::widget::text_editor::Content::with_text("  second take  ");
-        let _ = update(&mut editor, Message::SaveNote);
-
-        assert!(!editor.keymap.note_open());
-        assert_eq!(editor.comments.active_text(), Some("second take"));
-        assert_eq!(editor.comments.active_history(), ["first"]);
-        assert_eq!(editor.comments.len(), 1);
-
-        // Dismissing the edit popup keeps the original comment.
-        let _ = update(&mut editor, Message::EditActiveComment);
-        editor.note_text = iced::widget::text_editor::Content::with_text("nope");
-        let _ = update(&mut editor, Message::CloseNotePopup);
-        assert_eq!(editor.comments.active_text(), Some("second take"));
-        assert_eq!(editor.note_text.text(), "");
-        assert!(editor.editing_comment.is_none());
-
-        // With the comment deleted, Enter opens nothing.
-        let _ = update(&mut editor, Message::DeleteComment(0, 0));
-        let _ = update(&mut editor, Message::EditActiveComment);
-        assert!(!editor.keymap.note_open());
-    }
-
-    /// Comments grow threads through the app too: a second note on the
-    /// same element replies, replies render indented, and the thread's
-    /// resolve/delete work from the sidebar's buttons.
-    #[test]
-    fn comment_threads_grow_and_resolve_through_the_sidebar() {
-        let mut editor = editor_at(
-            "one\n\ntwo",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-
-        for text in ["root", "reply"] {
-            editor.keymap.note(Transition::NoteOpened);
-            editor.note_text = iced::widget::text_editor::Content::with_text(text);
-            let _ = update(&mut editor, Message::SaveNote);
-        }
-
-        assert_eq!(editor.comments.len(), 2);
-        let cards = editor
-            .comments
-            .cards("one\n\ntwo", editor.preview_elements.elements());
-        assert_eq!((cards[1].thread, cards[1].entry), (0, 1));
-        assert_eq!(cards[1].depth, 1);
-
-        // Resolving moves the whole thread to history.
-        let _ = update(&mut editor, Message::ResolveComment(0));
-        assert_eq!(editor.comments.mark_for(0, 32), Mark::None);
-
-        // Reopening brings the marks back.
-        let _ = update(&mut editor, Message::ResolveComment(0));
-        assert_eq!(editor.comments.mark_for(0, 32), Mark::Active);
-
-        // Deleting the reply leaves the root; deleting the root removes
-        // the thread.
-        let _ = update(&mut editor, Message::DeleteComment(0, 1));
-        assert_eq!(editor.comments.len(), 1);
-        let _ = update(&mut editor, Message::DeleteComment(0, 0));
-        assert!(editor.comments.is_empty());
-    }
-
-    /// Ctrl+Enter files the sidebar draft as a global comment, exactly
-    /// like pressing the Add button.
-    #[test]
-    fn ctrl_enter_adds_the_draft_as_a_global_comment() {
-        let mut editor = editor_at(
-            "text",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-
-        editor
-            .comments
-            .edit_draft(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Paste(std::sync::Arc::new(
-                    "  overall note  ".to_owned(),
-                )),
-            ));
-        let _ = update(&mut editor, Message::AddGlobalComment);
-
-        assert_eq!(editor.comments.len(), 1);
-        let cards = editor.comments.cards("", &[]);
-        assert_eq!(cards[0].label, Some("Global"));
-        assert_eq!(cards[0].text, "overall note");
-        assert_eq!(editor.comments.draft().text(), "");
     }
 }

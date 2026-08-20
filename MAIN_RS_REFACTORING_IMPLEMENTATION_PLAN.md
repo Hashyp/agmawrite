@@ -325,7 +325,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** this is a move-only change apart from module paths; all comments tests remain unchanged in meaning.
 
-## Task 10 — Add comments feature state, messages, reducer, and events
+## Task 10 — Add comments feature state, messages, reducer, and events ✅ Completed
 
 **Goal:** move comment workflow state and mutations out of root.
 
