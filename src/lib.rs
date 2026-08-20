@@ -10,6 +10,7 @@ mod interactive_text;
 mod keymap;
 mod preview;
 mod theme;
+mod watch;
 
 use cli::{Args, ParseOutcome};
 use command::{
@@ -96,7 +97,7 @@ enum Message {
     /// The save finished — carrying the exact snapshot that was written,
     /// so edits made while the save ran are not mistaken for saved.
     FileSaved(Result<std::path::PathBuf, String>, String),
-    FileChangedExternally,
+    DocumentWatch(document::watch::Event),
     TogglePreview,
     LinkClicked(markdown::Uri),
     MovePreviewCursor(Motion, usize),
@@ -444,41 +445,6 @@ impl<Message> canvas::Program<Message> for SaveIcon {
     }
 }
 
-async fn open_file() -> Option<(std::path::PathBuf, String)> {
-    let file = rfd::AsyncFileDialog::new()
-        .set_title("Open Markdown file")
-        .pick_file()
-        .await?;
-
-    let contents = String::from_utf8_lossy(&file.read().await).into_owned();
-
-    Some((file.path().to_path_buf(), contents))
-}
-
-/// Writes the editor contents to `path`, returning the path on success and
-/// the error message on failure (kept as a string so the message stays
-/// `Clone`).
-async fn save_file(
-    path: std::path::PathBuf,
-    contents: String,
-) -> Result<std::path::PathBuf, String> {
-    // The files this editor opens are small; a blocking write inside the
-    // task is fine.
-    std::fs::write(&path, contents)
-        .map_err(|error| format!("cannot save '{}': {error}", path.display()))?;
-
-    Ok(path)
-}
-
-async fn pick_save_path() -> Option<std::path::PathBuf> {
-    rfd::AsyncFileDialog::new()
-        .set_title("Save Markdown file")
-        .set_file_name("untitled.md")
-        .save_file()
-        .await
-        .map(|file| file.path().to_path_buf())
-}
-
 fn subscription(editor: &Editor) -> Subscription<Message> {
     let keys = keyboard::listen()
         .with(editor.keymap)
@@ -490,7 +456,12 @@ fn subscription(editor: &Editor) -> Subscription<Message> {
     let close = iced::window::close_requests().map(Message::WindowCloseRequested);
 
     match editor.document.path() {
-        Some(path) => Subscription::batch([keys, close, watch_file(path), watch_palette()]),
+        Some(path) => Subscription::batch([
+            keys,
+            close,
+            document::watch::subscription(path).map(Message::DocumentWatch),
+            watch_palette(),
+        ]),
         None => Subscription::batch([keys, close, watch_palette()]),
     }
 }
@@ -505,151 +476,18 @@ fn watch_palette() -> Subscription<Message> {
     Subscription::run_with(("omarchy-palette", state), move |(_, state)| {
         let state = state.clone();
         iced::stream::channel(1, move |sender| async move {
-            spawn_palette_watcher(state, sender);
+            watch::spawn_directory_events(state, sender, Message::PaletteChanged);
             // The events arrive on the watcher thread; this runner only
             // keeps the stream alive.
             std::future::pending::<()>().await;
         })
     })
-}
-
-/// Spawns the omarchy theme watcher: any change in the current-theme state
-/// directory forwards one reload.
-fn spawn_palette_watcher(
-    state: std::path::PathBuf,
-    mut sender: iced::futures::channel::mpsc::Sender<Message>,
-) {
-    std::thread::spawn(move || {
-        use notify::{RecursiveMode, Watcher};
-
-        if !state.is_dir() {
-            // Without omarchy there is nothing to watch; stay quiet.
-            return;
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher = match notify::recommended_watcher(tx) {
-            Ok(watcher) => watcher,
-            Err(_) => return,
-        };
-
-        if watcher.watch(&state, RecursiveMode::NonRecursive).is_err() {
-            return;
-        }
-
-        while let Ok(event) = rx.recv() {
-            let Ok(event) = event else { continue };
-
-            if !may_change_file(&event.kind) {
-                continue;
-            }
-
-            // A theme switch produces a burst of events; collapse it.
-            while rx.try_recv().is_ok() {}
-
-            match sender.try_send(Message::PaletteChanged) {
-                Ok(()) => {}
-                Err(error) if error.is_full() => {}
-                Err(_) => break,
-            }
-        }
-    });
-}
-
-/// Watches the opened file's directory and reloads it when it changes on
-/// disk — in write mode and preview alike.
-fn watch_file(path: &std::path::Path) -> Subscription<Message> {
-    Subscription::run_with(path.to_path_buf(), |path| {
-        let path = path.clone();
-
-        iced::stream::channel(1, move |sender| async move {
-            spawn_watcher(path, sender);
-            // The events arrive on the watcher thread; this runner only
-            // keeps the stream alive.
-            std::future::pending::<()>().await;
-        })
-    })
-}
-
-/// Spawns the filesystem watcher thread for `path`, forwarding one
-/// [`Message::FileChangedExternally`] per burst of events touching the
-/// file. Editors that save by rename-over are caught by watching the
-/// directory rather than the file itself.
-fn spawn_watcher(
-    path: std::path::PathBuf,
-    mut sender: iced::futures::channel::mpsc::Sender<Message>,
-) {
-    std::thread::spawn(move || {
-        use notify::{RecursiveMode, Watcher};
-
-        let Some(directory) = path.parent().map(std::path::Path::to_path_buf) else {
-            return;
-        };
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher = match notify::recommended_watcher(tx) {
-            Ok(watcher) => watcher,
-            Err(error) => {
-                eprintln!("agmawrite: cannot watch '{}': {error}", path.display());
-                return;
-            }
-        };
-
-        if let Err(error) = watcher.watch(&directory, RecursiveMode::NonRecursive) {
-            eprintln!("agmawrite: cannot watch '{}': {error}", directory.display());
-            return;
-        }
-
-        while let Ok(event) = rx.recv() {
-            let Ok(event) = event else { continue };
-
-            // Reading the file below produces Access events on Linux. If
-            // those events trigger another read, the watcher and editor
-            // form a feedback loop that consumes an entire CPU core.
-            if !may_change_file(&event.kind) {
-                continue;
-            }
-
-            let touches = event.paths.iter().any(|event_path| {
-                event_path == &path
-                    || event_path
-                        .canonicalize()
-                        .is_ok_and(|canonicalized| canonicalized == canonical)
-            });
-
-            if !touches {
-                continue;
-            }
-
-            // A save often produces a burst of events; collapse it into a
-            // single reload.
-            while rx.try_recv().is_ok() {}
-
-            if !forward_file_change(&mut sender) {
-                break;
-            }
-        }
-    });
-}
-
-fn may_change_file(kind: &notify::EventKind) -> bool {
-    !kind.is_access()
-}
-
-/// Queues a reload, treating a full one-item channel as an already queued
-/// reload rather than as a disconnected watcher.
-fn forward_file_change(sender: &mut iced::futures::channel::mpsc::Sender<Message>) -> bool {
-    match sender.try_send(Message::FileChangedExternally) {
-        Ok(()) => true,
-        Err(error) => error.is_full(),
-    }
 }
 
 /// Runs the action the unsaved-changes dialog was guarding.
 fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
     match action {
-        UnsavedAction::OpenFile => Task::perform(open_file(), Message::FileLoaded),
+        UnsavedAction::OpenFile => Task::perform(document::io::open(), Message::FileLoaded),
         UnsavedAction::CloseWindow(id) => iced::window::close(id),
     }
 }
@@ -668,11 +506,11 @@ fn start_save(editor: &Editor) -> Task<Message> {
         Some(path) => {
             let snapshot = editor.document.text();
             Task::perform(
-                save_file(path.to_path_buf(), snapshot.clone()),
+                document::io::save(path.to_path_buf(), snapshot.clone()),
                 move |result| Message::FileSaved(result, snapshot),
             )
         }
-        None => Task::perform(pick_save_path(), Message::SavePathChosen),
+        None => Task::perform(document::io::pick_save_path(), Message::SavePathChosen),
     }
 }
 
@@ -755,7 +593,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
-            return Task::perform(open_file(), Message::FileLoaded);
+            return Task::perform(document::io::open(), Message::FileLoaded);
         }
         Message::FileLoaded(Some((path, contents))) => {
             synchronize_source(
@@ -773,7 +611,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
             let snapshot = editor.document.text();
 
-            return Task::perform(save_file(path, snapshot.clone()), move |result| {
+            return Task::perform(document::io::save(path, snapshot.clone()), move |result| {
                 Message::FileSaved(result, snapshot)
             });
         }
@@ -823,14 +661,14 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             }
         }
         Message::PaletteChanged => editor.palette = Palette::current(),
-        Message::FileChangedExternally => {
+        Message::DocumentWatch(document::watch::Event::ChangedExternally) => {
             let Some(path) = editor.document.path() else {
                 return Task::none();
             };
 
             // Our own saves fire the watcher too; reload only when the
             // contents actually differ.
-            let Ok(contents) = std::fs::read_to_string(path) else {
+            let Ok(contents) = document::io::read(path) else {
                 return Task::none();
             };
 
@@ -2820,16 +2658,16 @@ fn popup_button_style(palette: &Palette, _theme: &Theme, status: button::Status)
 }
 
 fn boot(args: &Args) -> (Editor, Task<Message>) {
-    let contents = args
-        .path
-        .as_ref()
-        .map(|path| match std::fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(error) => {
-                eprintln!("agmawrite: cannot read '{path}': {error}");
-                std::process::exit(1);
-            }
-        });
+    let contents =
+        args.path.as_ref().map(
+            |path| match document::io::read(std::path::Path::new(path)) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    eprintln!("agmawrite: {error}");
+                    std::process::exit(1);
+                }
+            },
+        );
 
     let mut editor = Editor {
         document: document::State::new(
@@ -2903,8 +2741,8 @@ mod tests {
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::theme::Palette;
     use super::{
-        forward_file_change, keyboard_guard_action, may_change_file, synchronize_source, update,
-        Editor, KeyboardGuardAction, Message, SourceSynchronization,
+        keyboard_guard_action, synchronize_source, update, Editor, KeyboardGuardAction, Message,
+        SourceSynchronization,
     };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
@@ -3485,34 +3323,6 @@ mod tests {
         let _ = update(&mut editor, Message::FindPrevious);
         let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
-    }
-
-    /// Opening the watched file to reload it must not trigger another
-    /// reload; mutations still do.
-    #[test]
-    fn file_watcher_ignores_access_events() {
-        use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
-        use notify::EventKind;
-
-        assert!(!may_change_file(&EventKind::Access(AccessKind::Open(
-            AccessMode::Read,
-        ))));
-        assert!(may_change_file(&EventKind::Modify(ModifyKind::Data(
-            DataChange::Content,
-        ))));
-    }
-
-    /// A queued file-change message already represents the latest disk
-    /// state. A full channel must therefore coalesce, not kill the watcher.
-    #[test]
-    fn a_full_file_watcher_channel_stays_connected() {
-        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(0);
-
-        assert!(forward_file_change(&mut sender));
-        assert!(forward_file_change(&mut sender));
-
-        drop(receiver);
-        assert!(!forward_file_change(&mut sender));
     }
 
     /// Enter on a list line continues the list; Enter on an empty item

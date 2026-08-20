@@ -1,3 +1,6 @@
+pub(crate) mod io;
+pub(crate) mod watch;
+
 use iced::widget::text_editor;
 use std::path::{Path, PathBuf};
 

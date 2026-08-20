@@ -251,7 +251,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** search results show one coordinated projection path rather than several assignment clusters.
 
-## Task 6 — Extract document I/O and file watching
+## Task 6 — Extract document I/O and file watching ✅ Completed
 
 **Goal:** move filesystem/dialog mechanics out of the app without yet moving the lifecycle reducer.
 
