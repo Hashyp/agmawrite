@@ -91,10 +91,7 @@ impl Find {
 /// All matches over the preview elements, in document order: the element
 /// each match lives in and its grapheme range within it — the units the
 /// preview caret and highlights use.
-pub fn preview_matches(
-    elements: &[PreviewElement],
-    query: &str,
-) -> Vec<(usize, Range<usize>)> {
+pub fn preview_matches(elements: &[PreviewElement], query: &str) -> Vec<(usize, Range<usize>)> {
     elements
         .iter()
         .enumerate()
@@ -158,10 +155,7 @@ mod tests {
         let map = ElementMap::parse("one two\n\nthree ONE");
         let elements = map.elements();
 
-        assert_eq!(
-            preview_matches(elements, "one"),
-            vec![(0, 0..3), (1, 6..9)]
-        );
+        assert_eq!(preview_matches(elements, "one"), vec![(0, 0..3), (1, 6..9)]);
         assert!(preview_matches(elements, "zzz").is_empty());
         assert!(preview_matches(elements, "").is_empty());
     }

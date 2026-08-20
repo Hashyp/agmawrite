@@ -310,10 +310,7 @@ mod tests {
         // A marker beside a match: both survive, in order.
         assert_eq!(
             highlights("- item", "item"),
-            vec![
-                ("-".to_owned(), Marker),
-                ("item".to_owned(), FindMatch),
-            ]
+            vec![("-".to_owned(), Marker), ("item".to_owned(), FindMatch),]
         );
 
         // A match slicing through the middle of a marker range leaves the
@@ -329,9 +326,6 @@ mod tests {
         );
 
         // No query: markers only, exactly as before find existed.
-        assert_eq!(
-            highlights("- item", ""),
-            vec![("-".to_owned(), Marker)]
-        );
+        assert_eq!(highlights("- item", ""), vec![("-".to_owned(), Marker)]);
     }
 }

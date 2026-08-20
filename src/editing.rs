@@ -123,9 +123,7 @@ pub fn source_matches(text: &str, query: &str) -> Vec<SourceMatch> {
         .into_iter()
         .map(|range| {
             let line = text[..range.start].matches('\n').count();
-            let line_start = text[..range.start]
-                .rfind('\n')
-                .map_or(0, |index| index + 1);
+            let line_start = text[..range.start].rfind('\n').map_or(0, |index| index + 1);
             let start = text[line_start..range.start].chars().count();
             let end = start + text[range].chars().count();
 
@@ -235,9 +233,18 @@ mod tests {
     /// the end clamp to the text's end.
     #[test]
     fn maps_byte_offsets_to_editor_positions() {
-        assert_eq!(position_at("hello\nworld", 0), Position { line: 0, column: 0 });
-        assert_eq!(position_at("hello\nworld", 6), Position { line: 1, column: 0 });
-        assert_eq!(position_at("héllo\nworld", 8), Position { line: 1, column: 1 });
+        assert_eq!(
+            position_at("hello\nworld", 0),
+            Position { line: 0, column: 0 }
+        );
+        assert_eq!(
+            position_at("hello\nworld", 6),
+            Position { line: 1, column: 0 }
+        );
+        assert_eq!(
+            position_at("héllo\nworld", 8),
+            Position { line: 1, column: 1 }
+        );
         assert_eq!(position_at("hello", 99), Position { line: 0, column: 5 });
     }
 }

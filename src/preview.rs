@@ -865,7 +865,10 @@ fn main() {}
         let elements = parse(markdown);
 
         assert_eq!(elements.len(), 3);
-        assert_eq!(&markdown[elements[1].source()], "```rust\nfn main() {}\n```");
+        assert_eq!(
+            &markdown[elements[1].source()],
+            "```rust\nfn main() {}\n```"
+        );
         assert_eq!(elements[1].text(), "fn main() {}");
         assert_eq!(elements[1].len(), 12);
 
@@ -938,7 +941,9 @@ outro
         let mut caret = Caret::new();
         let mut motion = |from: CaretPosition, motion| {
             caret.place(from);
-            caret.move_by(&elements, motion, 1).then(|| caret.position())
+            caret
+                .move_by(&elements, motion, 1)
+                .then(|| caret.position())
         };
 
         // `l` walks the element one character at a time.
@@ -1004,7 +1009,9 @@ outro
         let mut caret = Caret::new();
         let mut word = |from: CaretPosition, motion| {
             caret.place(from);
-            caret.move_word(&elements, motion, 1).then(|| caret.position())
+            caret
+                .move_word(&elements, motion, 1)
+                .then(|| caret.position())
         };
 
         // w walks the word starts, comma included.

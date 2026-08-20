@@ -301,7 +301,10 @@ impl Comments {
     pub fn mark_for(&self, element: usize, len: usize) -> Mark {
         let marks = |thread: &Thread| !thread.resolved && thread.anchor.marks(element, len);
 
-        if self.active.is_some_and(|(index, _)| marks(&self.threads[index])) {
+        if self
+            .active
+            .is_some_and(|(index, _)| marks(&self.threads[index]))
+        {
             return Mark::Active;
         }
 
@@ -485,10 +488,9 @@ impl Comments {
                             quote(source, elements, position.element, COMMENT_QUOTE_MAX_CHARS),
                             None,
                         ),
-                        Anchor::Selection(span) => (
-                            span_quote(elements, span, COMMENT_QUOTE_MAX_CHARS),
-                            None,
-                        ),
+                        Anchor::Selection(span) => {
+                            (span_quote(elements, span, COMMENT_QUOTE_MAX_CHARS), None)
+                        }
                         Anchor::Global => (String::new(), Some("Global")),
                     };
 
@@ -609,10 +611,7 @@ fn slice_graphemes(text: &str, start: usize, end: usize) -> String {
     let start = start.min(total);
     let end = end.min(total).max(start);
 
-    text.graphemes(true)
-        .skip(start)
-        .take(end - start)
-        .collect()
+    text.graphemes(true).skip(start).take(end - start).collect()
 }
 
 /// Trims a comment's text.
@@ -936,18 +935,9 @@ mod tests {
         let mut comments = Comments::new();
         comments.save_selection("sel", span(pos(1, 2), pos(3, 1)));
 
-        assert_eq!(
-            comments.anchor_selection_for(1, lens(1)),
-            Some(2..4)
-        );
-        assert_eq!(
-            comments.anchor_selection_for(2, lens(2)),
-            Some(0..4)
-        );
-        assert_eq!(
-            comments.anchor_selection_for(3, lens(3)),
-            Some(0..1)
-        );
+        assert_eq!(comments.anchor_selection_for(1, lens(1)), Some(2..4));
+        assert_eq!(comments.anchor_selection_for(2, lens(2)), Some(0..4));
+        assert_eq!(comments.anchor_selection_for(3, lens(3)), Some(0..1));
         assert_eq!(comments.anchor_selection_for(0, lens(0)), None);
         assert_eq!(comments.anchor_selection_for(9, 4), None);
 

@@ -202,7 +202,9 @@ fn hex(value: &str) -> Option<Color> {
     }
 
     let channel = |range: std::ops::Range<usize>| {
-        u8::from_str_radix(digits.get(range)?, 16).ok().map(f32::from)
+        u8::from_str_radix(digits.get(range)?, 16)
+            .ok()
+            .map(f32::from)
     };
 
     Some(Color::from_rgb(
@@ -256,7 +258,10 @@ broken = \"nope\"
 
         let palette = Palette::from_colors(matte_black);
         assert!(!palette.light);
-        assert!(close(palette.background, Color::from_rgb8(0x12, 0x12, 0x12)));
+        assert!(close(
+            palette.background,
+            Color::from_rgb8(0x12, 0x12, 0x12)
+        ));
         assert!(close(palette.accent, Color::from_rgb8(0xe6, 0x8e, 0x0d)));
         assert!(close(palette.red, Color::from_rgb8(0xd3, 0x5f, 0x5f)));
         assert!(close(palette.green, Color::from_rgb8(0xff, 0xc1, 0x07)));
@@ -309,9 +314,7 @@ broken = \"nope\"
     /// palette instead of failing.
     #[test]
     fn missing_omarchy_state_yields_the_default() {
-        let palette = Palette::from_state(std::path::PathBuf::from(
-            "/nonexistent/omarchy/state",
-        ));
+        let palette = Palette::from_state(std::path::PathBuf::from("/nonexistent/omarchy/state"));
 
         assert!(close(palette.background, Palette::default().background));
         assert!(close(palette.accent, Palette::default().accent));
@@ -324,19 +327,13 @@ broken = \"nope\"
     /// directory.
     #[test]
     fn reads_the_current_omarchy_state_layout() {
-        let state = std::env::temp_dir().join(format!(
-            "agmawrite-theme-test-{}",
-            std::process::id()
-        ));
+        let state =
+            std::env::temp_dir().join(format!("agmawrite-theme-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&state);
 
         // Modern layout: theme directory with the colors copy.
         std::fs::create_dir_all(state.join("theme")).unwrap();
-        std::fs::write(
-            state.join("theme.name"),
-            "some-theme\n",
-        )
-        .unwrap();
+        std::fs::write(state.join("theme.name"), "some-theme\n").unwrap();
         std::fs::write(
             state.join("theme/colors.toml"),
             "mode = \"dark\"\naccent = \"#123456\"\nbackground = \"#abcdef\"\n",
@@ -357,11 +354,7 @@ broken = \"nope\"
             .unwrap_or_default();
         let user_theme = home.join(".config/omarchy/themes/some-theme");
         std::fs::create_dir_all(&user_theme).unwrap();
-        std::fs::write(
-            user_theme.join("colors.toml"),
-            "accent = \"#ffffff\"\n",
-        )
-        .unwrap();
+        std::fs::write(user_theme.join("colors.toml"), "accent = \"#ffffff\"\n").unwrap();
         let palette = Palette::from_state(state.clone());
         assert!(close(palette.accent, Color::from_rgb8(0x12, 0x34, 0x56)));
 
@@ -371,12 +364,10 @@ broken = \"nope\"
         std::fs::write(state.join("theme"), "some-theme\n").unwrap();
         let palette = Palette::from_state(state.clone());
         assert!(close(palette.accent, Color::from_rgb(1.0, 1.0, 1.0)));
-        assert!(close(
-            palette.background,
-            Palette::default().background
-        ));
+        assert!(close(palette.background, Palette::default().background));
 
         std::fs::remove_dir_all(&state).unwrap();
         let _ = std::fs::remove_dir(&user_theme);
         let _ = std::fs::remove_dir(home.join(".config/omarchy/themes"));
-    }}
+    }
+}

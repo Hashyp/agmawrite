@@ -186,7 +186,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** root no longer defines `Args`, `USAGE`, or `parse_args`.
 
-## Task 3 — Introduce the library/binary boundary
+## Task 3 — Introduce the library/binary boundary ✅ Completed
 
 **Goal:** make the binary a real entry point while preserving the current application as an intermediate state.
 

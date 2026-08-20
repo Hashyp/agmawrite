@@ -102,8 +102,8 @@ pub fn code<'a, M: 'a>(
     text_color: Color,
     find: FindHighlights,
 ) -> Element<'a, M> {
-    let span: text::Span<'static, markdown::Uri, Font> = text::Span::new(code.to_owned())
-        .font(settings.style.code_block_font);
+    let span: text::Span<'static, markdown::Uri, Font> =
+        text::Span::new(code.to_owned()).font(settings.style.code_block_font);
 
     Element::new(InteractiveText {
         spans: vec![span],
@@ -298,9 +298,7 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         // A commented span paints under everything else — the selection and
         // find matches stay readable on top of it.
         if let Some(span) = self.comment_span.clone() {
-            for bounds in
-                selection_rects(&state.paragraph, &text, span, width, line_height)
-            {
+            for bounds in selection_rects(&state.paragraph, &text, span, width, line_height) {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: bounds + translation,
