@@ -383,7 +383,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 4: Complete preview extraction
 
-## Task 13 — Turn `preview.rs` into a package without behavior changes
+## Task 13 — Turn `preview.rs` into a package without behavior changes ✅ Completed
 
 **Goal:** isolate the parsed model/caret code before adding feature/controller code.
 
