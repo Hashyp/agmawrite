@@ -484,7 +484,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 6: Make preview decorations extensible
 
-## Task 18 — Introduce a generic interactive-text decoration model
+## Task 18 — Introduce a generic interactive-text decoration model ✅ Completed
 
 **Goal:** remove the long positional argument list from `interactive_text::paragraph` and `interactive_text::code` without changing rendering.
 

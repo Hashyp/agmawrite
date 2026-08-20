@@ -10,74 +10,58 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const PARAGRAPH_PADDING: f32 = 4.0;
 
-/// The background of a visual-mode selection. Translucent blue: the white
-/// preview text stays clearly readable on top of it.
-const VISUAL_SELECTION_COLOR: Color = Color::from_rgba(0.25, 0.5, 1.0, 0.4);
+/// A caret painted at a grapheme column. The optional widget ID lets scroll
+/// operations locate the element containing the caret.
+#[derive(Debug, Clone)]
+pub struct CaretDecoration {
+    pub column: usize,
+    pub color: Color,
+    pub id: Option<Id>,
+}
 
-/// The background of a find match: translucent amber, distinct from
-/// the selection blue.
-const FIND_MATCH_COLOR: Color = Color::from_rgba(0.95, 0.75, 0.25, 0.4);
+/// A background painted behind a grapheme range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangedBackground {
+    pub range: std::ops::Range<usize>,
+    pub color: Color,
+}
 
-/// The background of the current find match: the same amber, brighter
-/// and more opaque, so it stands out from the rest of the matches.
-const CURRENT_FIND_MATCH_COLOR: Color = Color::from_rgba(0.98, 0.62, 0.15, 0.75);
+/// A background tint covering the whole interactive element.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WholeElementBackground {
+    pub color: Color,
+}
 
-/// The find highlights of an element: every match's grapheme range, and
-/// which of them is the current match.
+/// A vertical bar painted at the left edge of the interactive element.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GutterDecoration {
+    pub width: f32,
+    pub color: Color,
+}
+
+/// Generic decorations painted around Markdown text.
+///
+/// Ranged backgrounds are painted in vector order. The complete layer order
+/// is Markdown span backgrounds, the whole-element background and gutters,
+/// ranged backgrounds, the caret, and finally the text.
 #[derive(Debug, Clone, Default)]
-pub struct FindHighlights {
-    pub matches: Vec<std::ops::Range<usize>>,
-    pub current: Option<std::ops::Range<usize>>,
+pub struct TextDecorations {
+    pub whole_element_background: Option<WholeElementBackground>,
+    pub gutters: Vec<GutterDecoration>,
+    pub ranged_backgrounds: Vec<RangedBackground>,
+    pub caret: Option<CaretDecoration>,
 }
 
-impl FindHighlights {
-    /// No highlights at all.
-    pub fn none() -> Self {
-        Self::default()
-    }
-}
-
-/// The palette colors used by comment decorations in the preview. Keeping
-/// these outside the widget means a theme switch updates both the sidebar
-/// and the marks painted here.
-#[derive(Debug, Clone, Copy)]
-pub struct CommentColors {
-    pub commented_bar: Color,
-    pub active_bar: Color,
-    pub active_tint: Color,
-    pub commented_span_tint: Color,
-}
-
-const COMMENTED_BAR_WIDTH: f32 = 3.0;
-const ACTIVE_COMMENT_BAR_WIDTH: f32 = 4.0;
-
-#[allow(clippy::too_many_arguments)]
 pub fn paragraph<'a, M: 'a>(
     settings: markdown::Settings,
     text: &markdown::Text,
-    selection: Option<std::ops::Range<usize>>,
-    caret: Option<usize>,
-    id: Option<Id>,
-    commented: bool,
-    active_comment: bool,
-    comment_span: Option<std::ops::Range<usize>>,
-    comment_colors: CommentColors,
-    text_color: Color,
-    find: FindHighlights,
+    decorations: TextDecorations,
 ) -> Element<'a, M> {
     let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
 
     Element::new(InteractiveText {
         spans,
-        selection,
-        caret,
-        id,
-        commented,
-        active_comment,
-        comment_span,
-        comment_colors,
-        text_color,
-        find,
+        decorations,
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.font,
@@ -85,37 +69,19 @@ pub fn paragraph<'a, M: 'a>(
     })
 }
 
-/// A fenced code block in the preview: the same interactive decorations
-/// as a text element — caret, selection, comment marks, find matches —
-/// over monospace code.
-#[allow(clippy::too_many_arguments)]
+/// A fenced code block in the preview: the same generic decorations as a
+/// text element over monospace code.
 pub fn code<'a, M: 'a>(
     settings: markdown::Settings,
     code: &str,
-    selection: Option<std::ops::Range<usize>>,
-    caret: Option<usize>,
-    id: Option<Id>,
-    commented: bool,
-    active_comment: bool,
-    comment_span: Option<std::ops::Range<usize>>,
-    comment_colors: CommentColors,
-    text_color: Color,
-    find: FindHighlights,
+    decorations: TextDecorations,
 ) -> Element<'a, M> {
     let span: text::Span<'static, markdown::Uri, Font> =
         text::Span::new(code.to_owned()).font(settings.style.code_block_font);
 
     Element::new(InteractiveText {
         spans: vec![span],
-        selection,
-        caret,
-        id,
-        commented,
-        active_comment,
-        comment_span,
-        comment_colors,
-        text_color,
-        find,
+        decorations,
         size: settings.code_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.code_block_font,
@@ -125,24 +91,7 @@ pub fn code<'a, M: 'a>(
 
 struct InteractiveText<M> {
     spans: Vec<text::Span<'static, markdown::Uri, Font>>,
-    /// The grapheme columns of a visual-mode selection within this element.
-    selection: Option<std::ops::Range<usize>>,
-    caret: Option<usize>,
-    id: Option<Id>,
-    /// Whether a saved comment is anchored to this element.
-    commented: bool,
-    /// Whether this element belongs to the currently active comment.
-    active_comment: bool,
-    /// The grapheme columns of the selected text a comment was written for,
-    /// when the anchor is a span.
-    comment_span: Option<std::ops::Range<usize>>,
-    /// Theme colors for the comment bar and tint decorations.
-    comment_colors: CommentColors,
-    /// The color the caret and text decorations paint with — the palette's
-    /// foreground, so light themes keep a visible caret.
-    text_color: Color,
-    /// The element's find highlights: every match and the current one.
-    find: FindHighlights,
+    decorations: TextDecorations,
     size: Pixels,
     line_height: iced::advanced::text::LineHeight,
     font: Font,
@@ -262,97 +211,58 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
             }
         }
 
-        // Comment marks: the active comment tints the whole element and
-        // draws a bright bar, plain comments only the muted bar. A comment
-        // anchored to a selected span tints exactly that span instead.
+        // Whole-element decorations paint above Markdown span backgrounds and
+        // below every ranged annotation.
         let bounds = layout.bounds();
 
-        if self.active_comment {
+        if let Some(background) = self.decorations.whole_element_background {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds,
                     ..Default::default()
                 },
-                self.comment_colors.active_tint,
+                background.color,
             );
+        }
 
-            draw_comment_bar(
-                renderer,
-                bounds,
-                ACTIVE_COMMENT_BAR_WIDTH,
-                self.comment_colors.active_bar,
-            );
-        } else if self.commented {
-            draw_comment_bar(
-                renderer,
-                bounds,
-                COMMENTED_BAR_WIDTH,
-                self.comment_colors.commented_bar,
-            );
+        for gutter in &self.decorations.gutters {
+            draw_gutter(renderer, bounds, gutter.width, gutter.color);
         }
 
         let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
         let line_height = self.line_height.to_absolute(self.size).0;
         let width = state.paragraph.min_bounds().width;
 
-        // A commented span paints under everything else — the selection and
-        // find matches stay readable on top of it.
-        if let Some(span) = self.comment_span.clone() {
-            for bounds in selection_rects(&state.paragraph, &text, span, width, line_height) {
+        // Ranged annotations paint in model order. The preview supplies the
+        // comment span, ordinary find matches, current find match, and visual
+        // selection in that order.
+        for background in &self.decorations.ranged_backgrounds {
+            for bounds in selection_rects(
+                &state.paragraph,
+                &text,
+                background.range.clone(),
+                width,
+                line_height,
+            ) {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: bounds + translation,
                         ..Default::default()
                     },
-                    self.comment_colors.commented_span_tint,
+                    background.color,
                 );
             }
         }
 
-        // Find matches paint under the selection, so a selected match stays
-        // visibly selected; the current match paints on top of the others
-        // in its own, brighter color.
-        for range in &self.find.matches {
-            for bounds in
-                selection_rects(&state.paragraph, &text, range.clone(), width, line_height)
-            {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: bounds + translation,
-                        ..Default::default()
-                    },
-                    FIND_MATCH_COLOR,
-                );
-            }
-        }
-
-        if let Some(current) = self.find.current.clone() {
-            for bounds in selection_rects(&state.paragraph, &text, current, width, line_height) {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: bounds + translation,
-                        ..Default::default()
-                    },
-                    CURRENT_FIND_MATCH_COLOR,
-                );
-            }
-        }
-
-        if let Some(selection) = self.selection.clone() {
-            for bounds in selection_rects(&state.paragraph, &text, selection, width, line_height) {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: bounds + translation,
-                        ..Default::default()
-                    },
-                    VISUAL_SELECTION_COLOR,
-                );
-            }
-        }
-
-        if let Some(column) = self.caret {
+        if let Some(caret_decoration) = &self.decorations.caret {
             let origin = layout.position() + text_offset;
-            let point = caret_point(&state.paragraph, &text, column, width, line_height);
+            let point = caret_point(
+                &state.paragraph,
+                &text,
+                caret_decoration.column,
+                width,
+                line_height,
+            );
 
             let caret = Rectangle::new(
                 Point::new(origin.x + point.x, origin.y + point.y + 1.0),
@@ -363,7 +273,7 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
                     bounds: caret,
                     ..Default::default()
                 },
-                self.text_color,
+                caret_decoration.color,
             );
         }
 
@@ -382,14 +292,19 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         _renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        if let Some(id) = self.id.as_ref() {
+        if let Some(id) = self
+            .decorations
+            .caret
+            .as_ref()
+            .and_then(|caret| caret.id.as_ref())
+        {
             operation.container(Some(id), layout.bounds());
         }
     }
 }
 
-/// Draws the left-edge marker bar of a commented element.
-fn draw_comment_bar(renderer: &mut Renderer, bounds: Rectangle, width: f32, color: Color) {
+/// Draws a left-edge gutter on an interactive element.
+fn draw_gutter(renderer: &mut Renderer, bounds: Rectangle, width: f32, color: Color) {
     let bar = Rectangle::new(
         Point::new(bounds.x, bounds.y + 1.0),
         Size::new(width, (bounds.height - 2.0).max(2.0)),
@@ -552,5 +467,32 @@ fn draw_regions(
             },
             background,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RangedBackground, TextDecorations};
+    use iced::Color;
+
+    #[test]
+    fn text_decorations_preserve_ranged_background_insertion_order() {
+        let first = RangedBackground {
+            range: 1..3,
+            color: Color::BLACK,
+        };
+        let second = RangedBackground {
+            range: 2..5,
+            color: Color::WHITE,
+        };
+        let decorations = TextDecorations {
+            ranged_backgrounds: vec![first.clone(), second.clone()],
+            ..TextDecorations::default()
+        };
+
+        assert_eq!(decorations.ranged_backgrounds, vec![first, second]);
+        assert!(decorations.whole_element_background.is_none());
+        assert!(decorations.gutters.is_empty());
+        assert!(decorations.caret.is_none());
     }
 }
