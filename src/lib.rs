@@ -14,19 +14,16 @@ mod watch;
 
 use cli::{Args, ParseOutcome};
 use input::{
-    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, Keymap, Mode,
+    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, Keymap,
     PreviewCommand, Transition,
 };
 use theme::Palette;
-use ui::icons::{OpenFileIcon, PreviewIcon, SaveIcon, WriteIcon, ICON_BUTTON_SIZE, ICON_SIZE};
 
 use iced::widget::{
-    button, canvas, column, container, operation::focus, operation::focus_next, row, stack, text,
-    text_editor, tooltip, Id, Space,
+    column, container, operation::focus, operation::focus_next, row, stack, text_editor, Id, Space,
 };
 use iced::{
-    alignment, application, keyboard, Background, Border, Color, Element, Font, Length,
-    Subscription, Task, Theme,
+    application, keyboard, Background, Border, Element, Font, Length, Subscription, Task, Theme,
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -104,6 +101,15 @@ fn message_for_command(command: Command) -> Message {
             HelpCommand::Open => Message::OpenHelp,
             HelpCommand::Close => Message::Help(help::Message::Close),
         },
+    }
+}
+
+/// Maps toolbar-local actions at the app boundary.
+fn message_for_toolbar(message: ui::toolbar::Message) -> Message {
+    match message {
+        ui::toolbar::Message::Open => Message::Document(document::Message::OpenRequested),
+        ui::toolbar::Message::Save => Message::Document(document::Message::SaveRequested),
+        ui::toolbar::Message::TogglePreview => Message::Preview(preview::Message::Toggle),
     }
 }
 
@@ -387,28 +393,6 @@ fn editor_style(
     }
 }
 
-fn icon_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        text_color: match status {
-            button::Status::Hovered | button::Status::Pressed => palette.light_foreground,
-            _ => palette.foreground,
-        },
-        ..Default::default()
-    }
-}
-
-fn tooltip_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.15))),
-        text_color: Some(Color::WHITE),
-        border: Border {
-            radius: 3.0.into(),
-            ..Border::default()
-        },
-        ..Default::default()
-    }
-}
-
 /// Stable bottom-to-top ordering of the root editing surface and modal
 /// layers. The view consumes this order directly when constructing its
 /// stack, so integration tests can assert the same composition contract.
@@ -492,73 +476,14 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     let editing_area: Element<'_, Message> = editing_stack.into();
 
-    let open_button = tooltip(
-        button(
-            canvas(OpenFileIcon)
-                .width(Length::Fixed(ICON_SIZE))
-                .height(Length::Fixed(ICON_SIZE)),
-        )
-        .on_press(Message::Document(document::Message::OpenRequested))
-        .width(Length::Fixed(ICON_BUTTON_SIZE))
-        .height(Length::Fixed(ICON_BUTTON_SIZE))
-        .padding(0)
-        .style(move |theme, status| icon_button_style(&palette, theme, status)),
-        container(text("Ctrl + o, Open").font(EDITOR_FONT).size(12))
-            .padding([4, 8])
-            .style(tooltip_style),
-        iced::widget::tooltip::Position::Top,
-    );
-
-    // The preview toggle carries two icons: the eye invites switching to
-    // the preview while writing, and the pencil switches back to writing
-    // while previewing. One button, one shortcut — `Ctrl+P`.
-    let toggle_label = if editor.keymap.preview() {
-        "Ctrl + p, Write"
-    } else {
-        "Ctrl + p, Preview"
-    };
-
-    let icon_canvas: Element<'_, Message> = if editor.keymap.preview() {
-        canvas(WriteIcon)
-            .width(Length::Fixed(ICON_SIZE))
-            .height(Length::Fixed(ICON_SIZE))
-            .into()
-    } else {
-        canvas(PreviewIcon)
-            .width(Length::Fixed(ICON_SIZE))
-            .height(Length::Fixed(ICON_SIZE))
-            .into()
-    };
-
-    let toggle_button = tooltip(
-        button(icon_canvas)
-            .on_press(Message::Preview(preview::Message::Toggle))
-            .width(Length::Fixed(ICON_BUTTON_SIZE))
-            .height(Length::Fixed(ICON_BUTTON_SIZE))
-            .padding(0)
-            .style(move |theme, status| icon_button_style(&palette, theme, status)),
-        container(text(toggle_label).font(EDITOR_FONT).size(12))
-            .padding([4, 8])
-            .style(tooltip_style),
-        iced::widget::tooltip::Position::Top,
-    );
-
-    let save_button = tooltip(
-        button(
-            canvas(SaveIcon)
-                .width(Length::Fixed(ICON_SIZE))
-                .height(Length::Fixed(ICON_SIZE)),
-        )
-        .on_press(Message::Document(document::Message::SaveRequested))
-        .width(Length::Fixed(ICON_BUTTON_SIZE))
-        .height(Length::Fixed(ICON_BUTTON_SIZE))
-        .padding(0)
-        .style(move |theme, status| icon_button_style(&palette, theme, status)),
-        container(text("Ctrl + s, Save").font(EDITOR_FONT).size(12))
-            .padding([4, 8])
-            .style(tooltip_style),
-        iced::widget::tooltip::Position::Top,
-    );
+    let toolbar = ui::toolbar::view(ui::toolbar::Model::new(
+        editor.keymap.preview(),
+        editor.keymap.preview_only(),
+        editor.keymap.mode(),
+        editor.keymap.pending_count(),
+        palette,
+    ))
+    .map(message_for_toolbar);
 
     // The main column: top margin, the writing area, and the bottom
     // controls. It fills the space between the window's 5% side margins,
@@ -570,24 +495,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         container(editing_area)
             .width(Length::Fill)
             .height(Length::FillPortion(8)),
-        {
-            let mut controls: Vec<Element<'_, Message>> =
-                vec![open_button.into(), save_button.into()];
-
-            if !editor.keymap.preview_only() {
-                controls.push(toggle_button.into());
-            }
-
-            controls.push(mode_badge(editor));
-
-            controls.push(Space::new().width(Length::Fill).height(Length::Fill).into());
-
-            row(controls)
-                .width(Length::Fill)
-                .height(Length::FillPortion(1))
-                .spacing(4)
-                .align_y(alignment::Vertical::Bottom)
-        },
+        toolbar,
     ]
     .width(Length::Fill)
     .height(Length::Fill);
@@ -655,58 +563,6 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     }
 
     input::guard(layers.into(), editor.keymap, message_for_guard_action)
-}
-
-/// A small badge naming the current mode, placed next to the open icon in
-/// the bottom bar. Visual mode is highlighted with the selection blue so
-/// the active selection state is obvious at a glance; the note mode with
-/// the comment amber. Badge and keys read the same representation: the
-/// keymap's mode.
-fn mode_badge(editor: &Editor) -> Element<'_, Message> {
-    let mode = editor.keymap.mode();
-    let palette = editor.palette;
-
-    let (label, color) = match mode {
-        Mode::Visual => ("VISUAL", palette.blue),
-        Mode::Note => ("NOTE", palette.yellow),
-        Mode::Find => ("FIND", palette.orange),
-        Mode::View => ("VIEW", palette.light_foreground),
-        Mode::Write => ("WRITE", palette.light_foreground),
-    };
-
-    // A pending count shows beside the mode, like vim's cmdline — the `3`
-    // of a `3j` waiting for its motion.
-    let label = if editor.keymap.pending_count() > 0 {
-        format!("{} {}", editor.keymap.pending_count(), label)
-    } else {
-        label.to_owned()
-    };
-
-    container(text(label).font(EDITOR_FONT).size(12).color(color))
-        // The extra bottom padding pushes the label a few pixels up, level
-        // with the icon glyphs beside it instead of below them.
-        .padding(iced::Padding {
-            top: 0.0,
-            right: 8.0,
-            bottom: 4.0,
-            left: 8.0,
-        })
-        .height(Length::Fixed(ICON_BUTTON_SIZE))
-        .align_y(alignment::Vertical::Center)
-        .style(move |_theme| mode_badge_style(color))
-        .into()
-}
-
-fn mode_badge_style(color: Color) -> container::Style {
-    container::Style {
-        text_color: Some(color),
-        border: Border {
-            color: Color { a: 0.4, ..color },
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
 }
 
 fn background_style(palette: &Palette) -> container::Style {
@@ -791,7 +647,8 @@ mod tests {
     use super::input::{Keymap, Transition};
     use super::preview::{self, CaretPosition};
     use super::theme::Palette;
-    use super::{root_layer_order, update, Editor, Message, RootLayer};
+    use super::ui::toolbar;
+    use super::{message_for_toolbar, root_layer_order, update, Editor, Message, RootLayer};
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -853,6 +710,37 @@ mod tests {
 
     fn enter_visual(editor: &mut Editor) {
         let _ = update(editor, Message::Preview(preview::Message::ToggleVisual));
+    }
+
+    #[test]
+    fn toolbar_actions_map_to_document_and_preview_interactions() {
+        assert!(matches!(
+            message_for_toolbar(toolbar::Message::Open),
+            Message::Document(super::document::Message::OpenRequested)
+        ));
+        assert!(matches!(
+            message_for_toolbar(toolbar::Message::Save),
+            Message::Document(super::document::Message::SaveRequested)
+        ));
+        assert!(matches!(
+            message_for_toolbar(toolbar::Message::TogglePreview),
+            Message::Preview(preview::Message::Toggle)
+        ));
+
+        let mut editor = editor_at(
+            "body",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        assert!(editor.keymap.preview());
+
+        let _ = update(
+            &mut editor,
+            message_for_toolbar(toolbar::Message::TogglePreview),
+        );
+        assert!(!editor.keymap.preview());
     }
 
     #[test]

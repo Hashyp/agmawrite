@@ -592,7 +592,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app wraps its layers with one input guard call and maps actions; `src/input/` contains no app imports.
 
-## Task 24 — Extract toolbar and mode badge
+## Task 24 — Extract toolbar and mode badge ✅ Completed
 
 **Goal:** move bottom controls and their styles out of app.
 
