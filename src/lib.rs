@@ -16,7 +16,6 @@ use cli::{Args, ParseOutcome};
 use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
-use comments::Mark;
 use keymap::{Keymap, Mode, Transition};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
@@ -26,9 +25,9 @@ use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
 use iced::widget::markdown::Catalog as _;
 use iced::widget::{
-    button, canvas, column, container, markdown, mouse_area, operation::focus,
-    operation::focus_next, operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack,
-    text, text_editor, text_input, tooltip, Id, Space,
+    button, canvas, column, container, markdown, operation::focus, operation::focus_next,
+    operation::scroll_by, operation::AbsoluteOffset, row, scrollable, stack, text, text_editor,
+    text_input, tooltip, Id, Space,
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
@@ -310,51 +309,6 @@ impl<Message> canvas::Program<Message> for WriteIcon {
         frame.stroke(&body, stroke());
         frame.stroke(&band, stroke());
         frame.stroke(&edge, stroke());
-
-        vec![frame.into_geometry()]
-    }
-}
-
-/// The comments icon of the collapsed sidebar rail: a speech bubble in
-/// the same stroke style as the other icons.
-struct CommentsIcon;
-
-impl<Message> canvas::Program<Message> for CommentsIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
-
-        // A rounded speech bubble with a tail at the bottom-left.
-        let bubble = canvas::Path::new(|path| {
-            path.move_to(Point::new(8.0, 2.5));
-            path.quadratic_curve_to(Point::new(13.5, 2.5), Point::new(13.5, 7.0));
-            path.quadratic_curve_to(Point::new(13.5, 10.5), Point::new(9.5, 10.8));
-            path.line_to(Point::new(6.0, 13.0));
-            path.line_to(Point::new(6.4, 10.5));
-            path.quadratic_curve_to(Point::new(2.5, 10.2), Point::new(2.5, 7.0));
-            path.quadratic_curve_to(Point::new(2.5, 2.5), Point::new(8.0, 2.5));
-            path.close();
-        });
-
-        frame.stroke(&bubble, stroke());
 
         vec![frame.into_geometry()]
     }
@@ -1384,9 +1338,10 @@ impl<'a> PreviewViewer<'a> {
             id: focused.then(|| Id::new(PREVIEW_CARET_ID)),
             commented: matches!(
                 self.comments.mark_for(element, preview_element.len()),
-                Mark::Commented | Mark::Active
+                comments::Mark::Commented | comments::Mark::Active
             ),
-            active_comment: self.comments.mark_for(element, preview_element.len()) == Mark::Active,
+            active_comment: self.comments.mark_for(element, preview_element.len())
+                == comments::Mark::Active,
             comment_span: self
                 .comments
                 .anchor_selection_for(element, preview_element.len()),
@@ -1678,14 +1633,17 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    let sidebar_area: Element<'_, Message> = if editor.comments.sidebar_shown() {
-        container(comments_sidebar(editor, palette))
-            .width(Length::Fixed(SIDEBAR_WIDTH))
-            .height(Length::Fill)
-            .into()
-    } else {
-        collapsed_sidebar_rail(editor, palette)
-    };
+    let source = editor.document.text();
+    let sidebar_area = comments::sidebar::view(
+        &editor.comments,
+        comments::sidebar::ViewContext {
+            source: &source,
+            preview_elements: editor.preview_elements.elements(),
+            palette,
+            font: EDITOR_FONT,
+        },
+    )
+    .map(Message::Comments);
 
     let content: Element<'_, Message> = container(
         row![container(main_with_margins)
@@ -1720,460 +1678,6 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     }
 
     keyboard_guard(layers.into(), editor.keymap)
-}
-
-/// The width of the comments sidebar on the right.
-const SIDEBAR_WIDTH: f32 = 340.0;
-
-/// The collapsed sidebar's rail at the window's right edge: the visual
-/// indication that a sidebar exists and where it went. Its button expands
-/// the sidebar (`Ctrl+B` too), and the count under the icon shows how many
-/// comments wait inside.
-fn collapsed_sidebar_rail(editor: &Editor, palette: Palette) -> Element<'_, Message> {
-    let expand_button = button(
-        column![
-            canvas(CommentsIcon)
-                .width(Length::Fixed(ICON_SIZE))
-                .height(Length::Fixed(ICON_SIZE)),
-            text(if editor.comments.is_empty() {
-                String::new()
-            } else {
-                editor.comments.len().to_string()
-            })
-            .font(EDITOR_FONT)
-            .size(11)
-            .color(if editor.comments.is_empty() {
-                palette.dark_foreground
-            } else {
-                palette.accent
-            }),
-        ]
-        .spacing(2)
-        .align_x(alignment::Horizontal::Center),
-    )
-    .on_press(Message::Comments(comments::Message::ToggleSidebar))
-    .width(Length::Fill)
-    .padding([10, 4])
-    .style(move |theme, status| rail_button_style(palette, theme, status));
-
-    tooltip(
-        container(
-            container(expand_button)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_y(alignment::Vertical::Center),
-        )
-        .width(Length::Fixed(44.0))
-        .height(Length::Fill)
-        .padding(0)
-        .style(move |_theme| sidebar_rail_style(palette)),
-        container(
-            text(format!("Ctrl + b, Comments ({})", editor.comments.len()))
-                .font(EDITOR_FONT)
-                .size(12),
-        )
-        .padding([4, 8])
-        .style(tooltip_style),
-        iced::widget::tooltip::Position::Left,
-    )
-    .into()
-}
-
-/// The comments sidebar: a full-height panel with a scrollable tree of
-/// comment threads — the root quoting the Markdown source it was written
-/// for, replies indented under it — a resolved-history section below, and
-/// a free text field with Add and Publish buttons at the bottom.
-fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Message> {
-    let source = editor.document.text();
-    let cards = editor
-        .comments
-        .cards(&source, editor.preview_elements.elements());
-
-    let open: Vec<Element<'_, Message>> = cards
-        .iter()
-        .filter(|card| !card.resolved)
-        .map(|card| comment_card(card.clone(), palette))
-        .collect();
-    let resolved: Vec<Element<'_, Message>> = cards
-        .iter()
-        .filter(|card| card.resolved)
-        .map(|card| comment_card(card.clone(), palette))
-        .collect();
-
-    let mut list: Vec<Element<'_, Message>> = Vec::new();
-
-    if open.is_empty() && resolved.is_empty() {
-        list.push(
-            text("No comments yet — press c in the preview or write one below.")
-                .font(EDITOR_FONT)
-                .size(13)
-                .color(palette.dark_foreground)
-                .into(),
-        );
-    }
-
-    list.extend(open);
-
-    // Resolved threads are the history section — kept, dimmed, reopenable.
-    if !resolved.is_empty() {
-        list.push(
-            text(format!("RESOLVED ({})", resolved.len()))
-                .font(EDITOR_FONT)
-                .size(13)
-                .color(palette.dark_foreground)
-                .into(),
-        );
-        list.extend(resolved);
-    }
-
-    container(
-        column![
-            container(
-                text(format!("COMMENTS ({})", editor.comments.len()))
-                    .font(EDITOR_FONT)
-                    .size(13)
-                    .color(palette.light_foreground),
-            )
-            .padding(iced::Padding {
-                top: 4.0,
-                ..iced::Padding::new(0.0)
-            }),
-            scrollable(column(list).spacing(8).width(Length::Fill))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .direction(scrollable::Direction::Vertical(
-                    scrollable::Scrollbar::hidden(),
-                )),
-            container(
-                column![
-                    text("Write a comment…")
-                        .font(EDITOR_FONT)
-                        .size(13)
-                        .color(palette.dark_foreground),
-                    text_editor(editor.comments.draft())
-                        .on_action(|action| Message::Comments(comments::Message::EditDraft(action)))
-                        .font(EDITOR_FONT)
-                        .size(16)
-                        .height(Length::Fixed(72.0))
-                        .padding(6)
-                        .style(move |theme, status| {
-                            publish_editor_style(&palette, theme, status)
-                        }),
-                ]
-                .spacing(4)
-                .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .padding(6)
-            .style(move |_theme| publish_field_style(&palette)),
-            row![
-                button(
-                    text("Add")
-                        .font(EDITOR_FONT)
-                        .size(15)
-                        .color(palette.foreground),
-                )
-                .on_press(Message::Comments(comments::Message::AddDraftAsGlobal))
-                .width(Length::Fill)
-                .padding([6, 12])
-                .style(move |_theme, status| add_button_style(&palette, status)),
-                button(
-                    text("Publish")
-                        .font(EDITOR_FONT)
-                        .size(15)
-                        .color(palette.foreground),
-                )
-                .on_press(Message::Comments(comments::Message::PublishDraft))
-                .width(Length::Fill)
-                .padding([6, 12])
-                .style(move |_theme, status| publish_button_style(&palette, status)),
-            ]
-            .spacing(8)
-            .width(Length::Fill),
-        ]
-        .spacing(8)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(iced::Padding {
-        top: 8.0,
-        bottom: 8.0,
-        left: 8.0,
-        right: 8.0,
-    })
-    .style(move |_theme| sidebar_style(&palette))
-    .into()
-}
-
-/// One comment card: the root of its thread quotes the anchored source (or
-/// carries the Global label), replies indent under it. Every card carries
-/// its resolve toggle and delete; the active comment glows.
-fn comment_card(card: comments::CommentCard, palette: Palette) -> Element<'static, Message> {
-    let thread = card.thread;
-    let entry = card.entry;
-
-    // Anchored comments quote their element's source; global comments show
-    // their label instead. Only the thread's root carries it.
-    let caption = card
-        .label
-        .map(str::to_owned)
-        .unwrap_or_else(|| card.quote.clone());
-
-    let mut body = column![].spacing(4);
-
-    if card.first && !caption.is_empty() {
-        body = body.push(
-            text(if card.resolved {
-                format!("✓ {caption}")
-            } else {
-                caption
-            })
-            .font(EDITOR_FONT)
-            .size(13)
-            .color(if card.active {
-                palette.accent
-            } else {
-                palette.dark_foreground
-            }),
-        );
-    }
-
-    // The comment text, with its edit count when it has history.
-    let mut text_row =
-        row![text(card.text.clone())
-            .font(EDITOR_FONT)
-            .size(15)
-            .color(if card.resolved {
-                palette.dark_foreground
-            } else {
-                palette.foreground
-            }),]
-        .align_y(alignment::Vertical::Top);
-
-    if card.history > 0 {
-        text_row = text_row.push(
-            text(format!("(edited ×{})", card.history))
-                .font(EDITOR_FONT)
-                .size(11)
-                .color(palette.dark_foreground),
-        );
-    }
-
-    body = body.push(text_row);
-
-    // Per-card actions: resolve or reopen the thread, delete the comment.
-    body = body.push(
-        row![
-            button(
-                text(if card.resolved {
-                    "↺ Reopen"
-                } else {
-                    "✓ Resolve"
-                })
-                .font(EDITOR_FONT)
-                .size(11)
-                .color(palette.light_foreground),
-            )
-            .on_press(Message::Comments(comments::Message::ResolveThread(thread)))
-            .padding([2, 6])
-            .style(move |theme, status| card_button_style(palette, theme, status)),
-            button(
-                text("× Delete")
-                    .font(EDITOR_FONT)
-                    .size(11)
-                    .color(palette.light_foreground),
-            )
-            .on_press(Message::Comments(comments::Message::DeleteComment(
-                thread, entry,
-            )))
-            .padding([2, 6])
-            .style(move |theme, status| card_button_style(palette, theme, status)),
-        ]
-        .spacing(4),
-    );
-
-    // The card is a button: clicking it activates its comment and moves the
-    // cursor to the anchored element. Replies indent by their depth.
-    let card_element: Element<'_, Message> = mouse_area(
-        container(body)
-            .padding(8)
-            .width(Length::Fill)
-            .style(move |_theme| comment_card_style(&palette, card.active, card.resolved)),
-    )
-    .on_press(Message::Comments(comments::Message::ActivateCard(
-        thread, entry,
-    )))
-    .into();
-
-    if card.depth == 0 {
-        card_element
-    } else {
-        container(card_element)
-            .padding(iced::Padding {
-                left: 14.0 * card.depth as f32,
-                ..iced::Padding::new(0.0)
-            })
-            .width(Length::Fill)
-            .into()
-    }
-}
-
-fn sidebar_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(palette.dark_background)),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-/// The collapsed sidebar's rail: a slim strip at the window's right edge
-/// marking where the sidebar went.
-fn sidebar_rail_style(palette: Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(palette.dark_background)),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-fn rail_button_style(palette: Palette, _theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
-                Palette::lightened(palette.darker_background, 0.15),
-            )),
-            _ => None,
-        },
-        ..Default::default()
-    }
-}
-
-/// A comment card: a dark surface with the active comment glowing in the
-/// accent color; resolved history dims to the background.
-fn comment_card_style(palette: &Palette, active: bool, resolved: bool) -> container::Style {
-    let (background, border) = if active {
-        (
-            Background::Color(palette.tint(palette.accent, 0.1)),
-            palette.accent,
-        )
-    } else if resolved {
-        (
-            Background::Color(palette.dark_background),
-            palette.dark_foreground,
-        )
-    } else {
-        (Background::Color(palette.darker_background), palette.muted)
-    };
-
-    container::Style {
-        background: Some(background),
-        border: Border {
-            color: border,
-            width: if active { 1.5 } else { 1.0 },
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-/// The quiet inline buttons of a comment card: resolve and delete.
-fn card_button_style(palette: Palette, _theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
-                Palette::lightened(palette.darker_background, 0.25),
-            )),
-            _ => None,
-        },
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-/// The publish text field stands out with a lighter surface than the
-/// comment cards and a clearly visible border.
-fn publish_field_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(palette.lighter_background)),
-        border: Border {
-            color: palette.light_foreground,
-            width: 1.5,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-/// The editor inside the publish field keeps its own light surface so the
-/// two nested boxes read as one input control.
-fn publish_editor_style(
-    palette: &Palette,
-    _theme: &Theme,
-    _status: text_editor::Status,
-) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Palette::lightened(palette.lighter_background, 0.18)),
-        border: Border::default(),
-        placeholder: palette.foreground,
-        value: palette.foreground,
-        selection: Palette::lightened(palette.selection, 0.15),
-    }
-}
-
-/// The Add button sits beside Publish as the quieter, secondary action:
-/// it files the draft as a global comment.
-fn add_button_style(palette: &Palette, status: button::Status) -> button::Style {
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
-                Palette::lightened(palette.darker_background, 0.3),
-            )),
-            _ => Some(Background::Color(palette.darker_background)),
-        },
-        border: Border {
-            color: match status {
-                button::Status::Hovered | button::Status::Pressed => palette.light_foreground,
-                _ => palette.muted,
-            },
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-/// The Publish button spans the sidebar width and reads as the primary
-/// action of the panel.
-fn publish_button_style(palette: &Palette, status: button::Status) -> button::Style {
-    let base = Palette::darkened(palette.blue, 0.55);
-    let hover = Palette::darkened(palette.blue, 0.4);
-
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(hover)),
-            _ => Some(Background::Color(base)),
-        },
-        border: Border {
-            color: Palette::lightened(palette.blue, 0.2),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
 }
 
 /// A small badge naming the current mode, placed next to the open icon in

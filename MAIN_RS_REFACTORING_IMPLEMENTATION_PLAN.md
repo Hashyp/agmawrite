@@ -364,7 +364,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app/root code contains no `NOTE_EDITOR_ID`, note popup widget construction, or direct composer history rendering.
 
-## Task 12 — Extract comments sidebar and collapsed rail views
+## Task 12 — Extract comments sidebar and collapsed rail views ✅ Completed
 
 **Goal:** complete comments UI ownership.
 

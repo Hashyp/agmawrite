@@ -2,11 +2,12 @@
 
 pub(crate) mod composer;
 mod model;
+pub(crate) mod sidebar;
 
 pub(crate) use composer::focus_composer;
 
-pub use model::{CommentCard, Mark};
-use model::{Comments, Span};
+pub use model::Mark;
+use model::{CommentCard, Comments, Span};
 
 use iced::widget::text_editor;
 
@@ -101,11 +102,11 @@ impl State {
         self.model.anchor_selection_for(element, len)
     }
 
-    pub(crate) fn cards(&self, source: &str, elements: &[PreviewElement]) -> Vec<CommentCard> {
+    fn cards(&self, source: &str, elements: &[PreviewElement]) -> Vec<CommentCard> {
         self.model.cards(source, elements)
     }
 
-    pub(crate) fn draft(&self) -> &text_editor::Content {
+    fn draft(&self) -> &text_editor::Content {
         self.model.draft()
     }
 
@@ -123,7 +124,7 @@ impl State {
 
     /// Whether the sidebar is visible: an explicit toggle wins, otherwise
     /// comments make it appear automatically.
-    pub(crate) fn sidebar_shown(&self) -> bool {
+    fn sidebar_shown(&self) -> bool {
         self.sidebar_override.unwrap_or(!self.model.is_empty())
     }
 }
