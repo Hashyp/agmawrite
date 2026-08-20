@@ -166,7 +166,7 @@ Use a simpler return type for features that do not need both tasks and events.
 - Keymap tests still cover all current shortcuts, modal capture, counts, and prefixes.
 - Opening/closing Help does not clear a pending preview count or prefix; unrelated commands still do.
 
-## Task 2 — Extract CLI parsing
+## Task 2 — Extract CLI parsing ✅ Completed
 
 **Goal:** isolate argument vocabulary and validation before introducing a library boundary.
 

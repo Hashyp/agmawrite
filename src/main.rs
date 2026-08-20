@@ -1,3 +1,4 @@
+mod cli;
 mod command;
 mod comments;
 mod editing;
@@ -9,6 +10,7 @@ mod keymap;
 mod preview;
 mod theme;
 
+use cli::{Args, ParseOutcome};
 use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
@@ -2825,46 +2827,6 @@ fn popup_button_style(
     }
 }
 
-struct Args {
-    path: Option<String>,
-    preview: bool,
-}
-
-const USAGE: &str = "Usage: agmawrite [FILE] [--preview]
-
-Arguments:
-  FILE         Path to a Markdown file to open
-
-Options:
-  --preview    Open FILE in preview-only mode; editing and switching to
-               write mode are disabled
-  -h, --help   Print this message";
-
-fn parse_args(argv: Vec<String>) -> Result<Args, String> {
-    let mut args = Args {
-        path: None,
-        preview: false,
-    };
-
-    for arg in argv {
-        match arg.as_str() {
-            "--preview" => args.preview = true,
-            path if !path.starts_with('-') => {
-                if args.path.replace(path.to_string()).is_some() {
-                    return Err("unexpected extra file argument".to_string());
-                }
-            }
-            other => return Err(format!("unexpected argument '{other}'")),
-        }
-    }
-
-    if args.preview && args.path.is_none() {
-        return Err("--preview requires a FILE".to_string());
-    }
-
-    Ok(args)
-}
-
 fn boot(args: &Args) -> (Editor, Task<Message>) {
     let contents = args
         .path
@@ -2927,15 +2889,14 @@ fn theme(editor: &Editor) -> Theme {
 fn main() -> iced::Result {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
-    if argv.iter().any(|arg| arg == "-h" || arg == "--help") {
-        println!("{USAGE}");
-        return Ok(());
-    }
-
-    let args = match parse_args(argv) {
-        Ok(args) => args,
+    let args = match cli::parse_args(argv) {
+        Ok(ParseOutcome::Run(args)) => args,
+        Ok(ParseOutcome::Help) => {
+            println!("{}", cli::USAGE);
+            return Ok(());
+        }
         Err(error) => {
-            eprintln!("agmawrite: {error}\n\n{USAGE}");
+            eprintln!("agmawrite: {error}\n\n{}", cli::USAGE);
             std::process::exit(1);
         }
     };
