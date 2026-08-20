@@ -7,6 +7,7 @@ use iced::{Background, Border, Element, Font, Length, Task, Theme};
 
 use super::{Message, State};
 use crate::theme::Palette;
+use crate::ui::modal;
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const EDITOR_ID: &str = "note-editor";
@@ -68,7 +69,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
     )
     .on_press(Message::CloseComposer)
     .padding([6, 12])
-    .style(move |theme, status| button_style(&palette, theme, status))]
+    .style(move |theme, status| modal::quiet_button(&palette, theme, status))]
     .width(Length::Fill);
 
     if let Some((thread, entry)) = state.editing_target() {
@@ -76,7 +77,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
             button(text("Delete").font(EDITOR_FONT).size(14).color(palette.red))
                 .on_press(Message::DeleteComment(thread, entry))
                 .padding([6, 12])
-                .style(move |theme, status| button_style(&palette, theme, status)),
+                .style(move |theme, status| modal::quiet_button(&palette, theme, status)),
         );
     }
 
@@ -91,7 +92,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
             )
             .on_press(Message::SaveComposer)
             .padding([6, 12])
-            .style(move |theme, status| button_style(&palette, theme, status)),
+            .style(move |theme, status| modal::quiet_button(&palette, theme, status)),
         );
 
     card_body = card_body.push(buttons);
@@ -100,7 +101,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
         container(card_body)
             .width(Length::Fixed(440.0))
             .padding(16)
-            .style(move |_theme| card_style(&palette)),
+            .style(move |_theme| modal::card(&palette)),
     )
     .on_press(Message::ComposerCardPressed);
 
@@ -109,7 +110,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(backdrop_style),
+            .style(modal::backdrop),
     )
     .on_press(Message::CloseComposer)
     .into()
@@ -129,50 +130,9 @@ fn editor_style(
     }
 }
 
-fn backdrop_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(iced::Color::from_rgba(
-            0.0, 0.0, 0.0, 0.6,
-        ))),
-        ..Default::default()
-    }
-}
-
-fn card_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Palette::lightened(
-            palette.dark_background,
-            0.08,
-        ))),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-fn button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
-                Palette::lightened(palette.darker_background, 0.25),
-            )),
-            _ => None,
-        },
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{card_style, editor_style, view};
+    use super::{editor_style, view};
     use crate::comments::State;
     use crate::theme::Palette;
     use iced::widget::text_editor;
@@ -188,12 +148,9 @@ mod tests {
     fn composer_styles_follow_the_comments_palette() {
         let palette = Palette::default();
         let editor = editor_style(&palette, &Theme::Dark, text_editor::Status::Active);
-        let card = card_style(&palette);
 
         assert_eq!(editor.background, Background::Color(palette.background));
         assert_eq!(editor.value, palette.foreground);
         assert_eq!(editor.selection, palette.selection);
-        assert_eq!(card.border.color, palette.muted);
-        assert_eq!(card.border.width, 1.0);
     }
 }

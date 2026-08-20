@@ -921,45 +921,6 @@ fn background_style(palette: &Palette) -> container::Style {
     }
 }
 
-fn modal_backdrop_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
-        ..Default::default()
-    }
-}
-
-fn modal_card_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Palette::lightened(
-            palette.dark_background,
-            0.08,
-        ))),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-fn modal_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
-                Palette::lightened(palette.darker_background, 0.25),
-            )),
-            _ => None,
-        },
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
 fn boot(args: &Args) -> (Editor, Task<Message>) {
     let contents =
         args.path.as_ref().map(

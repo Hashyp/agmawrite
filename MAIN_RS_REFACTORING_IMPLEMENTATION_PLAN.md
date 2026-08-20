@@ -560,7 +560,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app contains no `canvas::Program` implementation.
 
-## Task 22 — Extract reusable modal primitives
+## Task 22 — Extract reusable modal primitives ✅ Completed
 
 **Goal:** deduplicate neutral modal styling without creating a global style dumping ground.
 

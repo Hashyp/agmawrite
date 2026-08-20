@@ -7,6 +7,7 @@ use iced::widget::{button, column, container, mouse_area, row, text, Space};
 use iced::{Element, Font, Length};
 
 use crate::theme::Palette;
+use crate::ui::modal;
 
 use super::{Message, UnsavedAction};
 
@@ -34,9 +35,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     )
                     .on_press(Message::UnsavedCancel)
                     .padding([6, 12])
-                    .style(move |theme, status| {
-                        crate::modal_button_style(&palette, theme, status)
-                    }),
+                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
                     Space::new().width(Length::Fill),
                     button(
                         text("Save")
@@ -46,9 +45,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     )
                     .on_press(Message::UnsavedSave)
                     .padding([6, 12])
-                    .style(move |theme, status| {
-                        crate::modal_button_style(&palette, theme, status)
-                    }),
+                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
                     button(
                         text("Discard")
                             .font(EDITOR_FONT)
@@ -57,9 +54,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     )
                     .on_press(Message::UnsavedDiscard)
                     .padding([6, 12])
-                    .style(move |theme, status| {
-                        crate::modal_button_style(&palette, theme, status)
-                    }),
+                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
                 ]
                 .width(Length::Fill),
             ]
@@ -68,7 +63,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
         )
         .width(Length::Fixed(440.0))
         .padding(16)
-        .style(move |_theme| crate::modal_card_style(&palette)),
+        .style(move |_theme| modal::card(&palette)),
     )
     .on_press(Message::UnsavedCardPressed);
 
@@ -77,7 +72,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(crate::modal_backdrop_style),
+            .style(modal::backdrop),
     )
     .on_press(Message::UnsavedCancel)
     .into()

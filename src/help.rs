@@ -7,10 +7,11 @@
 use iced::widget::{
     column, container, mouse_area, operation::focus, row, scrollable, text, text_input, Id,
 };
-use iced::{alignment, keyboard, Background, Border, Element, Font, Length, Task, Theme};
+use iced::{alignment, keyboard, Element, Font, Length, Task};
 
 use crate::editing;
 use crate::theme::Palette;
+use crate::ui::modal;
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const INPUT_ID: &str = "help-input";
@@ -294,7 +295,7 @@ pub fn view(help: &Help, palette: Palette) -> Element<'static, Message> {
         )
         .width(Length::Fixed(680.0))
         .padding(20)
-        .style(move |_theme| card_style(&palette)),
+        .style(move |_theme| modal::card(&palette)),
     )
     .on_press(Message::CardPressed);
 
@@ -303,35 +304,11 @@ pub fn view(help: &Help, palette: Palette) -> Element<'static, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(backdrop_style),
+            .style(modal::backdrop),
     )
     .on_press(Message::Close)
     .on_scroll(|_| Message::CardPressed)
     .into()
-}
-
-fn backdrop_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(iced::Color::from_rgba(
-            0.0, 0.0, 0.0, 0.6,
-        ))),
-        ..Default::default()
-    }
-}
-
-fn card_style(palette: &Palette) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Palette::lightened(
-            palette.dark_background,
-            0.08,
-        ))),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]
