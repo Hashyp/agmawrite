@@ -1,5 +1,6 @@
 //! Preview feature state, reducer, and parsed caret model.
 
+mod decorations;
 mod model;
 mod scroll;
 mod viewer;

@@ -511,7 +511,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** `paragraph` and `code` each accept settings/content plus one decoration model, and rendered behavior is unchanged.
 
-## Task 19 — Add composable decoration producers in preview
+## Task 19 — Add composable decoration producers in preview ✅ Completed
 
 **Goal:** prevent future annotations from requiring coordinated changes across viewer and leaf widget signatures.
 
