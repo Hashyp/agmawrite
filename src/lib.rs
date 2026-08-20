@@ -17,7 +17,7 @@ use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use keymap::{Keymap, Mode, Transition};
-use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
+use preview::{CaretPosition, Page, Placement};
 use theme::Palette;
 
 use iced::advanced::widget::operation::{Outcome, Scrollable};
@@ -54,18 +54,11 @@ const CARET_MARGIN: f32 = 8.0;
 
 struct Editor {
     document: document::State,
-    markdown: markdown::Content,
+    /// Parsed Markdown, numbered elements, caret, and visual selection.
+    preview: preview::State,
     /// The input mode stack — write, view, visual, note — owning key
     /// handling and the mode badge's state.
     keymap: Keymap,
-    /// The preview caret: element, grapheme column, and sticky target
-    /// column, owned by the preview module.
-    caret: Caret,
-    /// The numbered preview elements, owned by the preview module.
-    preview_elements: ElementMap,
-    /// The fixed end of the visual-mode selection, as a caret position.
-    /// `None` outside visual mode.
-    visual_anchor: Option<CaretPosition>,
     /// Comment store and workflow state, including the note composer and
     /// sidebar visibility policy.
     comments: comments::State,
@@ -80,19 +73,7 @@ struct Editor {
 #[derive(Debug, Clone)]
 enum Message {
     Document(document::Message),
-    TogglePreview,
-    LinkClicked(markdown::Uri),
-    MovePreviewCursor(Motion, usize),
-    MovePreviewWord(WordMotion, usize),
-    MovePreviewJump(Jump, usize),
-    PreviewGPressed,
-    PreviewZPressed,
-    PreviewCountPressed(u32),
-    PreviewCancel,
-    ToggleVisualMode,
-    ScrollPreviewBy(f32),
-    ScrollPreviewPage(Page, usize),
-    ScrollPreviewCaret(Placement),
+    Preview(preview::Message),
     Comments(comments::Message),
     OpenFind,
     CloseFind,
@@ -113,19 +94,19 @@ fn message_for_command(command: Command) -> Message {
             DocumentCommand::Save => document::Message::SaveRequested,
             DocumentCommand::CancelUnsaved => document::Message::UnsavedCancel,
         }),
-        Command::Preview(command) => match command {
-            PreviewCommand::Toggle => Message::TogglePreview,
-            PreviewCommand::Move(motion, count) => Message::MovePreviewCursor(motion, count),
-            PreviewCommand::MoveWord(motion, count) => Message::MovePreviewWord(motion, count),
-            PreviewCommand::Jump(jump, count) => Message::MovePreviewJump(jump, count),
-            PreviewCommand::ArmG => Message::PreviewGPressed,
-            PreviewCommand::ArmZ => Message::PreviewZPressed,
-            PreviewCommand::Count(digit) => Message::PreviewCountPressed(digit),
-            PreviewCommand::Cancel => Message::PreviewCancel,
-            PreviewCommand::ToggleVisual => Message::ToggleVisualMode,
-            PreviewCommand::ScrollPage(page, count) => Message::ScrollPreviewPage(page, count),
-            PreviewCommand::ScrollCaret(placement) => Message::ScrollPreviewCaret(placement),
-        },
+        Command::Preview(command) => Message::Preview(match command {
+            PreviewCommand::Toggle => preview::Message::Toggle,
+            PreviewCommand::Move(motion, count) => preview::Message::Move(motion, count),
+            PreviewCommand::MoveWord(motion, count) => preview::Message::MoveWord(motion, count),
+            PreviewCommand::Jump(jump, count) => preview::Message::Jump(jump, count),
+            PreviewCommand::ArmG => preview::Message::AcknowledgeG,
+            PreviewCommand::ArmZ => preview::Message::AcknowledgeZ,
+            PreviewCommand::Count(digit) => preview::Message::AcknowledgeCount(digit),
+            PreviewCommand::Cancel => preview::Message::Cancel,
+            PreviewCommand::ToggleVisual => preview::Message::ToggleVisual,
+            PreviewCommand::ScrollPage(page, count) => preview::Message::ScrollPage(page, count),
+            PreviewCommand::ScrollCaret(placement) => preview::Message::ScrollCaret(placement),
+        }),
         Command::Comments(command) => Message::Comments(match command {
             CommentsCommand::OpenNote => comments::Message::OpenComposer,
             CommentsCommand::CloseNote => comments::Message::CloseComposer,
@@ -153,12 +134,14 @@ fn message_for_command(command: Command) -> Message {
 fn input_transition(message: &Message) -> Transition {
     match message {
         Message::Document(document::Message::OpenLoaded(Some(_))) => Transition::DocumentLoaded,
-        Message::TogglePreview => Transition::PreviewToggled,
-        Message::ToggleVisualMode => Transition::VisualToggled,
-        Message::PreviewCancel => Transition::PreviewCancelled,
-        Message::PreviewGPressed => Transition::GArmed,
-        Message::PreviewZPressed => Transition::ZArmed,
-        Message::PreviewCountPressed(digit) => Transition::CountPressed(*digit),
+        Message::Preview(preview::Message::Toggle) => Transition::PreviewToggled,
+        Message::Preview(preview::Message::ToggleVisual) => Transition::VisualToggled,
+        Message::Preview(preview::Message::Cancel) => Transition::PreviewCancelled,
+        Message::Preview(preview::Message::AcknowledgeG) => Transition::GArmed,
+        Message::Preview(preview::Message::AcknowledgeZ) => Transition::ZArmed,
+        Message::Preview(preview::Message::AcknowledgeCount(digit)) => {
+            Transition::CountPressed(*digit)
+        }
         Message::Comments(comments::Message::OpenComposer) => Transition::NoteOpened,
         Message::Comments(comments::Message::CloseComposer | comments::Message::SaveComposer) => {
             Transition::NoteClosed
@@ -409,61 +392,26 @@ fn watch_palette() -> Subscription<Message> {
     })
 }
 
-/// Why the source and its temporary preview projection are being synchronized.
-/// Each reason carries the policy that currently belongs to the app; Task 14
-/// will move these operations behind `preview::State`.
-enum SourceSynchronization {
-    InitialLoad,
-    SourceReplaced(document::SourceReplacement),
-    EnterPreview,
-}
-
-/// Coordinates source replacement with every derived preview value. Returns
-/// whether the refreshed caret should be revealed in the current viewport.
-fn synchronize_source(editor: &mut Editor, reason: SourceSynchronization) -> bool {
-    let (reset_document_bound_state, clear_visual_selection, place_from_source, reveal) =
-        match reason {
-            SourceSynchronization::InitialLoad => (true, true, false, false),
-            SourceSynchronization::SourceReplaced(document::SourceReplacement::Loaded) => {
-                (true, true, false, false)
-            }
-            SourceSynchronization::SourceReplaced(document::SourceReplacement::External) => {
-                (false, false, false, editor.keymap.preview())
-            }
-            SourceSynchronization::EnterPreview => (false, true, true, true),
-        };
-
-    let contents = editor.document.text();
-    editor.markdown = markdown::Content::parse(&contents);
-    editor.preview_elements = ElementMap::parse(&contents);
-
-    if place_from_source {
-        editor.caret.move_to_source_cursor(
-            editor.document.content(),
-            editor.preview_elements.elements(),
-        );
-    } else {
-        editor.caret = Caret::new();
-    }
-
-    if clear_visual_selection {
-        editor.visual_anchor = None;
-    }
-
-    if reset_document_bound_state {
-        editor.comments = comments::State::new();
-    }
-
-    reveal
-}
-
 fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Message> {
     match event {
         document::Event::SourceReplaced { reason } => {
-            if synchronize_source(editor, SourceSynchronization::SourceReplaced(reason)) {
-                reveal_preview_caret()
-            } else {
-                Task::none()
+            let source = editor.document.text();
+
+            match reason {
+                document::SourceReplacement::Loaded => {
+                    editor.preview.load_source(&source);
+                    editor.comments = comments::State::new();
+                    Task::none()
+                }
+                document::SourceReplacement::External => {
+                    editor.preview.replace_source(&source);
+
+                    if editor.keymap.preview() {
+                        reveal_preview_caret()
+                    } else {
+                        Task::none()
+                    }
+                }
             }
         }
         document::Event::CloseWindow(id) => iced::window::close(id),
@@ -478,16 +426,66 @@ fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Me
     }
 }
 
+fn handle_preview_event(editor: &mut Editor, event: preview::Event) -> Task<Message> {
+    match event {
+        preview::Event::ToggleRequested => {
+            if editor.keymap.preview_only() {
+                return Task::none();
+            }
+
+            if editor.keymap.preview() {
+                let source = editor.document.text();
+                editor
+                    .preview
+                    .refresh_from_source(&source, editor.document.content());
+                reveal_preview_caret()
+            } else {
+                editor.preview.clear_visual_selection();
+                focus(Id::new(SOURCE_EDITOR_ID))
+            }
+        }
+        preview::Event::OpenLink(_uri) => {
+            // TODO: open links in the default browser
+            Task::none()
+        }
+        preview::Event::RevealCaret => reveal_preview_caret(),
+        preview::Event::ScrollBy(y) => {
+            scroll_by(Id::new(PREVIEW_SCROLL_ID), AbsoluteOffset { x: 0.0, y })
+        }
+        preview::Event::ScrollPage(page, count) => iced::advanced::widget::operate(PageScroll {
+            scroll_id: Id::new(PREVIEW_SCROLL_ID),
+            viewport: None,
+            page,
+            count,
+        }),
+        preview::Event::ScrollCaret(placement) => {
+            let scroll = match placement {
+                Placement::Center => CaretScroll::Center,
+                Placement::Top => CaretScroll::Top,
+                Placement::Bottom => CaretScroll::Bottom,
+            };
+
+            iced::advanced::widget::operate(RevealCaret {
+                scroll_id: Id::new(PREVIEW_SCROLL_ID),
+                caret_id: Id::new(PREVIEW_CARET_ID),
+                viewport: None,
+                caret: None,
+                scroll,
+            })
+        }
+    }
+}
+
 fn handle_comments_event(editor: &mut Editor, event: comments::Event) -> Task<Message> {
     match event {
         comments::Event::NavigateTo(anchor) => {
             if editor.keymap.preview() {
-                editor.visual_anchor = None;
-                editor.caret.place(anchor);
+                editor.preview.clear_visual_selection();
+                editor.preview.place_caret(anchor);
                 reveal_preview_caret()
             } else {
                 let source = editor.document.text();
-                let element = editor.preview_elements.elements().get(anchor.element);
+                let element = editor.preview.elements().get(anchor.element);
 
                 if let Some(element) = element {
                     editor.document.move_to(text_editor::Cursor {
@@ -527,86 +525,13 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             return Task::batch([task.map(Message::Document), event_task]);
         }
         Message::PaletteChanged => editor.palette = Palette::current(),
-        Message::TogglePreview => {
-            if !editor.keymap.preview_only() {
-                if editor.keymap.preview() {
-                    if synchronize_source(editor, SourceSynchronization::EnterPreview) {
-                        return reveal_preview_caret();
-                    }
-                } else {
-                    editor.visual_anchor = None;
-
-                    // Switching back to write mode: the editor content kept its
-                    // cursor, it only needs focus for the caret to show again.
-                    return focus(Id::new(SOURCE_EDITOR_ID));
-                }
-            }
-        }
-        Message::LinkClicked(_uri) => {
-            // TODO: open links in the default browser
-        }
-        Message::MovePreviewCursor(motion, count) => {
-            // The caret always advances; the page only scrolls as much as
-            // needed to keep the caret visible.
-            if editor
-                .caret
-                .move_by(editor.preview_elements.elements(), motion, count)
-            {
-                return reveal_preview_caret();
-            }
-        }
-        Message::MovePreviewWord(motion, count) => {
-            if editor
-                .caret
-                .move_word(editor.preview_elements.elements(), motion, count)
-            {
-                return reveal_preview_caret();
-            }
-        }
-        Message::MovePreviewJump(jump, count) => {
-            if editor
-                .caret
-                .jump(editor.preview_elements.elements(), jump, count)
-            {
-                return reveal_preview_caret();
-            }
-        }
-        Message::PreviewGPressed | Message::PreviewZPressed | Message::PreviewCountPressed(_) => {}
-        Message::PreviewCancel => {
-            editor.visual_anchor = None;
-        }
-        Message::ToggleVisualMode => {
-            editor.visual_anchor = if editor.keymap.visual() {
-                Some(editor.caret.position())
-            } else {
-                None
+        Message::Preview(message) => {
+            let context = preview::Context {
+                visual_active: editor.keymap.visual(),
             };
-        }
-        Message::ScrollPreviewBy(y) => {
-            return scroll_by(Id::new(PREVIEW_SCROLL_ID), AbsoluteOffset { x: 0.0, y });
-        }
-        Message::ScrollPreviewPage(page, count) => {
-            return iced::advanced::widget::operate(PageScroll {
-                scroll_id: Id::new(PREVIEW_SCROLL_ID),
-                viewport: None,
-                page,
-                count,
-            });
-        }
-        Message::ScrollPreviewCaret(placement) => {
-            let scroll = match placement {
-                Placement::Center => CaretScroll::Center,
-                Placement::Top => CaretScroll::Top,
-                Placement::Bottom => CaretScroll::Bottom,
-            };
+            let preview::Update { event } = preview::update(&mut editor.preview, message, context);
 
-            return iced::advanced::widget::operate(RevealCaret {
-                scroll_id: Id::new(PREVIEW_SCROLL_ID),
-                caret_id: Id::new(PREVIEW_CARET_ID),
-                viewport: None,
-                caret: None,
-                scroll,
-            });
+            return event.map_or_else(Task::none, |event| handle_preview_event(editor, event));
         }
         Message::Comments(message) => {
             let closes_composer = matches!(
@@ -615,10 +540,8 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                     if editor.comments.editing_target() == Some((*thread, *entry))
             );
             let context = comments::Context {
-                caret: editor.caret.position(),
-                selection: editor
-                    .visual_anchor
-                    .map(|anchor| (anchor, editor.caret.position())),
+                caret: editor.preview.caret(),
+                selection: editor.preview.visual_selection(),
                 composer_open: note_was_open,
             };
             let comments::Update { event } =
@@ -681,14 +604,13 @@ fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
     }
 
     if editor.keymap.preview() {
-        let matches =
-            find::preview_matches(editor.preview_elements.elements(), editor.find.query());
+        let matches = find::preview_matches(editor.preview.elements(), editor.find.query());
         let Some(index) = editor.find.select(way, matches.len()) else {
             return Task::none();
         };
 
         let (element, range) = matches[index].clone();
-        editor.caret.place(CaretPosition {
+        editor.preview.place_caret(CaretPosition {
             element,
             column: range.start,
         });
@@ -725,7 +647,7 @@ fn find_match_count(editor: &Editor) -> usize {
     }
 
     if editor.keymap.preview() {
-        find::preview_matches(editor.preview_elements.elements(), editor.find.query()).len()
+        find::preview_matches(editor.preview.elements(), editor.find.query()).len()
     } else {
         editing::source_matches(&editor.document.text(), editor.find.query()).len()
     }
@@ -1114,7 +1036,7 @@ impl Operation<Message> for RevealCaret {
             return Outcome::None;
         }
 
-        Outcome::Some(Message::ScrollPreviewBy(delta))
+        Outcome::Some(Message::Preview(preview::Message::ScrollBy(delta)))
     }
 }
 
@@ -1161,9 +1083,9 @@ impl Operation<Message> for PageScroll {
             Page::FullUp => (full, -1.0),
         };
 
-        Outcome::Some(Message::ScrollPreviewBy(
+        Outcome::Some(Message::Preview(preview::Message::ScrollBy(
             sign * distance * self.count.max(1) as f32,
-        ))
+        )))
     }
 }
 
@@ -1253,7 +1175,7 @@ struct PreviewViewer<'a> {
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
     fn on_link_click(url: markdown::Uri) -> Message {
-        Message::LinkClicked(url)
+        Message::Preview(preview::Message::LinkClicked(url))
     }
 
     fn heading(
@@ -1292,7 +1214,9 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
         // The map numbers code blocks like any element; if they ever
         // disagree, fall back to the plain, non-interactive look.
         let Some((element, preview_element)) = self.claims.claim() else {
-            return markdown::code_block(settings, lines, Message::LinkClicked);
+            return markdown::code_block(settings, lines, |uri| {
+                Message::Preview(preview::Message::LinkClicked(uri))
+            });
         };
 
         let decorations = self.decorations(element, preview_element);
@@ -1447,13 +1371,12 @@ fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
 
 fn view(editor: &Editor) -> Element<'_, Message> {
     let palette = editor.palette;
-    let position = editor.caret.position();
-    let visual = editor.visual_anchor.map(|anchor| (anchor, position));
+    let position = editor.preview.caret();
+    let visual = editor.preview.visual_selection();
 
     // The current find match, resolved against the live elements so the
     // viewer can paint it in its distinct color.
-    let find_matches =
-        find::preview_matches(editor.preview_elements.elements(), editor.find.query());
+    let find_matches = find::preview_matches(editor.preview.elements(), editor.find.query());
     let current_match = editor
         .find
         .current(find_matches.len())
@@ -1462,10 +1385,10 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let base_area: Element<'_, Message> = if editor.keymap.preview() {
         scrollable(
             container(markdown::view_with(
-                editor.markdown.items(),
+                editor.preview.markdown().items(),
                 markdown::Settings::with_text_size(20.0, markdown_style(&palette)),
                 &PreviewViewer {
-                    claims: editor.preview_elements.claims(),
+                    claims: editor.preview.claims(),
                     focused_element: position.element,
                     caret_column: position.column,
                     visual,
@@ -1556,7 +1479,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     let toggle_button = tooltip(
         button(icon_canvas)
-            .on_press(Message::TogglePreview)
+            .on_press(Message::Preview(preview::Message::Toggle))
             .width(Length::Fixed(ICON_BUTTON_SIZE))
             .height(Length::Fixed(ICON_BUTTON_SIZE))
             .padding(0)
@@ -1638,7 +1561,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         &editor.comments,
         comments::sidebar::ViewContext {
             source: &source,
-            preview_elements: editor.preview_elements.elements(),
+            preview_elements: editor.preview.elements(),
             palette,
             font: EDITOR_FONT,
         },
@@ -1790,22 +1713,18 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
             },
         );
 
-    let mut editor = Editor {
+    let editor = Editor {
         document: document::State::new(
             contents.as_deref().unwrap_or_default(),
             args.path.as_ref().map(std::path::PathBuf::from),
         ),
-        markdown: markdown::Content::new(),
+        preview: preview::State::new(contents.as_deref().unwrap_or_default()),
         keymap: Keymap::new(args.preview),
-        caret: Caret::new(),
-        preview_elements: ElementMap::default(),
-        visual_anchor: None,
         comments: comments::State::new(),
         find: find::Find::new(),
         help: help::Help::new(),
         palette: Palette::current(),
     };
-    synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
 
     let task = if args.preview {
         Task::none()
@@ -1855,27 +1774,24 @@ mod tests {
     use super::comments::{self, Mark};
     use super::find;
     use super::keymap::{Keymap, Transition};
-    use super::preview::{Caret, CaretPosition, ElementMap};
+    use super::preview::{self, CaretPosition};
     use super::theme::Palette;
     use super::{
-        keyboard_guard_action, root_layer_order, synchronize_source, update, Editor,
-        KeyboardGuardAction, Message, RootLayer, SourceSynchronization,
+        keyboard_guard_action, root_layer_order, update, Editor, KeyboardGuardAction, Message,
+        RootLayer,
     };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
         keymap.note(Transition::PreviewToggled);
 
-        let mut caret = Caret::new();
-        caret.place(position);
+        let mut preview = preview::State::new(contents);
+        preview.place_caret(position);
 
         Editor {
             document: super::document::State::new(contents, None),
-            markdown: iced::widget::markdown::Content::parse(contents),
+            preview,
             keymap,
-            caret,
-            preview_elements: ElementMap::parse(contents),
-            visual_anchor: None,
             comments: comments::State::new(),
             find: find::Find::new(),
             help: super::help::Help::new(),
@@ -1913,52 +1829,18 @@ mod tests {
     }
 
     fn assert_projection_matches(editor: &Editor, contents: &str) {
-        let expected_elements = ElementMap::parse(contents);
-        assert_eq!(
-            editor.preview_elements.elements(),
-            expected_elements.elements()
-        );
+        let expected = preview::State::new(contents);
+        assert_eq!(editor.preview.elements(), expected.elements());
 
         let expected_markdown = iced::widget::markdown::Content::parse(contents);
         assert_eq!(
-            format!("{:?}", editor.markdown.items()),
+            format!("{:?}", editor.preview.markdown().items()),
             format!("{:?}", expected_markdown.items())
         );
     }
 
-    #[test]
-    fn initial_load_policy_builds_projection_and_clears_document_state() {
-        let contents = "# Fresh\n\nbody";
-        let mut editor = editor_at(
-            contents,
-            CaretPosition {
-                element: 1,
-                column: 2,
-            },
-        );
-        editor.markdown = iced::widget::markdown::Content::parse("stale");
-        editor.preview_elements = ElementMap::parse("stale");
-        editor.visual_anchor = Some(CaretPosition {
-            element: 0,
-            column: 1,
-        });
-        prepare_comment_edit(&mut editor, "old note", "draft");
-
-        let reveal = synchronize_source(&mut editor, SourceSynchronization::InitialLoad);
-
-        assert!(!reveal);
-        assert_projection_matches(&editor, contents);
-        assert_eq!(
-            editor.caret.position(),
-            CaretPosition {
-                element: 0,
-                column: 0,
-            }
-        );
-        assert!(editor.visual_anchor.is_none());
-        assert!(editor.comments.is_empty());
-        assert_eq!(editor.comments.composer().text(), "");
-        assert!(editor.comments.editing_target().is_none());
+    fn enter_visual(editor: &mut Editor) {
+        let _ = update(editor, Message::Preview(preview::Message::ToggleVisual));
     }
 
     #[test]
@@ -1970,10 +1852,7 @@ mod tests {
                 column: 2,
             },
         );
-        editor.visual_anchor = Some(CaretPosition {
-            element: 0,
-            column: 1,
-        });
+        enter_visual(&mut editor);
         prepare_comment_edit(&mut editor, "old note", "draft");
         let path = std::path::PathBuf::from("/tmp/task-5-loaded.md");
         let contents = "# Loaded\n\nnew body";
@@ -1991,13 +1870,13 @@ mod tests {
         assert!(!editor.document.is_modified());
         assert_projection_matches(&editor, contents);
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 0,
                 column: 0,
             }
         );
-        assert!(editor.visual_anchor.is_none());
+        assert!(editor.preview.visual_selection().is_none());
         assert!(editor.comments.is_empty());
         assert_eq!(editor.comments.composer().text(), "");
         assert!(editor.comments.editing_target().is_none());
@@ -2028,7 +1907,12 @@ mod tests {
                 old_contents.to_owned(),
             )))),
         );
-        editor.caret.place(CaretPosition {
+        editor.preview.place_caret(CaretPosition {
+            element: 0,
+            column: 1,
+        });
+        enter_visual(&mut editor);
+        editor.preview.place_caret(CaretPosition {
             element: 1,
             column: 3,
         });
@@ -2037,11 +1921,10 @@ mod tests {
             selection: Some(Position { line: 0, column: 2 }),
         });
         let source_cursor = editor.document.content().cursor();
-        let visual_anchor = Some(CaretPosition {
+        let visual_anchor = CaretPosition {
             element: 0,
             column: 1,
-        });
-        editor.visual_anchor = visual_anchor;
+        };
         prepare_comment_edit(&mut editor, "keep me", "draft");
         let contents = "# New\n\nnew body";
         std::fs::write(&path, contents).unwrap();
@@ -2054,18 +1937,21 @@ mod tests {
         assert_eq!(editor.document.content().cursor(), source_cursor);
         assert_projection_matches(&editor, contents);
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 0,
                 column: 0,
             }
         );
-        assert_eq!(editor.visual_anchor, visual_anchor);
+        assert_eq!(
+            editor.preview.visual_selection().map(|(anchor, _)| anchor),
+            Some(visual_anchor)
+        );
         assert_eq!(editor.comments.len(), 1);
         assert_eq!(editor.comments.composer().text(), "draft");
         assert_eq!(editor.comments.editing_target(), Some((0, 0)));
 
-        editor.caret.place(CaretPosition {
+        editor.preview.place_caret(CaretPosition {
             element: 1,
             column: 2,
         });
@@ -2074,7 +1960,7 @@ mod tests {
             Message::Document(super::document::Message::ExternalChange),
         );
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 1,
                 column: 2,
@@ -2108,25 +1994,19 @@ mod tests {
             selection: Some(Position { line: 2, column: 1 }),
         });
         let source_cursor = editor.document.content().cursor();
-        editor.visual_anchor = Some(CaretPosition {
-            element: 0,
-            column: 1,
-        });
         save_comment(&mut editor, "keep me");
 
-        let reveal = synchronize_source(&mut editor, SourceSynchronization::EnterPreview);
-
-        assert!(reveal);
+        let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
         assert_eq!(editor.document.content().cursor(), source_cursor);
         assert_projection_matches(&editor, contents);
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 2,
                 column: 0,
             }
         );
-        assert!(editor.visual_anchor.is_none());
+        assert!(editor.preview.visual_selection().is_none());
         assert_eq!(editor.comments.len(), 1);
     }
 
@@ -2138,11 +2018,8 @@ mod tests {
 
         let mut source = Editor {
             document: super::document::State::new("first\nsecond", None),
-            markdown: iced::widget::markdown::Content::parse("first\nsecond"),
+            preview: preview::State::new("first\nsecond"),
             keymap: Keymap::new(false),
-            caret: Caret::new(),
-            preview_elements: ElementMap::parse("first\nsecond"),
-            visual_anchor: None,
             comments: comments::State::new(),
             find: find::Find::new(),
             help: super::help::Help::new(),
@@ -2164,16 +2041,21 @@ mod tests {
                 column: 2,
             },
         );
-        preview.visual_anchor = Some(CaretPosition {
+        preview.preview.place_caret(CaretPosition {
             element: 0,
             column: 1,
         });
-        let caret = preview.caret.position();
-        let anchor = preview.visual_anchor;
+        enter_visual(&mut preview);
+        preview.preview.place_caret(CaretPosition {
+            element: 1,
+            column: 2,
+        });
+        let caret = preview.preview.caret();
+        let selection = preview.preview.visual_selection();
         let _ = update(&mut preview, Message::OpenHelp);
         let _ = update(&mut preview, Message::Help(super::help::Message::Close));
-        assert_eq!(preview.caret.position(), caret);
-        assert_eq!(preview.visual_anchor, anchor);
+        assert_eq!(preview.preview.caret(), caret);
+        assert_eq!(preview.preview.visual_selection(), selection);
     }
 
     /// The unsaved modal is composed from the real document and input
@@ -2325,7 +2207,7 @@ mod tests {
         save_comment(&mut editor, "note");
 
         // The caret wanders off before the card is clicked.
-        editor.caret.place(CaretPosition {
+        editor.preview.place_caret(CaretPosition {
             element: 0,
             column: 0,
         });
@@ -2336,7 +2218,7 @@ mod tests {
         );
 
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 2,
                 column: 3,
@@ -2379,7 +2261,7 @@ mod tests {
         // In the preview, the caret jumps to the match's element.
         let _ = update(&mut editor, Message::FindQueryChanged("more".to_owned()));
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 2,
                 column: 0
@@ -2389,7 +2271,7 @@ mod tests {
         // A single match: stepping wraps back onto itself.
         let _ = update(&mut editor, Message::FindNext);
         assert_eq!(
-            editor.caret.position(),
+            editor.preview.caret(),
             CaretPosition {
                 element: 2,
                 column: 0

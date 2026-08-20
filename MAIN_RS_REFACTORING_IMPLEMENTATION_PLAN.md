@@ -395,7 +395,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** this task changes module paths, not preview behavior.
 
-## Task 14 — Add `preview::State` and preview reducer
+## Task 14 — Add `preview::State` and preview reducer ✅ Completed
 
 **Goal:** group preview data and own preview navigation transitions.
 
