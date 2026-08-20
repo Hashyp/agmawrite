@@ -10,6 +10,7 @@ mod interactive_text;
 mod keymap;
 mod preview;
 mod theme;
+mod ui;
 mod watch;
 
 use cli::{Args, ParseOutcome};
@@ -18,6 +19,7 @@ use command::{
 };
 use keymap::{Keymap, Mode, Transition};
 use theme::Palette;
+use ui::icons::{OpenFileIcon, PreviewIcon, SaveIcon, WriteIcon, ICON_BUTTON_SIZE, ICON_SIZE};
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
@@ -27,17 +29,10 @@ use iced::widget::{
 };
 use iced::{
     alignment, application, keyboard, mouse, Background, Border, Color, Element, Font, Length,
-    Point, Rectangle, Renderer, Size, Subscription, Task, Theme, Vector,
+    Rectangle, Renderer, Size, Subscription, Task, Theme, Vector,
 };
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
-/// The design space the icon glyphs are drawn in, before scaling to the
-/// canvas size.
-const ICON_DESIGN_SIZE: f32 = 16.0;
-/// The bottom-bar icon glyph size: 150% of the original 16px.
-const ICON_SIZE: f32 = 24.0;
-/// The bottom-bar icon button size: 150% of the original 28px.
-const ICON_BUTTON_SIZE: f32 = 42.0;
 /// The id of the source text editor, refocused when switching back to
 /// write mode so the cursor reappears where it was left.
 const SOURCE_EDITOR_ID: &str = "source-editor";
@@ -142,197 +137,6 @@ fn input_transition(message: &Message) -> Transition {
             | document::Message::UnsavedDiscard,
         ) => Transition::UnsavedClosed,
         _ => Transition::Activity,
-    }
-}
-
-struct OpenFileIcon;
-
-impl<Message> canvas::Program<Message> for OpenFileIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let folder = canvas::Path::new(|path| {
-            path.move_to(Point::new(2.5, 13.0));
-            path.line_to(Point::new(2.5, 3.5));
-            path.line_to(Point::new(6.5, 3.5));
-            path.line_to(Point::new(8.5, 5.5));
-            path.line_to(Point::new(13.5, 5.5));
-            path.line_to(Point::new(13.5, 13.0));
-            path.close();
-        });
-
-        frame.stroke(
-            &folder,
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round),
-        );
-
-        vec![frame.into_geometry()]
-    }
-}
-
-struct PreviewIcon;
-
-impl<Message> canvas::Program<Message> for PreviewIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let eye = canvas::Path::new(|path| {
-            path.move_to(Point::new(1.5, 8.0));
-            path.quadratic_curve_to(Point::new(8.0, 1.0), Point::new(14.5, 8.0));
-            path.quadratic_curve_to(Point::new(8.0, 15.0), Point::new(1.5, 8.0));
-            path.close();
-        });
-
-        frame.stroke(
-            &eye,
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round),
-        );
-
-        let pupil = canvas::Path::circle(Point::new(8.0, 8.0), 2.8);
-        frame.fill(&pupil, Color::from_rgb(0.65, 0.65, 0.65));
-
-        vec![frame.into_geometry()]
-    }
-}
-
-struct SaveIcon;
-
-/// The write-mode icon of the preview toggle: a pencil, drawn in the same
-/// stroke style as the eye so the toggle reads as one button with two
-/// glyphs.
-struct WriteIcon;
-
-impl<Message> canvas::Program<Message> for WriteIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
-
-        // A pencil lying diagonal: a triangular tip at the bottom-left, a
-        // band above it, and the body running to the top-right.
-        let body = canvas::Path::new(|path| {
-            path.move_to(Point::new(2.5, 13.5));
-            path.line_to(Point::new(3.35, 10.95));
-            path.line_to(Point::new(9.07, 5.23));
-            path.line_to(Point::new(10.77, 6.93));
-            path.line_to(Point::new(5.05, 12.65));
-            path.close();
-        });
-        let band = canvas::Path::new(|path| {
-            path.move_to(Point::new(3.35, 10.95));
-            path.line_to(Point::new(5.05, 12.65));
-        });
-        let edge = canvas::Path::new(|path| {
-            path.move_to(Point::new(9.6, 4.7));
-            path.line_to(Point::new(11.3, 6.4));
-        });
-
-        frame.stroke(&body, stroke());
-        frame.stroke(&band, stroke());
-        frame.stroke(&edge, stroke());
-
-        vec![frame.into_geometry()]
-    }
-}
-
-impl<Message> canvas::Program<Message> for SaveIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
-
-        // A floppy disk: the body with a beveled corner, the shutter notch
-        // on top, and the label slot at the bottom.
-        let body = canvas::Path::new(|path| {
-            path.move_to(Point::new(2.5, 1.5));
-            path.line_to(Point::new(11.0, 1.5));
-            path.line_to(Point::new(13.5, 4.0));
-            path.line_to(Point::new(13.5, 14.5));
-            path.line_to(Point::new(2.5, 14.5));
-            path.close();
-        });
-        let shutter = canvas::Path::new(|path| {
-            path.move_to(Point::new(5.0, 1.5));
-            path.line_to(Point::new(5.0, 6.0));
-            path.line_to(Point::new(10.5, 6.0));
-            path.line_to(Point::new(10.5, 1.5));
-        });
-        let slot = canvas::Path::new(|path| {
-            path.move_to(Point::new(4.5, 14.5));
-            path.line_to(Point::new(4.5, 10.0));
-            path.line_to(Point::new(11.5, 10.0));
-            path.line_to(Point::new(11.5, 14.5));
-        });
-
-        frame.stroke(&body, stroke());
-        frame.stroke(&shutter, stroke());
-        frame.stroke(&slot, stroke());
-
-        vec![frame.into_geometry()]
     }
 }
 

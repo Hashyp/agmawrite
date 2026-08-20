@@ -548,7 +548,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** app subscription assembly calls `theme::subscription().map(...)` and contains no Omarchy state paths or notify code.
 
-## Task 21 — Extract icons
+## Task 21 — Extract icons ✅ Completed
 
 **Goal:** remove canvas drawing noise from app.
 

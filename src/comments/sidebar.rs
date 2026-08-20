@@ -3,19 +3,17 @@
 use iced::widget::{
     button, canvas, column, container, mouse_area, row, scrollable, text, text_editor, tooltip,
 };
-use iced::{alignment, mouse, Background, Border, Color, Element, Font, Length, Point, Rectangle};
-use iced::{Renderer, Theme};
+use iced::{alignment, Background, Border, Color, Element, Font, Length, Theme};
 
 use super::model::CommentCard;
 use super::{Message, State};
 use crate::preview::PreviewElement;
 use crate::theme::Palette;
+use crate::ui::icons::{CommentsIcon, ICON_SIZE};
 
 /// The width of the expanded comments sidebar on the right.
 const SIDEBAR_WIDTH: f32 = 340.0;
 const RAIL_WIDTH: f32 = 44.0;
-const ICON_DESIGN_SIZE: f32 = 16.0;
-const ICON_SIZE: f32 = 24.0;
 
 /// Read-only collaborators needed to project comments into sidebar cards.
 #[derive(Debug, Clone, Copy)]
@@ -313,49 +311,6 @@ fn comment_card(card: CommentCard, palette: Palette, font: Font) -> Element<'sta
             })
             .width(Length::Fill)
             .into()
-    }
-}
-
-/// The comments icon of the collapsed rail: a speech bubble matching the
-/// application's other line icons.
-struct CommentsIcon;
-
-impl<Message> canvas::Program<Message> for CommentsIcon {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.scale(bounds.width / ICON_DESIGN_SIZE);
-
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
-
-        let bubble = canvas::Path::new(|path| {
-            path.move_to(Point::new(8.0, 2.5));
-            path.quadratic_curve_to(Point::new(13.5, 2.5), Point::new(13.5, 7.0));
-            path.quadratic_curve_to(Point::new(13.5, 10.5), Point::new(9.5, 10.8));
-            path.line_to(Point::new(6.0, 13.0));
-            path.line_to(Point::new(6.4, 10.5));
-            path.quadratic_curve_to(Point::new(2.5, 10.2), Point::new(2.5, 7.0));
-            path.quadratic_curve_to(Point::new(2.5, 2.5), Point::new(8.0, 2.5));
-            path.close();
-        });
-
-        frame.stroke(&bubble, stroke());
-
-        vec![frame.into_geometry()]
     }
 }
 
