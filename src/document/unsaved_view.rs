@@ -35,7 +35,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     .on_press(Message::UnsavedCancel)
                     .padding([6, 12])
                     .style(move |theme, status| {
-                        crate::popup_button_style(&palette, theme, status)
+                        crate::modal_button_style(&palette, theme, status)
                     }),
                     Space::new().width(Length::Fill),
                     button(
@@ -47,7 +47,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     .on_press(Message::UnsavedSave)
                     .padding([6, 12])
                     .style(move |theme, status| {
-                        crate::popup_button_style(&palette, theme, status)
+                        crate::modal_button_style(&palette, theme, status)
                     }),
                     button(
                         text("Discard")
@@ -58,7 +58,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     .on_press(Message::UnsavedDiscard)
                     .padding([6, 12])
                     .style(move |theme, status| {
-                        crate::popup_button_style(&palette, theme, status)
+                        crate::modal_button_style(&palette, theme, status)
                     }),
                 ]
                 .width(Length::Fill),
@@ -68,7 +68,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
         )
         .width(Length::Fixed(440.0))
         .padding(16)
-        .style(move |_theme| crate::note_card_style(&palette)),
+        .style(move |_theme| crate::modal_card_style(&palette)),
     )
     .on_press(Message::UnsavedCardPressed);
 
@@ -77,7 +77,7 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(crate::note_backdrop_style),
+            .style(crate::modal_backdrop_style),
     )
     .on_press(Message::UnsavedCancel)
     .into()

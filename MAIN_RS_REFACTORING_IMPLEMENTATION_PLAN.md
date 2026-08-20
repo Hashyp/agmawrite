@@ -350,7 +350,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** root update does not directly call comment model mutation methods.
 
-## Task 11 — Extract the note composer view
+## Task 11 — Extract the note composer view ✅ Completed
 
 **Goal:** move the comment editing popup and its styles beside comments state.
 

@@ -1,6 +1,9 @@
-//! Comments feature state, reducer, semantic events, and domain model.
+//! Comments feature state, reducer, semantic events, and views.
 
+pub(crate) mod composer;
 mod model;
+
+pub(crate) use composer::focus_composer;
 
 pub use model::{CommentCard, Mark};
 use model::{Comments, Span};

@@ -38,7 +38,6 @@ use iced::{
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
-const NOTE_EDITOR_ID: &str = "note-editor";
 /// The id of the find popup's query field, focused when the popup opens.
 const FIND_INPUT_ID: &str = "find-input";
 /// The design space the icon glyphs are drawn in, before scaling to the
@@ -549,7 +548,7 @@ fn handle_comments_event(editor: &mut Editor, event: comments::Event) -> Task<Me
         }
         comments::Event::FocusComposer => {
             editor.keymap.note(Transition::NoteOpened);
-            focus(Id::new(NOTE_EDITOR_ID))
+            comments::focus_composer().map(Message::Comments)
         }
         comments::Event::PublishRequested => {
             // TODO: publish the comments
@@ -705,7 +704,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                     return focus(Id::new(FIND_INPUT_ID));
                 }
                 if editor.keymap.note_open() {
-                    return focus(Id::new(NOTE_EDITOR_ID));
+                    return comments::focus_composer().map(Message::Comments);
                 }
                 if !editor.keymap.preview() {
                     return focus(Id::new(SOURCE_EDITOR_ID));
@@ -818,7 +817,7 @@ fn find_popup(editor: &Editor, palette: Palette) -> Element<'_, Message> {
             )
             .on_press(Message::FindPrevious)
             .padding([4, 8])
-            .style(move |theme, status| popup_button_style(&palette, theme, status)),
+            .style(move |theme, status| modal_button_style(&palette, theme, status)),
         )
         .push(
             button(
@@ -829,13 +828,13 @@ fn find_popup(editor: &Editor, palette: Palette) -> Element<'_, Message> {
             )
             .on_press(Message::FindNext)
             .padding([4, 8])
-            .style(move |theme, status| popup_button_style(&palette, theme, status)),
+            .style(move |theme, status| modal_button_style(&palette, theme, status)),
         );
 
     container(
         container(card_row)
             .padding(8)
-            .style(move |_theme| note_card_style(&palette)),
+            .style(move |_theme| modal_card_style(&palette)),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -1556,7 +1555,8 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     let mut editing_stack = stack![base_area];
 
     if editor.keymap.note_open() {
-        editing_stack = editing_stack.push(note_popup(editor));
+        editing_stack = editing_stack
+            .push(comments::composer::view(&editor.comments, palette).map(Message::Comments));
     }
 
     let editing_area: Element<'_, Message> = editing_stack.into();
@@ -2235,117 +2235,14 @@ fn background_style(palette: &Palette) -> container::Style {
     }
 }
 
-/// The note popup: a translucent backdrop with a centered card holding a
-/// text area and a button. Clicking the backdrop closes the popup; clicks
-/// on the card are swallowed. Opened over the active comment it edits that
-/// comment instead of writing a fresh one — its title says so, the previous
-/// versions show as history, and Delete removes the comment.
-fn note_popup(editor: &Editor) -> Element<'_, Message> {
-    let palette = editor.palette;
-    let editing = editor.comments.editing_target().is_some();
-
-    let mut card_body = column![].spacing(12);
-
-    card_body = card_body.push(if editing {
-        text("Editing comment — Ctrl+S saves, Esc discards")
-            .font(EDITOR_FONT)
-            .size(12)
-            .color(palette.yellow)
-    } else {
-        text("Note")
-            .font(EDITOR_FONT)
-            .size(12)
-            .color(palette.light_foreground)
-    });
-
-    // The comment's history: the texts this comment replaced, newest
-    // first, dimmed above the editor.
-    if editing {
-        for previous in editor.comments.active_history().iter().rev() {
-            card_body = card_body.push(
-                text(format!("— {previous}"))
-                    .font(EDITOR_FONT)
-                    .size(12)
-                    .color(palette.dark_foreground),
-            );
-        }
-    }
-
-    card_body = card_body.push(
-        text_editor(editor.comments.composer())
-            .id(Id::new(NOTE_EDITOR_ID))
-            .on_action(|action| Message::Comments(comments::Message::EditComposer(action)))
-            .font(EDITOR_FONT)
-            .size(20)
-            .height(Length::Fixed(160.0))
-            .padding(8)
-            .style(move |theme, status| editor_style(&palette, theme, status)),
-    );
-
-    let mut buttons = row![button(
-        text("Close")
-            .font(EDITOR_FONT)
-            .size(14)
-            .color(palette.light_foreground),
-    )
-    .on_press(Message::Comments(comments::Message::CloseComposer))
-    .padding([6, 12])
-    .style(move |theme, status| popup_button_style(&palette, theme, status))]
-    .width(Length::Fill);
-
-    // Deleting from the edit popup removes the comment outright.
-    if let Some((thread, entry)) = editor.comments.editing_target() {
-        buttons = buttons.push(
-            button(text("Delete").font(EDITOR_FONT).size(14).color(palette.red))
-                .on_press(Message::Comments(comments::Message::DeleteComment(
-                    thread, entry,
-                )))
-                .padding([6, 12])
-                .style(move |theme, status| popup_button_style(&palette, theme, status)),
-        );
-    }
-
-    buttons = buttons.push(Space::new().width(Length::Fill)).push(
-        button(
-            text("Save")
-                .font(EDITOR_FONT)
-                .size(14)
-                .color(palette.foreground),
-        )
-        .on_press(Message::Comments(comments::Message::SaveComposer))
-        .padding([6, 12])
-        .style(move |theme, status| popup_button_style(&palette, theme, status)),
-    );
-
-    card_body = card_body.push(buttons);
-
-    let card = mouse_area(
-        container(card_body)
-            .width(Length::Fixed(440.0))
-            .padding(16)
-            .style(move |_theme| note_card_style(&palette)),
-    )
-    .on_press(Message::Comments(comments::Message::ComposerCardPressed));
-
-    mouse_area(
-        container(card)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .style(note_backdrop_style),
-    )
-    .on_press(Message::Comments(comments::Message::CloseComposer))
-    .into()
-}
-
-fn note_backdrop_style(_theme: &Theme) -> container::Style {
+fn modal_backdrop_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
         ..Default::default()
     }
 }
 
-fn note_card_style(palette: &Palette) -> container::Style {
+fn modal_card_style(palette: &Palette) -> container::Style {
     container::Style {
         background: Some(Background::Color(Palette::lightened(
             palette.dark_background,
@@ -2360,7 +2257,7 @@ fn note_card_style(palette: &Palette) -> container::Style {
     }
 }
 
-fn popup_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
+fn modal_button_style(palette: &Palette, _theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: match status {
             button::Status::Hovered | button::Status::Pressed => Some(Background::Color(
