@@ -67,7 +67,7 @@ enum Message {
     Find(find::Message),
     OpenHelp,
     Help(help::Message),
-    PaletteChanged,
+    Theme(theme::Event),
 }
 
 /// Maps the input layer's semantic command into the application's current
@@ -348,33 +348,17 @@ fn subscription(editor: &Editor) -> Subscription<Message> {
         .map(document::Message::CloseRequested)
         .map(Message::Document);
 
+    let theme = theme::subscription().map(Message::Theme);
+
     match editor.document.path() {
         Some(path) => Subscription::batch([
             keys,
             close,
             document::subscription(path).map(Message::Document),
-            watch_palette(),
+            theme,
         ]),
-        None => Subscription::batch([keys, close, watch_palette()]),
+        None => Subscription::batch([keys, close, theme]),
     }
-}
-
-/// Watches the omarchy current-theme state so switching themes re-paints
-/// the interface live.
-fn watch_palette() -> Subscription<Message> {
-    let state = std::env::var_os("HOME")
-        .map(|home| std::path::PathBuf::from(home).join(".local/state/omarchy/current"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".local/state/omarchy/current"));
-
-    Subscription::run_with(("omarchy-palette", state), move |(_, state)| {
-        let state = state.clone();
-        iced::stream::channel(1, move |sender| async move {
-            watch::spawn_directory_events(state, sender, Message::PaletteChanged);
-            // The events arrive on the watcher thread; this runner only
-            // keeps the stream alive.
-            std::future::pending::<()>().await;
-        })
-    })
 }
 
 fn handle_document_event(editor: &mut Editor, event: document::Event) -> Task<Message> {
@@ -497,7 +481,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
 
             return Task::batch([task.map(Message::Document), event_task]);
         }
-        Message::PaletteChanged => editor.palette = Palette::current(),
+        Message::Theme(theme::Event::Changed) => editor.palette = Palette::current(),
         Message::Preview(message) => {
             let context = preview::Context {
                 visual_active: editor.keymap.visual(),

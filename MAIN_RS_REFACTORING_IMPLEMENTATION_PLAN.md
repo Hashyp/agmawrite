@@ -534,7 +534,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 7: Extract remaining infrastructure and shell UI
 
-## Task 20 — Move theme watching into `theme`
+## Task 20 — Move theme watching into `theme` ✅ Completed
 
 **Goal:** make palette loading and palette subscription one cohesive module.
 

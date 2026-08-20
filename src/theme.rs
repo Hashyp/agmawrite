@@ -9,7 +9,78 @@
 //! falling back to the palette's default, so an absent or partial omarchy
 //! installation keeps the interface exactly as it was.
 
-use iced::Color;
+use iced::futures::channel::mpsc::Sender;
+use iced::{Color, Subscription};
+use std::path::PathBuf;
+
+/// A filesystem event indicating that the current palette may have changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Event {
+    Changed,
+}
+
+/// Watches Omarchy's current-theme state and reports changes that may require
+/// reloading [`Palette::current`].
+pub(crate) fn subscription() -> Subscription<Event> {
+    let state = current_state();
+
+    Subscription::run_with(("omarchy-palette", state), |(_, state)| {
+        let state = state.clone();
+        iced::stream::channel(1, move |sender| async move {
+            spawn_watcher(state, sender);
+            // Events arrive on the watcher thread; this runner only keeps the
+            // stream alive.
+            std::future::pending::<()>().await;
+        })
+    })
+}
+
+/// Spawns a watcher for the current-theme directory, forwarding one change
+/// event per burst. A missing Omarchy installation simply yields no events.
+fn spawn_watcher(state: PathBuf, mut sender: Sender<Event>) {
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+
+        if !state.is_dir() {
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(tx) {
+            Ok(watcher) => watcher,
+            Err(_) => return,
+        };
+
+        if watcher.watch(&state, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+
+        while let Ok(event) = rx.recv() {
+            let Ok(event) = event else { continue };
+
+            if !crate::watch::may_change_file(&event.kind) {
+                continue;
+            }
+
+            // Theme switches commonly replace several state entries in one
+            // burst; one reload observes the latest palette.
+            while rx.try_recv().is_ok() {}
+
+            if !forward_change(&mut sender) {
+                break;
+            }
+        }
+    });
+}
+
+/// Queues a palette reload. A full one-item channel means a reload is already
+/// pending, not that the watcher has disconnected.
+fn forward_change(sender: &mut Sender<Event>) -> bool {
+    match sender.try_send(Event::Changed) {
+        Ok(()) => true,
+        Err(error) => error.is_full(),
+    }
+}
 
 /// The palette the interface paints with: surfaces, text, and the accent
 /// colors. [`Palette::current`] reads it from omarchy; [`Palette::default`]
@@ -80,7 +151,7 @@ impl Palette {
     /// just the name — the older layout — still resolves through the user
     /// and system theme directories.
     pub fn current() -> Self {
-        Self::from_state(home().join(".local/state/omarchy/current"))
+        Self::from_state(current_state())
     }
 
     /// Reads the current theme from the `current` state directory: the
@@ -186,10 +257,14 @@ impl Palette {
     }
 }
 
-fn home() -> std::path::PathBuf {
+fn home() -> PathBuf {
     std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_default()
+}
+
+fn current_state() -> PathBuf {
+    home().join(".local/state/omarchy/current")
 }
 
 /// Parses `#rrggbb` (also without the dash) into a color; anything else is
@@ -216,7 +291,7 @@ fn hex(value: &str) -> Option<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex, Palette};
+    use super::{forward_change, hex, Palette};
     use iced::Color;
 
     fn close(a: Color, b: Color) -> bool {
@@ -318,6 +393,20 @@ broken = \"nope\"
 
         assert!(close(palette.background, Palette::default().background));
         assert!(close(palette.accent, Palette::default().accent));
+    }
+
+    /// A queued theme-change event already causes the latest palette to be
+    /// loaded. A full channel therefore coalesces rather than stopping the
+    /// watcher.
+    #[test]
+    fn full_theme_change_channel_stays_connected() {
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(0);
+
+        assert!(forward_change(&mut sender));
+        assert!(forward_change(&mut sender));
+
+        drop(receiver);
+        assert!(!forward_change(&mut sender));
     }
 
     /// The modern omarchy state layout resolves: `current/theme/` is a
