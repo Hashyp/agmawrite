@@ -293,7 +293,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 **Acceptance:** root update has one document branch plus semantic event handling, not individual file/save/unsaved branches.
 
-## Task 8 — Extract the unsaved dialog view
+## Task 8 — Extract the unsaved dialog view ✅ Completed
 
 **Goal:** complete document ownership of its modal UI.
 

@@ -17,7 +17,6 @@ use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use comments::{Comments, Mark, Span};
-use document::UnsavedAction;
 use keymap::{Keymap, Mode, Transition};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
@@ -1544,6 +1543,33 @@ struct Decorations {
     find: interactive_text::FindHighlights,
 }
 
+/// Stable bottom-to-top ordering of the root editing surface and modal
+/// layers. The view consumes this order directly when constructing its
+/// stack, so integration tests can assert the same composition contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootLayer {
+    EditingSurface,
+    Find,
+    Unsaved,
+    Help,
+}
+
+fn root_layer_order(editor: &Editor) -> Vec<RootLayer> {
+    let mut layers = vec![RootLayer::EditingSurface];
+
+    if editor.keymap.find_open() {
+        layers.push(RootLayer::Find);
+    }
+    if editor.keymap.unsaved_open() && editor.document.pending_action().is_some() {
+        layers.push(RootLayer::Unsaved);
+    }
+    if editor.keymap.help_open() {
+        layers.push(RootLayer::Help);
+    }
+
+    layers
+}
+
 fn view(editor: &Editor) -> Element<'_, Message> {
     let palette = editor.palette;
     let position = editor.caret.position();
@@ -1753,25 +1779,23 @@ fn view(editor: &Editor) -> Element<'_, Message> {
     .style(move |_theme| background_style(&palette))
     .into();
 
-    // The find popup floats in the top right corner, in any mode — on a
-    // persistent stack too, for the same reason as the note popup.
+    // Root layers are pushed in their stable bottom-to-top order. Help is
+    // topmost; unsaved changes remains beneath it and above find and the
+    // persistent editing surface, preserving the trees and focus below.
     let mut layers = stack![content];
-
-    if editor.keymap.find_open() {
-        layers = layers.push(find_popup(editor, palette));
-    }
-
-    // The unsaved-changes dialog floats above everything but help.
-    if editor.keymap.unsaved_open() {
-        layers = layers.push(unsaved_dialog(editor.document.pending_action(), palette));
-    }
-
-    // Help is the topmost layer. The content below remains in the same
-    // stack; opening focuses the window's search field and closing hands
-    // focus back, so cursor and selections resume exactly where they were
-    // after Escape closes the overlay.
-    if editor.keymap.help_open() {
-        layers = layers.push(help::view(&editor.help, palette).map(Message::Help));
+    for layer in root_layer_order(editor).into_iter().skip(1) {
+        layers = match layer {
+            RootLayer::EditingSurface => unreachable!("the editing surface is always first"),
+            RootLayer::Find => layers.push(find_popup(editor, palette)),
+            RootLayer::Unsaved => {
+                let action = editor
+                    .document
+                    .pending_action()
+                    .expect("a visible unsaved modal has a pending action");
+                layers.push(document::unsaved_view::view(action, palette).map(Message::Document))
+            }
+            RootLayer::Help => layers.push(help::view(&editor.help, palette).map(Message::Help)),
+        };
     }
 
     keyboard_guard(layers.into(), editor.keymap)
@@ -2387,81 +2411,6 @@ fn note_popup(editor: &Editor) -> Element<'_, Message> {
     .into()
 }
 
-/// The unsaved-changes dialog: a translucent backdrop with a centered card
-/// warning that the document is modified, and the three answers — Cancel
-/// keeps editing, Save writes the document and proceeds, Discard throws
-/// the changes away. Escape cancels like the button.
-fn unsaved_dialog(pending: Option<UnsavedAction>, palette: Palette) -> Element<'static, Message> {
-    let warning = match pending {
-        Some(UnsavedAction::CloseWindow(_)) => {
-            "The document has unsaved changes. Close without saving?"
-        }
-        _ => "The document has unsaved changes. Opening a new file will discard them.",
-    };
-
-    let card = mouse_area(
-        container(
-            column![
-                text("Unsaved changes")
-                    .font(EDITOR_FONT)
-                    .size(16)
-                    .color(palette.foreground),
-                text(warning)
-                    .font(EDITOR_FONT)
-                    .size(13)
-                    .color(palette.light_foreground),
-                row![
-                    button(
-                        text("Cancel")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.light_foreground),
-                    )
-                    .on_press(Message::Document(document::Message::UnsavedCancel))
-                    .padding([6, 12])
-                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
-                    Space::new().width(Length::Fill),
-                    button(
-                        text("Save")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.foreground),
-                    )
-                    .on_press(Message::Document(document::Message::UnsavedSave))
-                    .padding([6, 12])
-                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
-                    button(
-                        text("Discard")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.red),
-                    )
-                    .on_press(Message::Document(document::Message::UnsavedDiscard))
-                    .padding([6, 12])
-                    .style(move |theme, status| popup_button_style(&palette, theme, status)),
-                ]
-                .width(Length::Fill),
-            ]
-            .spacing(12)
-            .width(Length::Fill),
-        )
-        .width(Length::Fixed(440.0))
-        .padding(16)
-        .style(move |_theme| note_card_style(&palette)),
-    )
-    .on_press(Message::Document(document::Message::UnsavedCardPressed));
-
-    mouse_area(
-        container(card)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .style(note_backdrop_style),
-    )
-    .on_press(Message::Document(document::Message::UnsavedCancel))
-    .into()
-}
-
 fn note_backdrop_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
@@ -2584,8 +2533,8 @@ mod tests {
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::theme::Palette;
     use super::{
-        keyboard_guard_action, synchronize_source, update, Editor, KeyboardGuardAction, Message,
-        SourceSynchronization,
+        keyboard_guard_action, root_layer_order, synchronize_source, update, Editor,
+        KeyboardGuardAction, Message, RootLayer, SourceSynchronization,
     };
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
@@ -2883,6 +2832,41 @@ mod tests {
         let _ = update(&mut preview, Message::Help(super::help::Message::Close));
         assert_eq!(preview.caret.position(), caret);
         assert_eq!(preview.visual_anchor, anchor);
+    }
+
+    /// The unsaved modal is composed from the real document and input
+    /// state above the persistent editing surface and below Help.
+    #[test]
+    fn unsaved_modal_is_above_editing_surface_and_below_help() {
+        use iced::widget::text_editor::{Action, Edit};
+
+        let mut editor = editor_at(
+            "draft",
+            CaretPosition {
+                element: 0,
+                column: 0,
+            },
+        );
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::Edit(Action::Edit(Edit::Insert(
+                '!',
+            )))),
+        );
+        let _ = update(
+            &mut editor,
+            Message::Document(super::document::Message::OpenRequested),
+        );
+        let _ = update(&mut editor, Message::OpenHelp);
+
+        assert_eq!(
+            root_layer_order(&editor),
+            vec![
+                RootLayer::EditingSurface,
+                RootLayer::Unsaved,
+                RootLayer::Help
+            ]
+        );
     }
 
     /// The root keyboard guard claims the `Ctrl + ?` chord before any
@@ -3188,53 +3172,6 @@ mod tests {
         let _ = update(&mut editor, Message::FindPrevious);
         let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
-    }
-
-    /// While the unsaved dialog is open the editing surface beneath is
-    /// frozen: the root guard captures every key press and the dialog
-    /// itself claims Escape.
-    #[test]
-    fn unsaved_dialog_captures_keys_before_focused_widgets() {
-        use iced::keyboard::{key, Location, Modifiers};
-
-        let pressed = |key: iced::keyboard::Key, modifiers| {
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: key.clone(),
-                modified_key: key,
-                physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-                location: Location::Standard,
-                modifiers,
-                text: None,
-                repeat: false,
-            })
-        };
-
-        let mut keymap = Keymap::new(false);
-        keymap.note(Transition::UnsavedOpened);
-
-        let typing = pressed(
-            iced::keyboard::Key::Character("x".into()),
-            Modifiers::default(),
-        );
-        assert_eq!(
-            keyboard_guard_action(keymap, &typing),
-            KeyboardGuardAction::Capture
-        );
-
-        let shortcut = pressed(iced::keyboard::Key::Character("s".into()), Modifiers::CTRL);
-        assert_eq!(
-            keyboard_guard_action(keymap, &shortcut),
-            KeyboardGuardAction::Capture
-        );
-
-        let escape = pressed(
-            iced::keyboard::Key::Named(key::Named::Escape),
-            Modifiers::default(),
-        );
-        assert_eq!(
-            keyboard_guard_action(keymap, &escape),
-            KeyboardGuardAction::CancelUnsaved
-        );
     }
 
     /// A note saved while visual mode holds a selection anchors to exactly

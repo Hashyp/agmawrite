@@ -1,4 +1,5 @@
 pub(crate) mod io;
+pub(crate) mod unsaved_view;
 pub(crate) mod watch;
 
 use iced::widget::text_editor;
