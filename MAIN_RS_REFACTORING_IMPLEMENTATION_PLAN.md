@@ -677,7 +677,7 @@ Use a simpler return type for features that do not need both tasks and events.
 - No feature imports root `App` or root `Message`.
 - `src/lib.rs` is a small library/composition entry, not a renamed old `main.rs`.
 
-## Task 27 — Finish test ownership and add architecture checks
+## Task 27 — Finish test ownership and add architecture checks ✅ Completed
 
 **Goal:** leave tests and module boundaries documenting the new design.
 

@@ -95,6 +95,21 @@ fn forward_change(sender: &mut Sender<Event>) -> bool {
 mod tests {
     use super::forward_change;
 
+    /// Reading a watched document must not trigger another reload, while a
+    /// content mutation must still be observed.
+    #[test]
+    fn access_events_are_ignored() {
+        use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
+        use notify::EventKind;
+
+        assert!(!crate::watch::may_change_file(&EventKind::Access(
+            AccessKind::Open(AccessMode::Read),
+        )));
+        assert!(crate::watch::may_change_file(&EventKind::Modify(
+            ModifyKind::Data(DataChange::Content),
+        )));
+    }
+
     /// A queued file-change event already represents the latest disk state. A
     /// full channel must therefore coalesce, not kill the watcher.
     #[test]
