@@ -208,7 +208,7 @@ Use a simpler return type for features that do not need both tasks and events.
 
 # Phase 2: Extract the document lifecycle
 
-## Task 4 — Introduce `document::State`
+## Task 4 — Introduce `document::State` ✅ Completed
 
 **Goal:** group document invariants without moving async I/O or update routing yet.
 

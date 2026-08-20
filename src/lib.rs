@@ -1,6 +1,7 @@
 mod cli;
 mod command;
 mod comments;
+mod document;
 mod editing;
 mod find;
 mod help;
@@ -15,6 +16,7 @@ use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use comments::{Comments, Mark, Span};
+use document::UnsavedAction;
 use keymap::{Keymap, Mode, Transition};
 use preview::{Caret, CaretPosition, ElementMap, Jump, Motion, Page, Placement, WordMotion};
 use theme::Palette;
@@ -53,10 +55,8 @@ const SOURCE_EDITOR_ID: &str = "source-editor";
 const CARET_MARGIN: f32 = 8.0;
 
 struct Editor {
-    content: text_editor::Content,
+    document: document::State,
     markdown: markdown::Content,
-    /// The file the contents came from and save back to, once known.
-    path: Option<std::path::PathBuf>,
     /// The input mode stack — write, view, visual, note — owning key
     /// handling and the mode badge's state.
     keymap: Keymap,
@@ -79,25 +79,11 @@ struct Editor {
     find: find::Find,
     /// The shortcuts Help window's query state.
     help: help::Help,
-    /// The contents as last loaded or saved — the baseline the
-    /// unsaved-changes detection compares against.
-    saved_contents: String,
-    /// What happens once the unsaved-changes dialog is answered: the
-    /// action the user was trying to perform.
-    pending_unsaved: Option<UnsavedAction>,
     /// The comment the note popup edits, when it is open for editing an
     /// existing comment instead of writing a fresh one.
     editing_comment: Option<(usize, usize)>,
     /// The omarchy color scheme the interface paints with.
     palette: Palette,
-}
-
-/// What the unsaved-changes dialog guards: opening another file, or
-/// closing the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnsavedAction {
-    OpenFile,
-    CloseWindow(iced::window::Id),
 }
 
 #[derive(Debug, Clone)]
@@ -503,7 +489,7 @@ fn subscription(editor: &Editor) -> Subscription<Message> {
     // unsaved-changes dialog can intercept it; a clean window closes.
     let close = iced::window::close_requests().map(Message::WindowCloseRequested);
 
-    match &editor.path {
+    match editor.document.path() {
         Some(path) => Subscription::batch([keys, close, watch_file(path), watch_palette()]),
         None => Subscription::batch([keys, close, watch_palette()]),
     }
@@ -660,42 +646,6 @@ fn forward_file_change(sender: &mut iced::futures::channel::mpsc::Sender<Message
     }
 }
 
-/// Replaces source text while keeping its cursor (and selection) at the
-/// nearest valid position in the externally changed document.
-fn replace_source_text(editor: &mut Editor, contents: &str) {
-    let cursor = editor.content.cursor();
-    let mut content = text_editor::Content::with_text(contents);
-    content.move_to(text_editor::Cursor {
-        position: clamp_editor_position(&content, cursor.position),
-        selection: cursor
-            .selection
-            .map(|position| clamp_editor_position(&content, position)),
-    });
-    editor.content = content;
-}
-
-fn clamp_editor_position(
-    content: &text_editor::Content,
-    position: text_editor::Position,
-) -> text_editor::Position {
-    let line = position.line.min(content.line_count().saturating_sub(1));
-    let text = content.line(line).map(|line| line.text).unwrap_or_default();
-    let mut column = position.column.min(text.len());
-
-    // iced's editor columns are UTF-8 byte offsets. An external edit can
-    // put the old offset in the middle of a new multi-byte character.
-    while !text.is_char_boundary(column) {
-        column -= 1;
-    }
-
-    text_editor::Position { line, column }
-}
-
-/// Whether the document carries unsaved changes.
-fn is_modified(editor: &Editor) -> bool {
-    editor.content.text() != editor.saved_contents
-}
-
 /// Runs the action the unsaved-changes dialog was guarding.
 fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
     match action {
@@ -706,7 +656,7 @@ fn run_unsaved_action(action: UnsavedAction) -> Task<Message> {
 
 /// Shows the unsaved-changes dialog guarding `action`.
 fn show_unsaved(editor: &mut Editor, action: UnsavedAction) {
-    editor.pending_unsaved = Some(action);
+    editor.document.set_pending_action(action);
     editor.keymap.note(Transition::UnsavedOpened);
 }
 
@@ -714,12 +664,13 @@ fn show_unsaved(editor: &mut Editor, action: UnsavedAction) {
 /// The save carries a snapshot of the contents: whatever the user types
 /// while it runs stays unsaved, not silently swallowed by the completion.
 fn start_save(editor: &Editor) -> Task<Message> {
-    match &editor.path {
+    match editor.document.path() {
         Some(path) => {
-            let snapshot = editor.content.text();
-            Task::perform(save_file(path.clone(), snapshot.clone()), move |result| {
-                Message::FileSaved(result, snapshot)
-            })
+            let snapshot = editor.document.text();
+            Task::perform(
+                save_file(path.to_path_buf(), snapshot.clone()),
+                move |result| Message::FileSaved(result, snapshot),
+            )
         }
         None => Task::perform(pick_save_path(), Message::SavePathChosen),
     }
@@ -738,7 +689,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             // Opening a new file over unsaved changes would lose them:
             // the dialog asks first, and only a clean document opens
             // straight away.
-            if is_modified(editor) {
+            if editor.document.is_modified() {
                 show_unsaved(editor, UnsavedAction::OpenFile);
                 return Task::none();
             }
@@ -746,23 +697,21 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
             return Task::perform(open_file(), Message::FileLoaded);
         }
         Message::FileLoaded(Some((path, contents))) => {
-            editor.path = Some(path);
+            editor.document.load(path, &contents);
             editor.preview_elements = ElementMap::parse(&contents);
             editor.caret = Caret::new();
             editor.visual_anchor = None;
             editor.note_text = text_editor::Content::new();
             editor.comments = Comments::new();
             editor.editing_comment = None;
-            editor.content = text_editor::Content::with_text(&contents);
-            editor.saved_contents = contents.clone();
             editor.markdown = markdown::Content::parse(&contents);
         }
         Message::FileLoaded(None) => {}
         Message::SaveFile => return start_save(editor),
         Message::SavePathChosen(Some(path)) => {
-            editor.path = Some(path.clone());
+            editor.document.set_path(path.clone());
 
-            let snapshot = editor.content.text();
+            let snapshot = editor.document.text();
 
             return Task::perform(save_file(path, snapshot.clone()), move |result| {
                 Message::FileSaved(result, snapshot)
@@ -771,19 +720,19 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         Message::SavePathChosen(None) => {
             // The save dialog was cancelled: whatever waited on the save
             // is off, the document stays as it is.
-            editor.pending_unsaved = None;
+            editor.document.clear_pending_action();
         }
         Message::FileSaved(Ok(_path), snapshot) => {
             // Only what was actually written counts as saved: the baseline
             // is the snapshot the save carried, not the live editor.
-            editor.saved_contents = snapshot;
+            editor.document.mark_saved(snapshot);
 
             // Whatever the unsaved dialog was guarding proceeds now that
             // the saved revision is clean — unless the user typed while
             // the save ran, in which case the newer edits are still
             // unsaved and the dialog asks again.
-            if let Some(action) = editor.pending_unsaved.take() {
-                if !is_modified(editor) {
+            if let Some(action) = editor.document.take_pending_action() {
+                if !editor.document.is_modified() {
                     return run_unsaved_action(action);
                 }
 
@@ -792,22 +741,22 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::FileSaved(Err(error), _snapshot) => {
             eprintln!("agmawrite: {error}");
-            editor.pending_unsaved = None;
+            editor.document.clear_pending_action();
         }
         // Clicks on the dialog card are swallowed so they neither cancel
         // the dialog nor reach the editing surface beneath.
         Message::UnsavedCardPressed => {}
-        Message::UnsavedCancel => editor.pending_unsaved = None,
+        Message::UnsavedCancel => editor.document.clear_pending_action(),
         Message::UnsavedSave => return start_save(editor),
         Message::UnsavedDiscard => {
-            if let Some(action) = editor.pending_unsaved.take() {
+            if let Some(action) = editor.document.take_pending_action() {
                 return run_unsaved_action(action);
             }
         }
         Message::WindowCloseRequested(id) => {
             // Closing over unsaved changes asks first; a clean window
             // closes.
-            if is_modified(editor) {
+            if editor.document.is_modified() {
                 show_unsaved(editor, UnsavedAction::CloseWindow(id));
             } else {
                 return iced::window::close(id);
@@ -815,7 +764,7 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
         }
         Message::PaletteChanged => editor.palette = Palette::current(),
         Message::FileChangedExternally => {
-            let Some(path) = &editor.path else {
+            let Some(path) = editor.document.path() else {
                 return Task::none();
             };
 
@@ -825,11 +774,9 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            if contents != editor.content.text() {
-                replace_source_text(editor, &contents);
-                editor.saved_contents = contents;
-                editor.markdown = markdown::Content::parse(&editor.content.text());
-                editor.preview_elements = ElementMap::parse(&editor.content.text());
+            if editor.document.replace_external(&contents) {
+                editor.markdown = markdown::Content::parse(&contents);
+                editor.preview_elements = ElementMap::parse(&contents);
                 editor.caret = Caret::new();
 
                 if editor.keymap.preview() {
@@ -842,11 +789,12 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                 editor.visual_anchor = None;
 
                 if editor.keymap.preview() {
-                    let contents = editor.content.text();
+                    let contents = editor.document.text();
                     editor.preview_elements = ElementMap::parse(&contents);
-                    editor
-                        .caret
-                        .move_to_source_cursor(&editor.content, editor.preview_elements.elements());
+                    editor.caret.move_to_source_cursor(
+                        editor.document.content(),
+                        editor.preview_elements.elements(),
+                    );
                     editor.markdown = markdown::Content::parse(&contents);
 
                     return reveal_preview_caret();
@@ -1030,11 +978,11 @@ fn update(editor: &mut Editor, message: Message) -> Task<Message> {
                     return reveal_preview_caret();
                 }
 
-                let source = editor.content.text();
+                let source = editor.document.text();
                 let element = editor.preview_elements.elements().get(anchor.element);
 
                 if let Some(element) = element {
-                    editor.content.move_to(text_editor::Cursor {
+                    editor.document.move_to(text_editor::Cursor {
                         position: editing::position_at(&source, element.source().start),
                         selection: None,
                     });
@@ -1074,14 +1022,14 @@ fn select_find_match(editor: &mut Editor, way: find::Way) -> Task<Message> {
         return reveal_preview_caret();
     }
 
-    let source = editor.content.text();
+    let source = editor.document.text();
     let matches = editing::source_matches(&source, editor.find.query());
     let Some(index) = editor.find.select(way, matches.len()) else {
         return Task::none();
     };
 
     let editing::SourceMatch { line, columns } = matches[index].clone();
-    editor.content.move_to(text_editor::Cursor {
+    editor.document.move_to(text_editor::Cursor {
         position: text_editor::Position {
             line,
             column: columns.start,
@@ -1105,7 +1053,7 @@ fn find_match_count(editor: &Editor) -> usize {
     if editor.keymap.preview() {
         find::preview_matches(editor.preview_elements.elements(), editor.find.query()).len()
     } else {
-        editing::source_matches(&editor.content.text(), editor.find.query()).len()
+        editing::source_matches(&editor.document.text(), editor.find.query()).len()
     }
 }
 
@@ -1402,12 +1350,12 @@ fn edit_source(editor: &mut Editor, action: text_editor::Action) -> Task<Message
     use text_editor::{Action, Edit};
 
     if !matches!(action, Action::Edit(Edit::Enter)) {
-        editor.content.perform(action);
+        editor.document.perform(action);
         return Task::none();
     }
 
-    let cursor = editor.content.cursor().position;
-    let before = editor.content.line(cursor.line).map(|line| {
+    let cursor = editor.document.content().cursor().position;
+    let before = editor.document.content().line(cursor.line).map(|line| {
         line.text
             .char_indices()
             .nth(cursor.column)
@@ -1417,19 +1365,19 @@ fn edit_source(editor: &mut Editor, action: text_editor::Action) -> Task<Message
 
     match before.as_deref().map(editing::continuation) {
         Some(editing::Continuation::Continue(prefix)) => {
-            editor.content.perform(action);
+            editor.document.perform(action);
             editor
-                .content
+                .document
                 .perform(Action::Edit(Edit::Paste(std::sync::Arc::new(prefix))));
         }
         Some(editing::Continuation::Outdent(count)) => {
             for _ in 0..count {
-                editor.content.perform(Action::Edit(Edit::Backspace));
+                editor.document.perform(Action::Edit(Edit::Backspace));
             }
 
-            editor.content.perform(action);
+            editor.document.perform(action);
         }
-        _ => editor.content.perform(action),
+        _ => editor.document.perform(action),
     }
 
     Task::none()
@@ -1904,7 +1852,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
     } else {
-        text_editor(&editor.content)
+        text_editor(editor.document.content())
             .id(Id::new(SOURCE_EDITOR_ID))
             .on_action(Message::Edit)
             .font(EDITOR_FONT)
@@ -2082,7 +2030,7 @@ fn view(editor: &Editor) -> Element<'_, Message> {
 
     // The unsaved-changes dialog floats above everything but help.
     if editor.keymap.unsaved_open() {
-        layers = layers.push(unsaved_dialog(editor.pending_unsaved, palette));
+        layers = layers.push(unsaved_dialog(editor.document.pending_action(), palette));
     }
 
     // Help is the topmost layer. The content below remains in the same
@@ -2158,7 +2106,7 @@ fn collapsed_sidebar_rail(editor: &Editor, palette: Palette) -> Element<'_, Mess
 /// for, replies indented under it — a resolved-history section below, and
 /// a free text field with Add and Publish buttons at the bottom.
 fn comments_sidebar<'a>(editor: &'a Editor, palette: Palette) -> Element<'a, Message> {
-    let source = editor.content.text();
+    let source = editor.document.text();
     let cards = editor
         .comments
         .cards(&source, editor.preview_elements.elements());
@@ -2838,15 +2786,14 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         .unwrap_or_default();
 
     let editor = Editor {
-        content: contents
-            .as_deref()
-            .map(text_editor::Content::with_text)
-            .unwrap_or_default(),
+        document: document::State::new(
+            contents.as_deref().unwrap_or_default(),
+            args.path.as_ref().map(std::path::PathBuf::from),
+        ),
         markdown: contents
             .as_deref()
             .map(markdown::Content::parse)
             .unwrap_or_default(),
-        path: args.path.as_ref().map(std::path::PathBuf::from),
         keymap: Keymap::new(args.preview),
         caret: Caret::new(),
         preview_elements,
@@ -2856,8 +2803,6 @@ fn boot(args: &Args) -> (Editor, Task<Message>) {
         sidebar_override: None,
         find: find::Find::new(),
         help: help::Help::new(),
-        saved_contents: contents.clone().unwrap_or_default(),
-        pending_unsaved: None,
         editing_comment: None,
         palette: Palette::current(),
     };
@@ -2908,15 +2853,15 @@ pub fn run(args: impl IntoIterator<Item = String>) -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::comments::{Comments, Mark};
+    use super::document::UnsavedAction;
     use super::find;
     use super::keymap::{Keymap, Mode, Transition};
     use super::preview::{Caret, CaretPosition, ElementMap};
     use super::theme::Palette;
     use super::{
-        forward_file_change, keyboard_guard_action, may_change_file, replace_source_text, update,
-        Editor, KeyboardGuardAction, Message,
+        forward_file_change, keyboard_guard_action, may_change_file, update, Editor,
+        KeyboardGuardAction, Message,
     };
-    use super::{is_modified, UnsavedAction};
 
     fn editor_at(contents: &str, position: CaretPosition) -> Editor {
         let mut keymap = Keymap::new(false);
@@ -2926,9 +2871,8 @@ mod tests {
         caret.place(position);
 
         Editor {
-            content: iced::widget::text_editor::Content::with_text(contents),
+            document: super::document::State::new(contents, None),
             markdown: iced::widget::markdown::Content::parse(contents),
-            path: None,
             keymap,
             caret,
             preview_elements: ElementMap::parse(contents),
@@ -2938,8 +2882,6 @@ mod tests {
             sidebar_override: None,
             find: find::Find::new(),
             help: super::help::Help::new(),
-            saved_contents: contents.to_owned(),
-            pending_unsaved: None,
             editing_comment: None,
             palette: Palette::default(),
         }
@@ -2952,9 +2894,8 @@ mod tests {
         use iced::widget::text_editor::{Cursor, Position};
 
         let mut source = Editor {
-            content: iced::widget::text_editor::Content::with_text("first\nsecond"),
+            document: super::document::State::new("first\nsecond", None),
             markdown: iced::widget::markdown::Content::parse("first\nsecond"),
-            path: None,
             keymap: Keymap::new(false),
             caret: Caret::new(),
             preview_elements: ElementMap::parse("first\nsecond"),
@@ -2964,19 +2905,17 @@ mod tests {
             sidebar_override: None,
             find: find::Find::new(),
             help: super::help::Help::new(),
-            saved_contents: "first\nsecond".to_owned(),
-            pending_unsaved: None,
             editing_comment: None,
             palette: Palette::default(),
         };
-        source.content.move_to(Cursor {
+        source.document.move_to(Cursor {
             position: Position { line: 1, column: 3 },
             selection: Some(Position { line: 0, column: 1 }),
         });
-        let before = source.content.cursor();
+        let before = source.document.content().cursor();
         let _ = update(&mut source, Message::OpenHelp);
         let _ = update(&mut source, Message::Help(super::help::Message::Close));
-        assert_eq!(source.content.cursor(), before);
+        assert_eq!(source.document.content().cursor(), before);
 
         let mut preview = editor_at(
             "first\n\nsecond",
@@ -3197,7 +3136,7 @@ mod tests {
         let _ = update(&mut editor, Message::CommentCardPressed(0, 0));
 
         assert_eq!(
-            editor.content.cursor().position,
+            editor.document.content().cursor().position,
             Position { line: 4, column: 0 }
         );
     }
@@ -3282,23 +3221,23 @@ mod tests {
         // Enter walks the matches.
         editor.keymap.note(Transition::PreviewToggled);
         let _ = update(&mut editor, Message::FindQueryChanged("text".to_owned()));
-        let cursor = editor.content.cursor();
+        let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
         assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
 
         let _ = update(&mut editor, Message::FindNext);
-        let cursor = editor.content.cursor();
+        let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
         assert_eq!(cursor.selection, Some(Position { line: 4, column: 9 }));
 
         // Wraps around to the first match.
         let _ = update(&mut editor, Message::FindNext);
-        let cursor = editor.content.cursor();
+        let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 2, column: 5 });
 
         // And Shift+Enter steps back.
         let _ = update(&mut editor, Message::FindPrevious);
-        let cursor = editor.content.cursor();
+        let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 4, column: 5 });
     }
 
@@ -3330,35 +3269,6 @@ mod tests {
         assert!(!forward_file_change(&mut sender));
     }
 
-    /// Reloading external text keeps the write cursor instead of moving it
-    /// to the beginning, clamping positions when the new text is shorter.
-    #[test]
-    fn external_text_replacement_preserves_the_source_cursor() {
-        use iced::widget::text_editor::{Cursor, Position};
-
-        let mut editor = editor_at(
-            "first line\nsecond line\nthird line",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        editor.content.move_to(Cursor {
-            position: Position { line: 1, column: 6 },
-            selection: Some(Position { line: 2, column: 5 }),
-        });
-
-        replace_source_text(&mut editor, "changed\nstill here\nlast");
-        let cursor = editor.content.cursor();
-        assert_eq!(cursor.position, Position { line: 1, column: 6 });
-        assert_eq!(cursor.selection, Some(Position { line: 2, column: 4 }));
-
-        replace_source_text(&mut editor, "short");
-        let cursor = editor.content.cursor();
-        assert_eq!(cursor.position, Position { line: 0, column: 5 });
-        assert_eq!(cursor.selection, Some(Position { line: 0, column: 4 }));
-    }
-
     /// Enter on a list line continues the list; Enter on an empty item
     /// removes the marker and ends it.
     #[test]
@@ -3366,9 +3276,8 @@ mod tests {
         use iced::widget::text_editor::{Action, Cursor, Edit, Position};
 
         let mut editor = Editor {
-            content: iced::widget::text_editor::Content::with_text("- item"),
+            document: super::document::State::new("- item", None),
             markdown: iced::widget::markdown::Content::parse("- item"),
-            path: None,
             keymap: Keymap::new(false),
             caret: Caret::new(),
             preview_elements: ElementMap::parse("- item"),
@@ -3378,68 +3287,28 @@ mod tests {
             sidebar_override: None,
             find: find::Find::new(),
             help: super::help::Help::new(),
-            saved_contents: "- item".to_owned(),
-            pending_unsaved: None,
             editing_comment: None,
             palette: Palette::default(),
         };
-        editor.content.move_to(Cursor {
+        editor.document.move_to(Cursor {
             position: Position { line: 0, column: 6 },
             selection: None,
         });
 
         let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
 
-        assert_eq!(editor.content.text(), "- item\n- ");
-        let cursor = editor.content.cursor();
+        assert_eq!(editor.document.text(), "- item\n- ");
+        let cursor = editor.document.content().cursor();
         assert_eq!(cursor.position, Position { line: 1, column: 2 });
 
         // The new item is empty; Enter removes the marker and ends the list.
         let _ = update(&mut editor, Message::Edit(Action::Edit(Edit::Enter)));
 
-        assert_eq!(editor.content.text(), "- item\n\n");
+        assert_eq!(editor.document.text(), "- item\n\n");
         assert_eq!(
-            editor.content.cursor().position,
+            editor.document.content().cursor().position,
             Position { line: 2, column: 0 }
         );
-    }
-
-    /// Editing the document marks it modified; loading and saving reset
-    /// the baseline the unsaved-changes detection compares against.
-    #[test]
-    fn modified_tracking_follows_load_save_and_edits() {
-        let mut editor = editor_at(
-            "# Title\n\nbody",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-
-        assert!(!is_modified(&editor));
-
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('x'),
-            )),
-        );
-        assert!(is_modified(&editor));
-
-        // Saving records the new baseline — the snapshot the save wrote.
-        let saved = editor.content.text();
-        let _ = update(&mut editor, Message::FileSaved(Ok("ignored".into()), saved));
-        assert!(!is_modified(&editor));
-
-        // A fresh load resets it too.
-        let _ = update(
-            &mut editor,
-            Message::FileLoaded(Some((
-                std::path::PathBuf::from("/tmp/a.md"),
-                "other".to_owned(),
-            ))),
-        );
-        assert!(!is_modified(&editor));
     }
 
     /// Opening a file over unsaved changes shows the dialog instead of the
@@ -3454,12 +3323,14 @@ mod tests {
                 column: 0,
             },
         );
-        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-a.md"));
+        editor
+            .document
+            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-a.md"));
 
         // A clean document opens straight away — no dialog state.
         let _ = update(&mut editor, Message::OpenFile);
         assert!(!editor.keymap.unsaved_open());
-        assert!(editor.pending_unsaved.is_none());
+        assert!(editor.document.pending_action().is_none());
 
         // A modified document opens the dialog guarding the open.
         let _ = update(
@@ -3470,24 +3341,30 @@ mod tests {
         );
         let _ = update(&mut editor, Message::OpenFile);
         assert!(editor.keymap.unsaved_open());
-        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
+        assert_eq!(
+            editor.document.pending_action(),
+            Some(UnsavedAction::OpenFile)
+        );
 
         // Cancel keeps the document open and unmodified-by-dialog.
         let _ = update(&mut editor, Message::UnsavedCancel);
         assert!(!editor.keymap.unsaved_open());
-        assert!(editor.pending_unsaved.is_none());
-        assert!(is_modified(&editor));
+        assert!(editor.document.pending_action().is_none());
+        assert!(editor.document.is_modified());
 
         // Save answers by saving first; the guarded action waits for the
         // save to land.
         let _ = update(&mut editor, Message::OpenFile);
         let _ = update(&mut editor, Message::UnsavedSave);
         assert!(!editor.keymap.unsaved_open());
-        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
-        let saved = editor.content.text();
+        assert_eq!(
+            editor.document.pending_action(),
+            Some(UnsavedAction::OpenFile)
+        );
+        let saved = editor.document.text();
         let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
-        assert!(!is_modified(&editor));
-        assert!(editor.pending_unsaved.is_none());
+        assert!(!editor.document.is_modified());
+        assert!(editor.document.pending_action().is_none());
 
         // Discard drops the guard immediately — the action runs without
         // saving.
@@ -3500,17 +3377,16 @@ mod tests {
         let _ = update(&mut editor, Message::OpenFile);
         let _ = update(&mut editor, Message::UnsavedDiscard);
         assert!(!editor.keymap.unsaved_open());
-        assert!(editor.pending_unsaved.is_none());
+        assert!(editor.document.pending_action().is_none());
         // The changes stay in the editor — discarding the dialog only
         // skips the save.
-        assert!(is_modified(&editor));
+        assert!(editor.document.is_modified());
     }
 
-    /// The save carries a snapshot: edits typed while the save ran are
-    /// not mistaken for saved. A pending open proceeds only when the
-    /// document still matches what was written, and asks again otherwise.
+    /// A pending open proceeds only when the document still matches the
+    /// completed save, and asks again when a newer edit exists.
     #[test]
-    fn edits_during_a_save_stay_unsaved() {
+    fn pending_open_reopens_the_guard_after_a_stale_save() {
         let mut editor = editor_at(
             "# Title\n\nbody",
             CaretPosition {
@@ -3518,7 +3394,9 @@ mod tests {
                 column: 0,
             },
         );
-        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-save.md"));
+        editor
+            .document
+            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-save.md"));
 
         let _ = update(
             &mut editor,
@@ -3544,58 +3422,24 @@ mod tests {
             Message::FileSaved(Ok("saved".into()), snapshot),
         );
 
-        assert!(is_modified(&editor));
         // The guarded open did not run; the dialog asks about the newer
         // unsaved edit instead.
         assert!(editor.keymap.unsaved_open());
-        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::OpenFile));
+        assert_eq!(
+            editor.document.pending_action(),
+            Some(UnsavedAction::OpenFile)
+        );
 
         // Saving the current contents this time lets the action proceed.
-        let snapshot = editor.content.text();
+        let snapshot = editor.document.text();
         let _ = update(&mut editor, Message::UnsavedSave);
         let _ = update(
             &mut editor,
             Message::FileSaved(Ok("saved".into()), snapshot),
         );
-        assert!(!is_modified(&editor));
-        assert!(editor.pending_unsaved.is_none());
+        assert!(!editor.document.is_modified());
+        assert!(editor.document.pending_action().is_none());
         assert!(!editor.keymap.unsaved_open());
-    }
-
-    /// A plain save (no dialog open) also baselines the snapshot that was
-    /// written: typing during the save keeps the document modified.
-    #[test]
-    fn a_plain_save_baselines_the_written_snapshot() {
-        let mut editor = editor_at(
-            "draft",
-            CaretPosition {
-                element: 0,
-                column: 0,
-            },
-        );
-        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-save2.md"));
-
-        let _ = update(
-            &mut editor,
-            Message::Edit(iced::widget::text_editor::Action::Edit(
-                iced::widget::text_editor::Edit::Insert('!'),
-            )),
-        );
-
-        // The save carries the pre-edit snapshot; the edit lands after.
-        let _ = update(
-            &mut editor,
-            Message::FileSaved(Ok("saved".into()), "draft".to_owned()),
-        );
-        assert!(is_modified(&editor));
-
-        // A save of the current text clears it.
-        let snapshot = editor.content.text();
-        let _ = update(
-            &mut editor,
-            Message::FileSaved(Ok("saved".into()), snapshot),
-        );
-        assert!(!is_modified(&editor));
     }
 
     /// A cancelled save dialog also cancels whatever waited on the save:
@@ -3610,7 +3454,7 @@ mod tests {
             },
         );
         // No path yet: saving goes through the save dialog.
-        assert!(editor.path.is_none());
+        assert!(editor.document.path().is_none());
         let _ = update(
             &mut editor,
             Message::Edit(iced::widget::text_editor::Action::Edit(
@@ -3624,8 +3468,8 @@ mod tests {
 
         // The user cancels the save dialog.
         let _ = update(&mut editor, Message::SavePathChosen(None));
-        assert!(editor.pending_unsaved.is_none());
-        assert!(is_modified(&editor));
+        assert!(editor.document.pending_action().is_none());
+        assert!(editor.document.is_modified());
     }
 
     /// Closing the window over unsaved changes shows the dialog; a clean
@@ -3652,7 +3496,10 @@ mod tests {
         );
         let _ = update(&mut editor, Message::WindowCloseRequested(id));
         assert!(editor.keymap.unsaved_open());
-        assert_eq!(editor.pending_unsaved, Some(UnsavedAction::CloseWindow(id)));
+        assert_eq!(
+            editor.document.pending_action(),
+            Some(UnsavedAction::CloseWindow(id))
+        );
 
         // Escape cancels the close.
         let _ = update(&mut editor, Message::UnsavedCancel);
@@ -3661,12 +3508,14 @@ mod tests {
         // Save closes once the save landed: the guard clears with the
         // action consumed.
         let _ = update(&mut editor, Message::WindowCloseRequested(id));
-        editor.path = Some(std::path::PathBuf::from("/tmp/agmawrite-test-b.md"));
+        editor
+            .document
+            .set_path(std::path::PathBuf::from("/tmp/agmawrite-test-b.md"));
         let _ = update(&mut editor, Message::UnsavedSave);
-        let saved = editor.content.text();
+        let saved = editor.document.text();
         let _ = update(&mut editor, Message::FileSaved(Ok("saved".into()), saved));
-        assert!(editor.pending_unsaved.is_none());
-        assert!(!is_modified(&editor));
+        assert!(editor.document.pending_action().is_none());
+        assert!(!editor.document.is_modified());
     }
 
     /// While the unsaved dialog is open the editing surface beneath is
