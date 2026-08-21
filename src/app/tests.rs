@@ -440,6 +440,59 @@ fn root_features_keep_base_note_find_unsaved_help_guard_order() {
     );
 }
 
+#[test]
+fn closing_find_above_note_restores_the_note_layer() {
+    let mut editor = app_at(
+        "draft",
+        CaretPosition {
+            element: 0,
+            column: 0,
+        },
+    );
+    let _ = update(
+        &mut editor,
+        Message::Comments(comments::Message::OpenComposer),
+    );
+    let _ = update(&mut editor, Message::Find(find::Message::Open));
+
+    assert_eq!(
+        root_layer_order(&editor),
+        vec![
+            RootLayer::Base,
+            RootLayer::Note,
+            RootLayer::Find,
+            RootLayer::InputGuard,
+        ]
+    );
+
+    let _ = update(&mut editor, Message::Find(find::Message::Close));
+
+    assert_eq!(
+        root_layer_order(&editor),
+        vec![RootLayer::Base, RootLayer::Note, RootLayer::InputGuard]
+    );
+}
+
+#[test]
+fn preview_toggle_preserves_an_open_find_across_surfaces() {
+    let mut editor = app_at(
+        "draft",
+        CaretPosition {
+            element: 0,
+            column: 0,
+        },
+    );
+    let _ = update(&mut editor, Message::Find(find::Message::Open));
+
+    let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
+    assert!(!editor.keymap.preview());
+    assert!(editor.keymap.find_open());
+
+    let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
+    assert!(editor.keymap.preview());
+    assert!(editor.keymap.find_open());
+}
+
 /// Clicking a comment card activates its comment and moves the cursor
 /// to the anchored element: the preview caret jumps there, and in
 /// write mode the source cursor lands on the element's source.

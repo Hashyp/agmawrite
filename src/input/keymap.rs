@@ -600,6 +600,52 @@ mod tests {
         assert_eq!(keymap.mode(), Mode::Write);
     }
 
+    #[test]
+    fn closing_find_above_note_restores_note() {
+        let mut keymap = viewing();
+        keymap.note(Transition::NoteOpened);
+        keymap.note(Transition::FindOpened);
+
+        assert!(keymap.note_open());
+        assert!(keymap.find_open());
+
+        keymap.note(Transition::FindClosed);
+
+        assert!(keymap.note_open());
+        assert!(!keymap.find_open());
+        assert_eq!(keymap.mode(), Mode::Note);
+    }
+
+    /// Find is rendered above Note, so its badge should have the same
+    /// priority. This deliberately captures the priority correction that
+    /// the legacy boolean ordering does not yet satisfy.
+    #[test]
+    fn find_above_note_uses_find_badge() {
+        let mut keymap = viewing();
+        keymap.note(Transition::NoteOpened);
+        keymap.note(Transition::FindOpened);
+
+        assert_eq!(keymap.mode(), Mode::Find);
+    }
+
+    #[test]
+    fn preview_toggle_preserves_find_and_drops_note_beneath_it() {
+        let mut keymap = viewing();
+        keymap.note(Transition::NoteOpened);
+        keymap.note(Transition::FindOpened);
+
+        keymap.note(Transition::PreviewToggled);
+        assert!(!keymap.preview());
+        assert!(keymap.find_open());
+        assert!(!keymap.note_open());
+        assert_eq!(keymap.mode(), Mode::Find);
+
+        keymap.note(Transition::PreviewToggled);
+        assert!(keymap.preview());
+        assert!(keymap.find_open());
+        assert_eq!(keymap.mode(), Mode::Find);
+    }
+
     /// Holding a motion key auto-repeats the motion, like holding `j` or
     /// `k` in vim; one-shot actions and the `g`-prefix never repeat.
     #[test]
@@ -878,6 +924,44 @@ mod tests {
         assert!(matches!(
             view.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::First, 3)))
+        ));
+    }
+
+    #[test]
+    fn help_preserves_pending_count_and_prefixes() {
+        let mut count = viewing();
+        count.note(Transition::CountPressed(4));
+        count.note(Transition::HelpOpened);
+        count.note(Transition::HelpActivity);
+        count.note(Transition::HelpClosed);
+        assert_eq!(count.pending_count(), 4);
+        assert!(matches!(
+            count.handle(key_press("j", false)),
+            Some(Command::Preview(PreviewCommand::Move(Motion::Down, 4)))
+        ));
+
+        let mut g = viewing();
+        g.note(Transition::CountPressed(3));
+        g.note(Transition::GArmed);
+        g.note(Transition::HelpOpened);
+        g.note(Transition::HelpActivity);
+        g.note(Transition::HelpClosed);
+        assert_eq!(g.pending_count(), 3);
+        assert!(matches!(
+            g.handle(key_press("g", false)),
+            Some(Command::Preview(PreviewCommand::Jump(Jump::First, 3)))
+        ));
+
+        let mut z = viewing();
+        z.note(Transition::ZArmed);
+        z.note(Transition::HelpOpened);
+        z.note(Transition::HelpActivity);
+        z.note(Transition::HelpClosed);
+        assert!(matches!(
+            z.handle(key_press("t", false)),
+            Some(Command::Preview(PreviewCommand::ScrollCaret(
+                Placement::Top
+            )))
         ));
     }
 
@@ -1302,6 +1386,46 @@ mod tests {
                 Placement::Center
             )))
         ));
+    }
+
+    #[test]
+    fn note_find_and_unsaved_cancel_pending_input() {
+        for (name, open, close) in [
+            ("note", Transition::NoteOpened, Transition::NoteClosed),
+            ("find", Transition::FindOpened, Transition::FindClosed),
+            (
+                "unsaved",
+                Transition::UnsavedOpened,
+                Transition::UnsavedClosed,
+            ),
+        ] {
+            let mut g = viewing();
+            g.note(Transition::CountPressed(7));
+            g.note(Transition::GArmed);
+            g.note(open);
+            assert_eq!(
+                g.pending_count(),
+                0,
+                "opening {name} should cancel the pending count"
+            );
+            g.note(close);
+            assert!(
+                matches!(
+                    g.handle(key_press("g", false)),
+                    Some(Command::Preview(PreviewCommand::ArmG))
+                ),
+                "opening {name} should cancel the pending g prefix"
+            );
+
+            let mut z = viewing();
+            z.note(Transition::ZArmed);
+            z.note(open);
+            z.note(close);
+            assert!(
+                z.handle(key_press("t", false)).is_none(),
+                "opening {name} should cancel the pending z prefix"
+            );
+        }
     }
 
     /// The unsaved-changes dialog swallows every key but Escape, and its

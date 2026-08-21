@@ -289,6 +289,33 @@ mod tests {
     }
 
     #[test]
+    fn help_over_unsaved_over_find_over_note_unwinds_to_note() {
+        let mut keymap = Keymap::new(false);
+        keymap.note(Transition::PreviewToggled);
+        keymap.note(Transition::NoteOpened);
+        keymap.note(Transition::FindOpened);
+        keymap.note(Transition::UnsavedOpened);
+        keymap.note(Transition::HelpOpened);
+
+        assert!(keymap.preview());
+        assert!(keymap.note_open());
+        assert!(keymap.find_open());
+        assert!(keymap.unsaved_open());
+        assert!(keymap.help_open());
+        assert_eq!(action(keymap, &escape()), GuardAction::CloseHelp);
+
+        keymap.note(Transition::HelpClosed);
+        assert_eq!(action(keymap, &escape()), GuardAction::CancelUnsaved);
+
+        keymap.note(Transition::UnsavedClosed);
+        assert_eq!(action(keymap, &escape()), GuardAction::CloseFind);
+
+        keymap.note(Transition::FindClosed);
+        assert!(keymap.note_open());
+        assert_eq!(action(keymap, &escape()), GuardAction::CloseNote);
+    }
+
+    #[test]
     fn modal_priority_is_help_unsaved_find_note_then_focused_widgets() {
         let mut keymap = Keymap::new(false);
         keymap.note(Transition::NoteOpened);
