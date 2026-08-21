@@ -396,7 +396,7 @@ Gate:
 - A zero `Count` cannot be constructed through the public/module API.
 - Existing keyboard behavior tests pass.
 
-### [ ] Phase 2 — Introduce the interaction-state enums
+### [x] Phase 2 — Introduce the interaction-state enums
 
 Files:
 

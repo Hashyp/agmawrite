@@ -234,6 +234,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{action, GuardAction};
+    use crate::document::UnsavedAction;
     use crate::input::{Keymap, Transition};
     use iced::keyboard::{self, key, Location, Modifiers};
 
@@ -294,7 +295,7 @@ mod tests {
         keymap.note(Transition::PreviewToggled);
         keymap.note(Transition::NoteOpened);
         keymap.note(Transition::FindOpened);
-        keymap.note(Transition::UnsavedOpened);
+        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
         keymap.note(Transition::HelpOpened);
 
         assert!(keymap.preview());
@@ -318,9 +319,10 @@ mod tests {
     #[test]
     fn modal_priority_is_help_unsaved_find_note_then_focused_widgets() {
         let mut keymap = Keymap::new(false);
+        keymap.note(Transition::PreviewToggled);
         keymap.note(Transition::NoteOpened);
         keymap.note(Transition::FindOpened);
-        keymap.note(Transition::UnsavedOpened);
+        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
         keymap.note(Transition::HelpOpened);
 
         // Help has first refusal even when every lower modal is open, and

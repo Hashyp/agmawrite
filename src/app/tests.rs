@@ -302,7 +302,9 @@ fn entering_preview_policy_projects_edits_and_places_caret_from_source() {
         selection: Some(Position { line: 2, column: 1 }),
     });
     let source_cursor = editor.document.content().cursor();
+    editor.keymap.note(Transition::PreviewToggled);
     save_comment(&mut editor, "keep me");
+    editor.keymap.note(Transition::PreviewToggled);
 
     let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
     assert_eq!(editor.document.content().cursor(), source_cursor);

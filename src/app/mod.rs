@@ -176,11 +176,12 @@ fn handle_document_event(editor: &mut App, event: document::Event) -> Task<Messa
         }
         document::Event::CloseWindow(id) => iced::window::close(id),
         document::Event::UnsavedVisibilityChanged(visible) => {
-            editor.keymap.note(if visible {
-                Transition::UnsavedOpened
-            } else {
-                Transition::UnsavedClosed
-            });
+            let transition = editor
+                .document
+                .pending_action()
+                .filter(|_| visible)
+                .map_or(Transition::UnsavedClosed, Transition::UnsavedOpened);
+            editor.keymap.note(transition);
             Task::none()
         }
     }
@@ -189,7 +190,7 @@ fn handle_document_event(editor: &mut App, event: document::Event) -> Task<Messa
 fn handle_preview_event(editor: &mut App, event: preview::Event) -> Task<Message> {
     match event {
         preview::Event::ToggleRequested => {
-            if editor.keymap.preview_only() {
+            if !editor.keymap.can_toggle_preview() {
                 return Task::none();
             }
 
@@ -412,7 +413,7 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
 
     let toolbar = ui::toolbar::view(ui::toolbar::Model::new(
         editor.keymap.preview(),
-        editor.keymap.preview_only(),
+        editor.keymap.can_toggle_preview(),
         editor.keymap.mode(),
         editor.keymap.pending_count(),
         palette,

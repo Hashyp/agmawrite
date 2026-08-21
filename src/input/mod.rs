@@ -4,9 +4,11 @@ mod command;
 mod guard;
 mod keymap;
 mod pending;
+mod state;
 
 pub(crate) use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 pub(crate) use guard::{guard, GuardAction};
-pub(crate) use keymap::{Keymap, Mode, Transition};
+pub(crate) use keymap::{Keymap, Transition};
+pub(crate) use state::ModeBadge as Mode;

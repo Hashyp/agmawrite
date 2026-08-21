@@ -1,48 +1,20 @@
-//! The keymap: one representation of input mode, read by both key handling
-//! and the mode badge.
+//! Temporary keymap façade over the legal interaction-state hierarchy.
 //!
-//! The mode is a small stack: write or view at the base, visual mode as a
-//! layer over view, and the note popup floating on top of either. [`Keymap`]
-//! owns the stack plus pending preview prefixes and counts, behind two entry
-//! points: [`Keymap::handle`] turns a key event into an optional
-//! semantic command, and [`Keymap::note`] keeps the stack in sync with
-//! transition-driven changes (button clicks, backdrop clicks) so the two
-//! never disagree.
+//! [`Keymap::handle`] still resolves keys while callers migrate. All stored
+//! UI state and preview sequences live in [`InteractionState`].
 
 use iced::keyboard;
 
 use super::command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
-use super::pending::{Pending, Prefix};
+use super::pending::Prefix;
+use super::state::{InteractionState, ModeBadge, Overlay, Surface};
+use crate::document::UnsavedAction;
 use crate::help;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 
-/// The mode the editor is in, as shown by the bottom-bar badge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Mode {
-    /// Editing the Markdown source.
-    Write,
-    /// Previewing, caret moves without selecting.
-    View,
-    /// Previewing, motions extend the selection.
-    Visual,
-    /// The note popup is open over the preview.
-    Note,
-    /// The find popup is open.
-    Find,
-}
-
-/// The mode stack without the note popup: write, or preview with an
-/// optional visual layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Layer {
-    Write,
-    View,
-    Visual,
-}
-
-/// The input mode stack and pending preview sequence state.
+/// The input mode façade used while binding callers migrate.
 ///
 /// `Clone` + `Hash` so the keyboard subscription can carry a snapshot and
 /// re-listen when the mode changes; key handling reads the snapshot
@@ -50,18 +22,7 @@ enum Layer {
 /// ([`Keymap::note`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Keymap {
-    layer: Layer,
-    note_open: bool,
-    find_open: bool,
-    /// Whether the help overlay is open. This is deliberately kept out of
-    /// [`Keymap::mode`] so opening help does not change the underlying mode.
-    help_open: bool,
-    /// Whether the unsaved-changes dialog is open. Like help, it floats
-    /// above the underlying mode and swallows every key but Escape.
-    unsaved_open: bool,
-    preview_only: bool,
-    /// A pending `g`/`z` prefix and optional motion count.
-    pending: Pending,
+    interaction: InteractionState,
 }
 
 /// An input-local state transition observed by the keymap.
@@ -87,7 +48,7 @@ pub enum Transition {
     HelpClosed,
     /// Activity within Help is transparent to underlying prefixes/counts.
     HelpActivity,
-    UnsavedOpened,
+    UnsavedOpened(UnsavedAction),
     UnsavedClosed,
 }
 
@@ -96,89 +57,75 @@ impl Keymap {
     /// preview-only.
     pub fn new(preview_only: bool) -> Self {
         Self {
-            layer: if preview_only {
-                Layer::View
+            interaction: if preview_only {
+                InteractionState::preview_only()
             } else {
-                Layer::Write
+                InteractionState::editable()
             },
-            note_open: false,
-            find_open: false,
-            help_open: false,
-            unsaved_open: false,
-            preview_only,
-            pending: Pending::default(),
         }
     }
 
     /// The current mode, popups included — the badge reads this.
-    pub fn mode(&self) -> Mode {
-        if self.find_open {
-            Mode::Find
-        } else if self.note_open {
-            Mode::Note
-        } else {
-            match self.layer {
-                Layer::Write => Mode::Write,
-                Layer::View => Mode::View,
-                Layer::Visual => Mode::Visual,
-            }
-        }
+    pub fn mode(&self) -> ModeBadge {
+        self.interaction.view().badge()
     }
 
     /// Whether the preview is showing — in every mode but write. The note
     /// popup only ever floats above the preview, so it counts as preview.
     pub fn preview(&self) -> bool {
-        !matches!(self.layer, Layer::Write)
+        matches!(self.interaction.view().surface(), Surface::Preview)
     }
 
-    /// Whether the app runs preview-only (`--preview`): editing and
-    /// switching to write mode are disabled.
-    pub fn preview_only(&self) -> bool {
-        self.preview_only
+    /// Whether this session may switch between Write and Preview.
+    pub fn can_toggle_preview(&self) -> bool {
+        self.interaction.view().can_toggle_preview()
     }
 
     /// Whether the note popup is open.
     pub fn note_open(&self) -> bool {
-        self.note_open
+        self.interaction.view().contains(Overlay::Note)
     }
 
     /// Whether the find popup is open.
     pub fn find_open(&self) -> bool {
-        self.find_open
+        self.interaction.view().contains(Overlay::Find)
     }
 
     /// Whether the help overlay is open. The mode itself remains unchanged
     /// while help is visible.
     pub fn help_open(&self) -> bool {
-        self.help_open
+        matches!(self.interaction.view().overlay(), Some(Overlay::Help))
     }
 
     /// Whether the unsaved-changes dialog is open. The mode itself remains
     /// unchanged beneath it.
     pub fn unsaved_open(&self) -> bool {
-        self.unsaved_open
+        self.interaction.view().has_unsaved()
     }
 
     /// The pending motion count, for the mode badge's `3×` hint. `0` when
     /// no count is pending.
     pub fn pending_count(&self) -> u32 {
-        self.pending.pending_count()
+        self.interaction
+            .view()
+            .pending_count()
+            .map_or(0, std::num::NonZeroU32::get)
     }
 
     /// The count a motion repeats: the typed digits, or once.
     fn count(&self) -> usize {
-        self.pending.motion_count()
+        self.interaction.motion_count()
     }
 
     /// The count a jump carries: the typed digits, or `0` — none — so a
     /// plain `gg`/`G` keeps its first/last meaning.
     fn jump_count(&self) -> usize {
-        self.pending.jump_count()
+        self.interaction.jump_count()
     }
 
     /// Whether visual mode is active — motions extend the selection.
     pub fn visual(&self) -> bool {
-        matches!(self.layer, Layer::Visual)
+        self.interaction.view().visual()
     }
 
     /// Turns a key event into the semantic command it means in the current
@@ -191,11 +138,11 @@ impl Keymap {
         // Help owns its chord and modal keyboard decisions; the keymap
         // only supplies the visibility state and translates the decision
         // into an application message.
-        match help::keyboard_action(self.help_open, &event) {
+        match help::keyboard_action(self.help_open(), &event) {
             help::EventAction::Open => return Some(Command::Help(HelpCommand::Open)),
             help::EventAction::Close => return Some(Command::Help(HelpCommand::Close)),
             help::EventAction::Capture => return None,
-            help::EventAction::Pass if self.help_open => return None,
+            help::EventAction::Pass if self.help_open() => return None,
             help::EventAction::Pass => {}
         }
 
@@ -212,7 +159,7 @@ impl Keymap {
         // The unsaved-changes dialog is a modal too: Escape cancels it, the
         // three buttons answer it, and every other key is swallowed so the
         // editing surface beneath stays untouched.
-        if self.unsaved_open {
+        if self.unsaved_open() {
             return match modified_key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
                     Some(Command::Document(DocumentCommand::CancelUnsaved))
@@ -223,7 +170,7 @@ impl Keymap {
 
         // The note popup swallows plain keys for its text area; only Escape
         // closes it and Ctrl+S saves the comment.
-        if self.note_open && !modifiers.alt() && !modifiers.logo() {
+        if self.note_open() && !modifiers.alt() && !modifiers.logo() {
             return match modified_key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
                     Some(Command::Comments(CommentsCommand::CloseNote))
@@ -238,7 +185,7 @@ impl Keymap {
         // The find popup swallows plain keys for its query field; only
         // Escape closes it and Enter steps through the matches.
         // Ctrl combinations still reach the global shortcuts below.
-        if self.find_open && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+        if self.find_open() && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
             return match modified_key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) if !repeat => {
                     Some(Command::Find(FindCommand::Close))
@@ -265,7 +212,7 @@ impl Keymap {
                 keyboard::Key::Character(c)
                     if !repeat && c.chars().all(|character| character.is_ascii_digit()) =>
                 {
-                    if c == "0" && !self.pending.has_count() {
+                    if c == "0" && !self.interaction.has_count() {
                         Some(Command::Preview(PreviewCommand::Move(Motion::Start, 1)))
                     } else {
                         Some(Command::Preview(PreviewCommand::Count(
@@ -299,17 +246,23 @@ impl Keymap {
                 )),
                 // `zz`/`zt`/`zb` — scroll the caret to the middle, top, or
                 // bottom of the viewport. The second key is always fresh.
-                keyboard::Key::Character("z") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                keyboard::Key::Character("z")
+                    if self.interaction.has_prefix(Prefix::Z) && !repeat =>
+                {
                     Some(Command::Preview(PreviewCommand::ScrollCaret(
                         Placement::Center,
                     )))
                 }
-                keyboard::Key::Character("t") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                keyboard::Key::Character("t")
+                    if self.interaction.has_prefix(Prefix::Z) && !repeat =>
+                {
                     Some(Command::Preview(PreviewCommand::ScrollCaret(
                         Placement::Top,
                     )))
                 }
-                keyboard::Key::Character("b") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                keyboard::Key::Character("b")
+                    if self.interaction.has_prefix(Prefix::Z) && !repeat =>
+                {
                     Some(Command::Preview(PreviewCommand::ScrollCaret(
                         Placement::Bottom,
                     )))
@@ -320,7 +273,9 @@ impl Keymap {
                 }
                 // `gg` — the second `g` of the sequence is always a fresh
                 // press.
-                keyboard::Key::Character("g") if self.pending.has_prefix(Prefix::G) && !repeat => {
+                keyboard::Key::Character("g")
+                    if self.interaction.has_prefix(Prefix::G) && !repeat =>
+                {
                     Some(Command::Preview(PreviewCommand::Jump(
                         Jump::First,
                         self.jump_count(),
@@ -332,7 +287,7 @@ impl Keymap {
                 }
                 // `ge` — the `e` of the sequence is always a fresh press.
                 keyboard::Key::Character("e" | "E")
-                    if self.pending.has_prefix(Prefix::G) && !repeat =>
+                    if self.interaction.has_prefix(Prefix::G) && !repeat =>
                 {
                     Some(Command::Preview(PreviewCommand::MoveWord(
                         WordMotion::PreviousEnd,
@@ -375,7 +330,7 @@ impl Keymap {
                 keyboard::Key::Character("o" | "O") => {
                     Some(Command::Document(DocumentCommand::Open))
                 }
-                keyboard::Key::Character("p" | "P") if !self.preview_only => {
+                keyboard::Key::Character("p" | "P") if self.can_toggle_preview() => {
                     Some(Command::Preview(PreviewCommand::Toggle))
                 }
                 // Show or hide the comments sidebar.
@@ -391,7 +346,7 @@ impl Keymap {
                 // Find in the document, in any mode.
                 keyboard::Key::Character("f" | "F") => Some(Command::Find(FindCommand::Open)),
                 // Step to the next match while the find popup is open.
-                keyboard::Key::Character("g" | "G") if self.find_open => {
+                keyboard::Key::Character("g" | "G") if self.find_open() => {
                     Some(Command::Find(FindCommand::Next))
                 }
                 // Browse the saved comments in the preview.
@@ -424,54 +379,28 @@ impl Keymap {
     /// triggered without keys (button and backdrop clicks) land exactly
     /// like the key-driven ones.
     pub fn note(&mut self, transition: Transition) {
-        // Help is transparent to pending state. Prefix/count transitions
-        // update it; every other kind of activity clears it.
         match transition {
-            Transition::GArmed => self.pending.arm(Prefix::G),
-            Transition::ZArmed => self.pending.arm(Prefix::Z),
-            Transition::CountPressed(digit) => self.pending.push_digit(digit),
-            Transition::HelpOpened | Transition::HelpClosed | Transition::HelpActivity => {}
-            _ => self.pending.consume(),
-        }
-
-        match transition {
-            Transition::DocumentLoaded => {
-                self.note_open = false;
-                self.find_open = false;
-
-                if matches!(self.layer, Layer::Visual) {
-                    self.layer = Layer::View;
-                }
+            Transition::Activity => self.interaction.activity(),
+            Transition::DocumentLoaded => self.interaction.document_loaded(),
+            Transition::PreviewToggled => self.interaction.toggle_preview(),
+            Transition::VisualToggled => {
+                let _ = self.interaction.toggle_visual();
             }
-            Transition::PreviewToggled if !self.preview_only => {
-                self.note_open = false;
-                self.layer = if self.preview() {
-                    Layer::Write
-                } else {
-                    Layer::View
-                };
+            Transition::PreviewCancelled => self.interaction.cancel_preview(),
+            Transition::GArmed => self.interaction.arm_prefix(Prefix::G),
+            Transition::ZArmed => self.interaction.arm_prefix(Prefix::Z),
+            Transition::CountPressed(digit) => self.interaction.push_count_digit(digit),
+            Transition::NoteOpened => {
+                let _ = self.interaction.open_note();
             }
-            Transition::VisualToggled if self.preview() => {
-                self.layer = if matches!(self.layer, Layer::Visual) {
-                    Layer::View
-                } else {
-                    Layer::Visual
-                };
-            }
-            Transition::NoteOpened => self.note_open = true,
-            Transition::NoteClosed => self.note_open = false,
-            Transition::FindOpened => self.find_open = true,
-            Transition::FindClosed => self.find_open = false,
-            Transition::HelpOpened => self.help_open = true,
-            Transition::HelpClosed => self.help_open = false,
-            Transition::UnsavedOpened => self.unsaved_open = true,
-            Transition::UnsavedClosed => self.unsaved_open = false,
-            Transition::PreviewCancelled => {
-                if matches!(self.layer, Layer::Visual) {
-                    self.layer = Layer::View;
-                }
-            }
-            _ => {}
+            Transition::NoteClosed => self.interaction.close_note(),
+            Transition::FindOpened => self.interaction.open_find(),
+            Transition::FindClosed => self.interaction.close_find(),
+            Transition::HelpOpened => self.interaction.open_help(),
+            Transition::HelpClosed => self.interaction.close_help(),
+            Transition::HelpActivity => {}
+            Transition::UnsavedOpened(action) => self.interaction.open_unsaved(action),
+            Transition::UnsavedClosed => self.interaction.close_unsaved(),
         }
     }
 }
@@ -481,7 +410,9 @@ mod tests {
     use super::super::command::{
         Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
     };
-    use super::{Keymap, Mode, Transition};
+    use super::{Keymap, Transition};
+    use crate::document::UnsavedAction;
+    use crate::input::Mode;
     use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
     use iced::keyboard::{self, key, Modifiers};
 
@@ -983,7 +914,7 @@ mod tests {
     fn preview_only_locks_the_mode() {
         let mut keymap = Keymap::new(true);
         assert_eq!(keymap.mode(), Mode::View);
-        assert!(keymap.preview_only());
+        assert!(!keymap.can_toggle_preview());
 
         assert!(keymap
             .handle(key_press_with("p", Modifiers::CTRL, false))
@@ -1373,7 +1304,7 @@ mod tests {
             ("find", Transition::FindOpened, Transition::FindClosed),
             (
                 "unsaved",
-                Transition::UnsavedOpened,
+                Transition::UnsavedOpened(UnsavedAction::OpenFile),
                 Transition::UnsavedClosed,
             ),
         ] {
@@ -1411,7 +1342,7 @@ mod tests {
     #[test]
     fn unsaved_dialog_is_a_modal() {
         let mut keymap = viewing();
-        keymap.note(Transition::UnsavedOpened);
+        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
         assert!(keymap.unsaved_open());
         assert_eq!(keymap.mode(), Mode::View);
 
@@ -1433,7 +1364,7 @@ mod tests {
         // Answering closes it too.
         keymap.note(Transition::UnsavedClosed);
         assert!(!keymap.unsaved_open());
-        keymap.note(Transition::UnsavedOpened);
+        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
         keymap.note(Transition::UnsavedClosed);
         assert!(!keymap.unsaved_open());
         assert_eq!(keymap.mode(), Mode::View);

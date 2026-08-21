@@ -21,7 +21,7 @@ pub(crate) enum Message {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Model {
     preview: bool,
-    preview_only: bool,
+    can_toggle_preview: bool,
     mode: Mode,
     pending_count: u32,
     palette: Palette,
@@ -30,14 +30,14 @@ pub(crate) struct Model {
 impl Model {
     pub(crate) fn new(
         preview: bool,
-        preview_only: bool,
+        can_toggle_preview: bool,
         mode: Mode,
         pending_count: u32,
         palette: Palette,
     ) -> Self {
         Self {
             preview,
-            preview_only,
+            can_toggle_preview,
             mode,
             pending_count,
             palette,
@@ -110,7 +110,7 @@ where
 /// The eye invites switching to preview while writing; the pencil switches
 /// back to writing while previewing. Preview-only mode has no toggle.
 fn toggle_presentation(model: Model) -> Option<(&'static str, Element<'static, Message>)> {
-    if model.preview_only {
+    if !model.can_toggle_preview {
         None
     } else if model.preview {
         Some(("Ctrl + p, Write", icon(WriteIcon)))
@@ -230,9 +230,9 @@ mod tests {
     #[test]
     fn preview_toggle_preserves_labels_and_is_hidden_in_preview_only_mode() {
         let palette = Palette::default();
-        let write = Model::new(false, false, Mode::Write, 0, palette);
-        let preview = Model::new(true, false, Mode::View, 0, palette);
-        let preview_only = Model::new(true, true, Mode::View, 0, palette);
+        let write = Model::new(false, true, Mode::Write, 0, palette);
+        let preview = Model::new(true, true, Mode::View, 0, palette);
+        let preview_only = Model::new(true, false, Mode::View, 0, palette);
 
         assert_eq!(toggle_presentation(write).unwrap().0, "Ctrl + p, Preview");
         assert_eq!(toggle_presentation(preview).unwrap().0, "Ctrl + p, Write");

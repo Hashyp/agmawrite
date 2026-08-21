@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// What the unsaved-changes dialog guards: opening another file, or
 /// closing the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum UnsavedAction {
     OpenFile,
     CloseWindow(iced::window::Id),
