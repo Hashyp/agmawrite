@@ -1,116 +1,58 @@
-//! Root keyboard-event interception without a dependency on app messages.
+//! Thin Iced widget adaptation for the pure root event router.
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{layout, renderer, Clipboard, Layout, Shell, Widget};
-use iced::{keyboard, mouse, Element, Length, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{mouse, Element, Length, Rectangle, Renderer, Size, Theme, Vector};
 
-use super::Keymap;
-use crate::help;
+use super::bindings::{route, Decision, InputMessage};
+use super::InteractionState;
 
-/// An input-local consequence of intercepting a root event.
-///
-/// The app maps dispatch actions to its own message vocabulary. `Pass` and
-/// `Capture` are handled entirely inside this widget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GuardAction {
-    Pass,
-    Capture,
-    OpenHelp,
-    CloseHelp,
-    CloseFind,
-    CloseNote,
-    CancelUnsaved,
-}
-
-/// Applies the modal keyboard policy in strict top-to-bottom priority order.
-fn action(keymap: Keymap, event: &iced::Event) -> GuardAction {
-    // 1. Help opens, closes, or captures before every modal beneath it.
-    match help::event_action(keymap.help_open(), event) {
-        help::EventAction::Open => return GuardAction::OpenHelp,
-        help::EventAction::Close => return GuardAction::CloseHelp,
-        help::EventAction::Capture => return GuardAction::Capture,
-        help::EventAction::Pass => {}
-    }
-
-    // 2. Passed events belong to Help's focused search field while open.
-    if keymap.help_open() {
-        return GuardAction::Pass;
-    }
-
-    // 3. Unsaved changes blocks input-method commits and all key presses;
-    // Escape is the only key with a semantic action.
-    if keymap.unsaved_open() && matches!(event, iced::Event::InputMethod(_)) {
-        return GuardAction::Capture;
-    }
-
-    let iced::Event::Keyboard(keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        repeat,
-        ..
-    }) = event
-    else {
-        return GuardAction::Pass;
-    };
-
-    if keymap.unsaved_open() {
-        return if !repeat
-            && matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-            ) {
-            GuardAction::CancelUnsaved
-        } else {
-            GuardAction::Capture
-        };
-    }
-
-    let plain_escape = !repeat
-        && !modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(
-            modified_key.as_ref(),
-            keyboard::Key::Named(keyboard::key::Named::Escape)
-        );
-
-    if plain_escape {
-        // 4. Find closes before the note composer when both are present.
-        if keymap.find_open() {
-            return GuardAction::CloseFind;
-        }
-
-        // 5. Note closes after Find and before focused widgets see Escape.
-        if keymap.note_open() {
-            return GuardAction::CloseNote;
+/// Applies one routing decision at the widget boundary.
+fn adapt<'shell, Message>(
+    decision: Decision,
+    map_message: &impl Fn(InputMessage) -> Message,
+    shell: &mut Shell<'shell, Message>,
+    pass_to_child: impl FnOnce(&mut Shell<'shell, Message>),
+) {
+    match decision {
+        Decision::Pass => pass_to_child(shell),
+        Decision::Capture => shell.capture_event(),
+        Decision::Dispatch(message) => {
+            shell.publish(map_message(message));
+            shell.capture_event();
         }
     }
-
-    // 6. Everything else reaches the focused widget unchanged.
-    GuardAction::Pass
 }
 
-/// Wraps the complete interface with one input guard.
-///
-/// `map_action` is supplied by the composition root, keeping this package
-/// generic over the app's message type and dependency-free from it.
+/// Routes an event exactly once, then applies that decision exactly once.
+fn intercept<'shell, Message>(
+    interaction: &InteractionState,
+    event: &iced::Event,
+    map_message: &impl Fn(InputMessage) -> Message,
+    shell: &mut Shell<'shell, Message>,
+    pass_to_child: impl FnOnce(&mut Shell<'shell, Message>),
+) {
+    adapt(route(interaction, event), map_message, shell, pass_to_child);
+}
+
+/// Wraps the complete interface with the single root input router.
 pub(crate) fn guard<'a, Message>(
     content: Element<'a, Message>,
-    keymap: Keymap,
-    map_action: impl Fn(GuardAction) -> Message + 'a,
+    interaction: InteractionState,
+    map_message: impl Fn(InputMessage) -> Message + 'a,
 ) -> Element<'a, Message>
 where
     Message: 'a,
 {
-    struct KeyboardGuard<'a, Message, Map> {
+    struct InputGuard<'a, Message, Map> {
         content: Element<'a, Message>,
-        keymap: Keymap,
-        map_action: Map,
+        interaction: InteractionState,
+        map_message: Map,
     }
 
-    impl<Message, Map> Widget<Message, Theme, Renderer> for KeyboardGuard<'_, Message, Map>
+    impl<Message, Map> Widget<Message, Theme, Renderer> for InputGuard<'_, Message, Map>
     where
-        Map: Fn(GuardAction) -> Message,
+        Map: Fn(InputMessage) -> Message,
     {
         fn tag(&self) -> iced::advanced::widget::tree::Tag {
             self.content.as_widget().tag()
@@ -183,18 +125,16 @@ where
             shell: &mut Shell<'_, Message>,
             viewport: &Rectangle,
         ) {
-            match action(self.keymap, event) {
-                GuardAction::Pass => {
-                    self.content.as_widget_mut().update(
-                        tree, event, layout, cursor, renderer, clipboard, shell, viewport,
-                    );
-                    return;
-                }
-                GuardAction::Capture => {}
-                action => shell.publish((self.map_action)(action)),
-            }
-
-            shell.capture_event();
+            let Self {
+                content,
+                interaction,
+                map_message,
+            } = self;
+            intercept(interaction, event, map_message, shell, |shell| {
+                content.as_widget_mut().update(
+                    tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+                );
+            });
         }
 
         fn mouse_interaction(
@@ -224,21 +164,32 @@ where
         }
     }
 
-    Element::new(KeyboardGuard {
+    Element::new(InputGuard {
         content,
-        keymap,
-        map_action,
+        interaction,
+        map_message,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{action, GuardAction};
+    use super::{adapt, intercept, Decision, InputMessage};
     use crate::document::UnsavedAction;
-    use crate::input::{InteractionState, Keymap};
+    use crate::input::{
+        Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, InteractionState,
+        PreviewCommand,
+    };
+    use crate::preview::Motion;
+    use iced::advanced::Shell;
     use iced::keyboard::{self, key, Location, Modifiers};
 
-    fn pressed(key: keyboard::Key, modifiers: Modifiers) -> iced::Event {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TestMessage {
+        Child,
+        Routed(InputMessage),
+    }
+
+    fn pressed(key: keyboard::Key, modifiers: Modifiers, repeat: bool) -> iced::Event {
         iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key: key.clone(),
             modified_key: key,
@@ -246,150 +197,195 @@ mod tests {
             location: Location::Standard,
             modifiers,
             text: None,
-            repeat: false,
+            repeat,
         })
+    }
+
+    fn character(value: &str, modifiers: Modifiers, repeat: bool) -> iced::Event {
+        pressed(keyboard::Key::Character(value.into()), modifiers, repeat)
     }
 
     fn escape() -> iced::Event {
         pressed(
             keyboard::Key::Named(key::Named::Escape),
             Modifiers::default(),
+            false,
         )
     }
 
-    #[test]
-    fn help_guard_routes_keys_to_the_help_window() {
-        let write = Keymap::new(false);
-        let question = pressed(keyboard::Key::Character("?".into()), Modifiers::SHIFT);
-        assert_eq!(action(write, &question), GuardAction::Pass);
+    fn input_method() -> iced::Event {
+        iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
+    }
 
-        let chord = pressed(
-            keyboard::Key::Character("?".into()),
-            Modifiers::CTRL | Modifiers::SHIFT,
-        );
-        let slash_chord = pressed(keyboard::Key::Character("/".into()), Modifiers::CTRL);
-        assert_eq!(action(write, &chord), GuardAction::OpenHelp);
-        assert_eq!(action(write, &slash_chord), GuardAction::OpenHelp);
-
-        let mut help_state = InteractionState::editable();
-        help_state.open_help();
-        let help = Keymap::from(help_state);
-        let typing = pressed(keyboard::Key::Character("x".into()), Modifiers::default());
-        assert_eq!(action(help, &typing), GuardAction::Pass);
-        assert_eq!(action(help, &chord), GuardAction::CloseHelp);
-        assert_eq!(
-            action(
-                help,
-                &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
-            ),
-            GuardAction::Pass
-        );
-
-        let tab = pressed(keyboard::Key::Named(key::Named::Tab), Modifiers::default());
-        assert_eq!(action(help, &tab), GuardAction::Capture);
-        assert_eq!(action(help, &escape()), GuardAction::CloseHelp);
+    fn outcome(state: &InteractionState, event: &iced::Event) -> (Vec<TestMessage>, bool, usize) {
+        let mut messages = Vec::new();
+        let mut child_updates = 0;
+        let captured;
+        {
+            let mut shell = Shell::new(&mut messages);
+            intercept(state, event, &TestMessage::Routed, &mut shell, |shell| {
+                child_updates += 1;
+                shell.publish(TestMessage::Child);
+            });
+            captured = shell.is_event_captured();
+        }
+        (messages, captured, child_updates)
     }
 
     #[test]
-    fn help_over_unsaved_over_find_over_note_unwinds_to_note() {
-        let mut state = InteractionState::editable();
-        assert!(state.toggle_preview());
+    fn adapter_passes_captures_and_dispatches_exactly_once() {
+        let routed = InputMessage::Execute(Command::Help(HelpCommand::Open));
+        let cases = [
+            ("pass", Decision::Pass, vec![TestMessage::Child], false, 1),
+            ("capture", Decision::Capture, vec![], true, 0),
+            (
+                "dispatch",
+                Decision::Dispatch(routed),
+                vec![TestMessage::Routed(routed)],
+                true,
+                0,
+            ),
+        ];
+
+        for (name, decision, expected_messages, expected_capture, expected_child_updates) in cases {
+            let mut messages = Vec::new();
+            let mut child_updates = 0;
+            let captured;
+            {
+                let mut shell = Shell::new(&mut messages);
+                adapt(decision, &TestMessage::Routed, &mut shell, |shell| {
+                    child_updates += 1;
+                    shell.publish(TestMessage::Child);
+                });
+                captured = shell.is_event_captured();
+            }
+
+            assert_eq!(messages, expected_messages, "{name}: messages");
+            assert_eq!(captured, expected_capture, "{name}: capture");
+            assert_eq!(
+                child_updates, expected_child_updates,
+                "{name}: child updates"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_text_and_input_method_events_reach_the_child() {
+        let write = InteractionState::editable();
+        let mut note = InteractionState::preview_only();
+        note.open_note().unwrap();
+        let mut find = InteractionState::editable();
+        find.open_find();
+        let mut help = InteractionState::editable();
+        help.open_help();
+
+        for (name, state) in [
+            ("write", write),
+            ("note", note),
+            ("find", find),
+            ("help", help),
+        ] {
+            assert_eq!(
+                outcome(&state, &character("x", Modifiers::default(), false)),
+                (vec![TestMessage::Child], false, 1),
+                "{name}: text"
+            );
+            assert_eq!(
+                outcome(&state, &input_method()),
+                (vec![TestMessage::Child], false, 1),
+                "{name}: input method"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_priority_is_routed_once_then_captured_by_the_adapter() {
+        let mut state = InteractionState::preview_only();
         state.open_note().unwrap();
         state.open_find();
         state.open_unsaved(UnsavedAction::OpenFile);
         state.open_help();
 
-        let keymap = Keymap::from(state);
-        assert!(keymap.preview());
-        assert!(keymap.note_open());
-        assert!(keymap.find_open());
-        assert!(keymap.unsaved_open());
-        assert!(keymap.help_open());
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseHelp);
+        assert_eq!(
+            outcome(&state, &escape()),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(Command::Help(
+                    HelpCommand::Close,
+                )))],
+                true,
+                0,
+            )
+        );
 
         let _ = state.close_help();
         assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CancelUnsaved
+            outcome(&state, &escape()),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(
+                    Command::Document(DocumentCommand::CancelUnsaved),
+                ))],
+                true,
+                0,
+            )
         );
+        assert_eq!(outcome(&state, &input_method()), (vec![], true, 0));
 
         let _ = state.resolve_unsaved();
         assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CloseFind
+            outcome(&state, &escape()),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(Command::Find(
+                    FindCommand::Close,
+                )))],
+                true,
+                0,
+            )
         );
 
         let _ = state.close_find();
-        assert!(Keymap::from(state).note_open());
         assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CloseNote
+            outcome(&state, &escape()),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(
+                    Command::Comments(CommentsCommand::CloseNote),
+                ))],
+                true,
+                0,
+            )
         );
     }
 
     #[test]
-    fn modal_priority_is_help_unsaved_find_note_then_focused_widgets() {
-        let mut state = InteractionState::editable();
-        assert!(state.toggle_preview());
-        state.open_note().unwrap();
-        state.open_find();
-        state.open_unsaved(UnsavedAction::OpenFile);
-        state.open_help();
+    fn held_keys_repeat_motions_but_suppress_one_shots_without_duplicates() {
+        let preview = InteractionState::preview_only();
 
-        // Help has first refusal even when every lower modal is open, and
-        // its field receives passed input-method events.
         assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CloseHelp
+            outcome(&preview, &character("j", Modifiers::default(), true)),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(
+                    Command::Preview(PreviewCommand::Move(Motion::Down, 1)),
+                ))],
+                true,
+                0,
+            )
         );
         assert_eq!(
-            action(
-                Keymap::from(state),
-                &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
-            ),
-            GuardAction::Pass
-        );
-
-        let _ = state.close_help();
-        assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CancelUnsaved
+            outcome(&preview, &character("c", Modifiers::default(), true)),
+            (vec![], true, 0)
         );
         assert_eq!(
-            action(
-                Keymap::from(state),
-                &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
-            ),
-            GuardAction::Capture
+            outcome(&preview, &character("c", Modifiers::default(), false)),
+            (
+                vec![TestMessage::Routed(InputMessage::Execute(
+                    Command::Comments(CommentsCommand::OpenNote),
+                ))],
+                true,
+                0,
+            )
         );
         assert_eq!(
-            action(
-                Keymap::from(state),
-                &pressed(keyboard::Key::Character("x".into()), Modifiers::default())
-            ),
-            GuardAction::Capture
-        );
-
-        let _ = state.resolve_unsaved();
-        assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CloseFind
-        );
-
-        let _ = state.close_find();
-        assert_eq!(
-            action(Keymap::from(state), &escape()),
-            GuardAction::CloseNote
-        );
-
-        let _ = state.close_note();
-        assert_eq!(action(Keymap::from(state), &escape()), GuardAction::Pass);
-        assert_eq!(
-            action(
-                Keymap::from(state),
-                &pressed(keyboard::Key::Character("x".into()), Modifiers::default())
-            ),
-            GuardAction::Pass
+            outcome(&preview, &character("3", Modifiers::default(), true)),
+            (vec![], true, 0)
         );
     }
 }

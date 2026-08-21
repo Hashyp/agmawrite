@@ -475,7 +475,7 @@ Gate:
 - Bindings are pure functions of state plus event.
 - Each interaction variant has focused routing tests.
 
-### [ ] Phase 5 — Consolidate event interception
+### [x] Phase 5 — Consolidate event interception
 
 Files:
 

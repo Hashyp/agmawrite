@@ -13,7 +13,6 @@ use super::pending::{Pending, Prefix};
 use super::state::{
     EditableWorkspace, HelpResume, InteractionState, PreviewState, RootState, Workspace, WriteState,
 };
-use crate::help;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 
 /// The root event policy selected by the current interaction variant.
@@ -125,12 +124,52 @@ fn one_shot(repeat: bool, command: Command) -> Decision {
 
 /// Routes Help's open/close chord and its focused-field containment policy.
 fn route_help(open: bool, event: &iced::Event) -> Decision {
-    match help::event_action(open, event) {
-        help::EventAction::Pass => Decision::Pass,
-        help::EventAction::Capture => Decision::Capture,
-        help::EventAction::Open => execute(Command::Help(HelpCommand::Open)),
-        help::EventAction::Close => execute(Command::Help(HelpCommand::Close)),
+    let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        modified_key,
+        modifiers,
+        repeat,
+        ..
+    }) = event
+    else {
+        return Decision::Pass;
+    };
+
+    if open {
+        if *repeat {
+            return Decision::Pass;
+        }
+
+        if matches!(
+            modified_key.as_ref(),
+            keyboard::Key::Named(keyboard::key::Named::Escape)
+        ) || is_help_chord(&modified_key.as_ref(), modifiers)
+        {
+            return execute(Command::Help(HelpCommand::Close));
+        }
+
+        return if matches!(
+            modified_key.as_ref(),
+            keyboard::Key::Named(keyboard::key::Named::Tab)
+        ) {
+            Decision::Capture
+        } else {
+            Decision::Pass
+        };
     }
+
+    if !repeat && is_help_chord(&modified_key.as_ref(), modifiers) {
+        execute(Command::Help(HelpCommand::Open))
+    } else {
+        Decision::Pass
+    }
+}
+
+/// Recognizes `Ctrl + ?` and `Ctrl + /`; layouts may report either form.
+fn is_help_chord(key: &keyboard::Key<&str>, modifiers: &keyboard::Modifiers) -> bool {
+    modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(key, keyboard::Key::Character("?" | "/"))
 }
 
 /// Routes the Unsaved modal, which owns all key presses and input methods.

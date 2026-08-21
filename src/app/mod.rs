@@ -4,8 +4,8 @@ mod shell;
 
 use crate::cli::Args;
 use crate::input::{
-    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, InputMessage,
-    InteractionState, Keymap, Overlay, PreviewCommand, Surface,
+    Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, InputMessage,
+    InteractionState, Overlay, PreviewCommand, Surface,
 };
 use crate::theme::Palette;
 use crate::{comments, document, find, help, highlight, input, preview, theme, ui};
@@ -15,7 +15,7 @@ use coordination::{
 };
 
 use iced::widget::{operation::focus_next, text_editor, Id};
-use iced::{keyboard, Background, Border, Element, Font, Length, Subscription, Task, Theme};
+use iced::{Background, Border, Element, Font, Length, Subscription, Task, Theme};
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 const SOURCE_EDITOR_ID: &str = "source-editor";
@@ -89,25 +89,7 @@ fn message_for_toolbar(message: ui::toolbar::Message) -> Message {
     }
 }
 
-fn message_for_guard_action(action: GuardAction) -> Message {
-    match action {
-        GuardAction::OpenHelp => Message::Help(help::Message::Open),
-        GuardAction::CloseHelp => Message::Help(help::Message::Close),
-        GuardAction::CloseFind => Message::Find(find::Message::Close),
-        GuardAction::CloseNote => Message::Comments(comments::Message::CloseComposer),
-        GuardAction::CancelUnsaved => Message::Document(document::Message::UnsavedCancel),
-        GuardAction::Pass | GuardAction::Capture => {
-            unreachable!("non-dispatch guard actions are handled inside input::guard")
-        }
-    }
-}
-
 pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
-    let keys = keyboard::listen()
-        .with(Keymap::from(editor.interaction))
-        .filter_map(|(keymap, event)| keymap.handle(event))
-        .map(Message::Input);
-
     let close = iced::window::close_requests()
         .map(document::Message::CloseRequested)
         .map(Message::Document);
@@ -116,12 +98,11 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
 
     match editor.document.path() {
         Some(path) => Subscription::batch([
-            keys,
             close,
             document::subscription(path).map(Message::Document),
             theme,
         ]),
-        None => Subscription::batch([keys, close, theme]),
+        None => Subscription::batch([close, theme]),
     }
 }
 
@@ -375,11 +356,7 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
         .then(|| help::view(&editor.help, palette).map(Message::Help));
     let layers = shell::stack_layers(base, find.into_iter().chain(unsaved).chain(help));
 
-    input::guard(
-        layers,
-        Keymap::from(editor.interaction),
-        message_for_guard_action,
-    )
+    input::guard(layers, editor.interaction, Message::Input)
 }
 
 pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {

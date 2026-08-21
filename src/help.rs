@@ -1,5 +1,5 @@
 //! The shortcuts Help window: its query state, shortcut vocabulary,
-//! filtering, rendering, and modal keyboard policy.
+//! filtering, and rendering.
 //!
 //! The application owns where Help sits in the root stack and where focus
 //! returns when it closes. `InteractionState` owns whether the modal is visible.
@@ -7,7 +7,7 @@
 use iced::widget::{
     column, container, mouse_area, operation::focus, row, scrollable, text, text_input, Id,
 };
-use iced::{alignment, keyboard, Element, Font, Length, Task};
+use iced::{alignment, Element, Font, Length, Task};
 
 use crate::editing;
 use crate::theme::Palette;
@@ -52,79 +52,9 @@ pub enum Message {
     Close,
 }
 
-/// The Help-specific decision made for a keyboard event before focused
-/// widgets see it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventAction {
-    Pass,
-    Capture,
-    Open,
-    Close,
-}
-
 /// Gives focus to the Help search field after the root opens the window.
 pub fn focus_input<T>() -> Task<T> {
     focus(Id::new(INPUT_ID))
-}
-
-/// Decides whether a root event belongs to Help.
-pub fn event_action(open: bool, event: &iced::Event) -> EventAction {
-    match event {
-        iced::Event::Keyboard(event) => keyboard_action(open, event),
-        _ => EventAction::Pass,
-    }
-}
-
-/// Decides whether a keyboard event opens, closes, or stays inside Help.
-/// When Help is open, ordinary typing passes to its focused search field;
-/// Tab is captured so focus cannot escape behind the modal.
-pub fn keyboard_action(open: bool, event: &keyboard::Event) -> EventAction {
-    let keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        repeat,
-        ..
-    } = event
-    else {
-        return EventAction::Pass;
-    };
-
-    if open {
-        if !repeat {
-            if matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-            ) || is_chord(&modified_key.as_ref(), modifiers)
-            {
-                return EventAction::Close;
-            }
-
-            if matches!(
-                modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Tab)
-            ) {
-                return EventAction::Capture;
-            }
-        }
-
-        return EventAction::Pass;
-    }
-
-    if !repeat && is_chord(&modified_key.as_ref(), modifiers) {
-        EventAction::Open
-    } else {
-        EventAction::Pass
-    }
-}
-
-/// Whether a key press is the Help chord: `Ctrl + ?` — `Ctrl + /` counts
-/// too, since `?` is shifted `/` on US layouts and some platforms report
-/// the unshifted character.
-fn is_chord(key: &keyboard::Key<&str>, modifiers: &keyboard::Modifiers) -> bool {
-    modifiers.control()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(key, keyboard::Key::Character("?" | "/"))
 }
 
 /// Every keyboard shortcut handled by the application. Keeping the
@@ -314,20 +244,7 @@ pub fn view(help: &Help, palette: Palette) -> Element<'static, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{keyboard_action, matches, EventAction, Help, Message, SHORTCUTS};
-    use iced::keyboard::{self, key, Modifiers};
-
-    fn pressed(key: keyboard::Key, modifiers: Modifiers) -> keyboard::Event {
-        keyboard::Event::KeyPressed {
-            key: key.clone(),
-            modified_key: key,
-            physical_key: key::Physical::Unidentified(key::NativeCode::Xkb(0)),
-            location: keyboard::Location::Standard,
-            modifiers,
-            text: None,
-            repeat: false,
-        }
-    }
+    use super::{matches, Help, Message, SHORTCUTS};
 
     #[test]
     fn state_filters_and_clears_on_close() {
@@ -361,25 +278,5 @@ mod tests {
             .iter()
             .any(|(key, _)| key.to_lowercase().contains("page up")));
         assert!(matches("no shortcut has this text").is_empty());
-    }
-
-    #[test]
-    fn modal_keyboard_policy_opens_closes_and_contains_focus() {
-        let chord = pressed(keyboard::Key::Character("?".into()), Modifiers::CTRL);
-        let slash = pressed(keyboard::Key::Character("/".into()), Modifiers::CTRL);
-        let typing = pressed(keyboard::Key::Character("x".into()), Modifiers::default());
-        let escape = pressed(
-            keyboard::Key::Named(key::Named::Escape),
-            Modifiers::default(),
-        );
-        let tab = pressed(keyboard::Key::Named(key::Named::Tab), Modifiers::default());
-
-        assert_eq!(keyboard_action(false, &typing), EventAction::Pass);
-        assert_eq!(keyboard_action(false, &chord), EventAction::Open);
-        assert_eq!(keyboard_action(false, &slash), EventAction::Open);
-        assert_eq!(keyboard_action(true, &typing), EventAction::Pass);
-        assert_eq!(keyboard_action(true, &escape), EventAction::Close);
-        assert_eq!(keyboard_action(true, &chord), EventAction::Close);
-        assert_eq!(keyboard_action(true, &tab), EventAction::Capture);
     }
 }
