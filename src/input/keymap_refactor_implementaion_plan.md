@@ -524,7 +524,7 @@ Gate:
 - Toolbar inputs cannot disagree about preview mode and preview-only capability.
 - Each source file has one clear responsibility.
 
-### [ ] Phase 7 — Final validation and cleanup
+### [x] Phase 7 — Final validation and cleanup
 
 Tasks:
 

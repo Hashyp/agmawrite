@@ -202,7 +202,7 @@ fn route_unsaved(event: &iced::Event) -> Decision {
     }
 }
 
-/// Routes shortcuts owned by the Note composer and passes text editing on.
+/// Routes shortcuts available while Note owns focus, preserving its save ownership.
 fn route_note(event: &iced::Event) -> Decision {
     let iced::Event::Keyboard(keyboard::Event::KeyPressed {
         modified_key,
@@ -224,6 +224,9 @@ fn route_note(event: &iced::Event) -> Decision {
         }
         keyboard::Key::Character("s" | "S") if modifiers.control() => {
             one_shot(*repeat, Command::Comments(CommentsCommand::SaveNote))
+        }
+        keyboard::Key::Character("f" | "F") if modifiers.control() => {
+            one_shot(*repeat, Command::Find(FindCommand::Open))
         }
         _ => Decision::Pass,
     }
@@ -770,6 +773,20 @@ mod tests {
             route(&note, &character_with("s", Modifiers::CTRL, false)),
             dispatch(Command::Comments(CommentsCommand::SaveNote))
         );
+    }
+
+    #[test]
+    fn note_routes_find_above_it_without_stealing_save_shortcut() {
+        for state in [note(editable_preview(false)), note(preview_only(false))] {
+            assert_eq!(
+                route(&state, &character_with("f", Modifiers::CTRL, false)),
+                dispatch(Command::Find(FindCommand::Open))
+            );
+            assert_eq!(
+                route(&state, &character_with("s", Modifiers::CTRL, false)),
+                dispatch(Command::Comments(CommentsCommand::SaveNote))
+            );
+        }
     }
 
     #[test]
