@@ -323,16 +323,8 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
         .then(|| comments::composer::view(&editor.comments, palette).map(Message::Comments));
     let editing_area = shell::stack_layers(base_area, note);
 
-    let toolbar = ui::toolbar::view(ui::toolbar::Model::new(
-        matches!(interaction.surface(), Surface::Preview),
-        interaction.can_toggle_preview(),
-        interaction.badge(),
-        interaction
-            .pending_count()
-            .map_or(0, std::num::NonZeroU32::get),
-        palette,
-    ))
-    .map(Message::Toolbar);
+    let toolbar = ui::toolbar::view(ui::toolbar::Model::new(interaction.toolbar(), palette))
+        .map(Message::Toolbar);
     let sidebar = comments::sidebar::view(
         &editor.comments,
         comments::sidebar::ViewContext {

@@ -81,27 +81,24 @@ impl InteractionState {
 }
 
 impl RootState {
-    pub(super) fn map_workspace(
-        self,
-        transition: impl FnOnce(Workspace) -> Workspace + Copy,
-    ) -> Self {
+    pub(super) fn map_workspace(self, update: impl FnOnce(Workspace) -> Workspace + Copy) -> Self {
         match self {
-            Self::Active(workspace) => Self::Active(transition(workspace)),
+            Self::Active(workspace) => Self::Active(update(workspace)),
             Self::Unsaved { action, resume } => Self::Unsaved {
                 action,
-                resume: transition(resume),
+                resume: update(resume),
             },
             Self::Help {
                 resume: HelpResume::Active(workspace),
             } => Self::Help {
-                resume: HelpResume::Active(transition(workspace)),
+                resume: HelpResume::Active(update(workspace)),
             },
             Self::Help {
                 resume: HelpResume::Unsaved { action, resume },
             } => Self::Help {
                 resume: HelpResume::Unsaved {
                     action,
-                    resume: transition(resume),
+                    resume: update(resume),
                 },
             },
         }
@@ -109,25 +106,25 @@ impl RootState {
 
     pub(super) fn try_map_workspace(
         self,
-        transition: impl FnOnce(Workspace) -> Result<Workspace, TransitionError> + Copy,
-    ) -> Result<Self, TransitionError> {
+        update: impl FnOnce(Workspace) -> Result<Workspace, InteractionError> + Copy,
+    ) -> Result<Self, InteractionError> {
         Ok(match self {
-            Self::Active(workspace) => Self::Active(transition(workspace)?),
+            Self::Active(workspace) => Self::Active(update(workspace)?),
             Self::Unsaved { action, resume } => Self::Unsaved {
                 action,
-                resume: transition(resume)?,
+                resume: update(resume)?,
             },
             Self::Help {
                 resume: HelpResume::Active(workspace),
             } => Self::Help {
-                resume: HelpResume::Active(transition(workspace)?),
+                resume: HelpResume::Active(update(workspace)?),
             },
             Self::Help {
                 resume: HelpResume::Unsaved { action, resume },
             } => Self::Help {
                 resume: HelpResume::Unsaved {
                     action,
-                    resume: transition(resume)?,
+                    resume: update(resume)?,
                 },
             },
         })

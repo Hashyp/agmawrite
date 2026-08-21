@@ -7,7 +7,7 @@ use super::ui::toolbar;
 use super::{message_for_toolbar, update, App, Message};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootLayer {
+enum RootStackEntry {
     Base,
     Note,
     Find,
@@ -16,25 +16,25 @@ enum RootLayer {
     InputGuard,
 }
 
-fn root_layer_order(app: &App) -> Vec<RootLayer> {
+fn root_stack_order(app: &App) -> Vec<RootStackEntry> {
     let interaction = app.interaction.view();
-    let mut layers = vec![RootLayer::Base];
+    let mut stack = vec![RootStackEntry::Base];
 
     if interaction.contains(Overlay::Note) {
-        layers.push(RootLayer::Note);
+        stack.push(RootStackEntry::Note);
     }
     if interaction.contains(Overlay::Find) {
-        layers.push(RootLayer::Find);
+        stack.push(RootStackEntry::Find);
     }
     if interaction.unsaved_action().is_some() {
-        layers.push(RootLayer::Unsaved);
+        stack.push(RootStackEntry::Unsaved);
     }
     if interaction.contains(Overlay::Help) {
-        layers.push(RootLayer::Help);
+        stack.push(RootStackEntry::Help);
     }
 
-    layers.push(RootLayer::InputGuard);
-    layers
+    stack.push(RootStackEntry::InputGuard);
+    stack
 }
 
 fn is_preview(app: &App) -> bool {
@@ -44,6 +44,7 @@ fn is_preview(app: &App) -> bool {
 fn pending_count(app: &App) -> u32 {
     app.interaction
         .view()
+        .toolbar()
         .pending_count()
         .map_or(0, std::num::NonZeroU32::get)
 }
@@ -444,12 +445,12 @@ fn unsaved_modal_is_above_editing_surface_and_below_help() {
     let _ = update(&mut editor, Message::Help(super::help::Message::Open));
 
     assert_eq!(
-        root_layer_order(&editor),
+        root_stack_order(&editor),
         vec![
-            RootLayer::Base,
-            RootLayer::Unsaved,
-            RootLayer::Help,
-            RootLayer::InputGuard,
+            RootStackEntry::Base,
+            RootStackEntry::Unsaved,
+            RootStackEntry::Help,
+            RootStackEntry::InputGuard,
         ]
     );
     assert_eq!(
@@ -556,14 +557,14 @@ fn root_features_keep_base_note_find_unsaved_help_guard_order() {
     editor.interaction.open_help();
 
     assert_eq!(
-        root_layer_order(&editor),
+        root_stack_order(&editor),
         vec![
-            RootLayer::Base,
-            RootLayer::Note,
-            RootLayer::Find,
-            RootLayer::Unsaved,
-            RootLayer::Help,
-            RootLayer::InputGuard,
+            RootStackEntry::Base,
+            RootStackEntry::Note,
+            RootStackEntry::Find,
+            RootStackEntry::Unsaved,
+            RootStackEntry::Help,
+            RootStackEntry::InputGuard,
         ]
     );
 }
@@ -584,20 +585,24 @@ fn closing_find_above_note_restores_the_note_layer() {
     let _ = update(&mut editor, Message::Find(find::Message::Open));
 
     assert_eq!(
-        root_layer_order(&editor),
+        root_stack_order(&editor),
         vec![
-            RootLayer::Base,
-            RootLayer::Note,
-            RootLayer::Find,
-            RootLayer::InputGuard,
+            RootStackEntry::Base,
+            RootStackEntry::Note,
+            RootStackEntry::Find,
+            RootStackEntry::InputGuard,
         ]
     );
 
     let _ = update(&mut editor, Message::Find(find::Message::Close));
 
     assert_eq!(
-        root_layer_order(&editor),
-        vec![RootLayer::Base, RootLayer::Note, RootLayer::InputGuard]
+        root_stack_order(&editor),
+        vec![
+            RootStackEntry::Base,
+            RootStackEntry::Note,
+            RootStackEntry::InputGuard,
+        ]
     );
 }
 

@@ -90,6 +90,21 @@ pub(crate) enum Surface {
     Preview,
 }
 
+/// The surface selected by the toolbar's optional preview control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PreviewToggle {
+    Preview,
+    Write,
+}
+
+/// A coherent toolbar projection derived from one legal workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToolbarPresentation {
+    badge: ModeBadge,
+    preview_toggle: Option<PreviewToggle>,
+    pending_count: Option<NonZeroU32>,
+}
+
 /// An overlay in bottom-to-top rendering order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Overlay {
@@ -119,16 +134,14 @@ pub(crate) struct UnsavedResolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewProjection {
     surface: Surface,
-    badge: ModeBadge,
+    toolbar: ToolbarPresentation,
     preview_mode: Option<PreviewMode>,
-    can_toggle_preview: bool,
-    pending_count: Option<NonZeroU32>,
     overlays: [Option<Overlay>; 4],
 }
 
-/// Why a requested transition cannot originate in the current state.
+/// Why a requested interaction cannot originate in the current state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransitionError {
+pub(crate) enum InteractionError {
     RequiresPreview,
     OverlayOwnsInput,
 }
@@ -166,14 +179,14 @@ impl InteractionState {
     }
 
     /// Toggles Visual only on an exposed preview canvas.
-    pub(crate) fn toggle_visual(&mut self) -> Result<(), TransitionError> {
+    pub(crate) fn toggle_visual(&mut self) -> Result<(), InteractionError> {
         self.try_map_workspace(Workspace::toggle_visual)
     }
 
     /// Returns Visual to View and consumes pending preview input.
-    pub(crate) fn cancel_preview(&mut self) -> Result<(), TransitionError> {
+    pub(crate) fn cancel_preview(&mut self) -> Result<(), InteractionError> {
         if !matches!(self.view().surface(), Surface::Preview) {
-            return Err(TransitionError::RequiresPreview);
+            return Err(InteractionError::RequiresPreview);
         }
 
         self.map_workspace(Workspace::cancel_preview);
@@ -181,7 +194,7 @@ impl InteractionState {
     }
 
     /// Opens Note on Preview, preserving the suspended preview mode.
-    pub(crate) fn open_note(&mut self) -> Result<(), TransitionError> {
+    pub(crate) fn open_note(&mut self) -> Result<(), InteractionError> {
         self.try_map_workspace(Workspace::open_note)
     }
 
@@ -279,15 +292,15 @@ impl InteractionState {
         }
     }
 
-    fn map_workspace(&mut self, transition: impl FnOnce(Workspace) -> Workspace + Copy) {
-        self.root = self.root.map_workspace(transition);
+    fn map_workspace(&mut self, update: impl FnOnce(Workspace) -> Workspace + Copy) {
+        self.root = self.root.map_workspace(update);
     }
 
     fn try_map_workspace(
         &mut self,
-        transition: impl FnOnce(Workspace) -> Result<Workspace, TransitionError> + Copy,
-    ) -> Result<(), TransitionError> {
-        self.root = self.root.try_map_workspace(transition)?;
+        update: impl FnOnce(Workspace) -> Result<Workspace, InteractionError> + Copy,
+    ) -> Result<(), InteractionError> {
+        self.root = self.root.try_map_workspace(update)?;
         Ok(())
     }
 }
@@ -306,13 +319,15 @@ impl ViewProjection {
     fn write(write: WriteState) -> Self {
         let mut projection = Self {
             surface: Surface::Write,
-            badge: match write {
-                WriteState::Editor => ModeBadge::Write,
-                WriteState::Find => ModeBadge::Find,
+            toolbar: ToolbarPresentation {
+                badge: match write {
+                    WriteState::Editor => ModeBadge::Write,
+                    WriteState::Find => ModeBadge::Find,
+                },
+                preview_toggle: Some(PreviewToggle::Preview),
+                pending_count: None,
             },
             preview_mode: None,
-            can_toggle_preview: true,
-            pending_count: None,
             overlays: [None; 4],
         };
         if matches!(write, WriteState::Find) {
@@ -321,25 +336,37 @@ impl ViewProjection {
         projection
     }
 
-    fn preview(preview: PreviewState, can_toggle_preview: bool) -> Self {
+    fn editable_preview(preview: PreviewState) -> Self {
+        let mut projection = Self::preview(preview);
+        projection.toolbar.preview_toggle = Some(PreviewToggle::Write);
+        projection
+    }
+
+    fn preview_only(preview: PreviewState) -> Self {
+        Self::preview(preview)
+    }
+
+    fn preview(preview: PreviewState) -> Self {
         let mode = preview.mode();
         let pending_count = match preview {
-            PreviewState::Canvas { pending, .. } => NonZeroU32::new(pending.pending_count()),
+            PreviewState::Canvas { pending, .. } => pending.display_count(),
             PreviewState::Note { .. } | PreviewState::Find { .. } => None,
         };
         let mut projection = Self {
             surface: Surface::Preview,
-            badge: match preview {
-                PreviewState::Canvas { .. } => match mode {
-                    PreviewMode::View => ModeBadge::View,
-                    PreviewMode::Visual => ModeBadge::Visual,
+            toolbar: ToolbarPresentation {
+                badge: match preview {
+                    PreviewState::Canvas { .. } => match mode {
+                        PreviewMode::View => ModeBadge::View,
+                        PreviewMode::Visual => ModeBadge::Visual,
+                    },
+                    PreviewState::Note { .. } => ModeBadge::Note,
+                    PreviewState::Find { .. } => ModeBadge::Find,
                 },
-                PreviewState::Note { .. } => ModeBadge::Note,
-                PreviewState::Find { .. } => ModeBadge::Find,
+                preview_toggle: None,
+                pending_count,
             },
             preview_mode: Some(mode),
-            can_toggle_preview,
-            pending_count,
             overlays: [None; 4],
         };
 
@@ -372,16 +399,12 @@ impl ViewProjection {
         self.surface
     }
 
-    pub(crate) fn badge(self) -> ModeBadge {
-        self.badge
+    pub(crate) fn toolbar(self) -> ToolbarPresentation {
+        self.toolbar
     }
 
     pub(crate) fn can_toggle_preview(self) -> bool {
-        self.can_toggle_preview
-    }
-
-    pub(crate) fn pending_count(self) -> Option<NonZeroU32> {
-        self.pending_count
+        self.toolbar.preview_toggle().is_some()
     }
 
     pub(super) fn preview_mode(self) -> Option<PreviewMode> {
@@ -416,6 +439,20 @@ impl ViewProjection {
     #[cfg(test)]
     fn overlays(self) -> Vec<Overlay> {
         self.overlays.into_iter().flatten().collect()
+    }
+}
+
+impl ToolbarPresentation {
+    pub(crate) fn badge(self) -> ModeBadge {
+        self.badge
+    }
+
+    pub(crate) fn preview_toggle(self) -> Option<PreviewToggle> {
+        self.preview_toggle
+    }
+
+    pub(crate) fn pending_count(self) -> Option<NonZeroU32> {
+        self.pending_count
     }
 }
 
@@ -461,14 +498,17 @@ mod tests {
     fn constructors_create_editable_write_and_preview_only_view() {
         let editable = InteractionState::editable().view();
         assert_eq!(editable.surface(), Surface::Write);
-        assert_eq!(editable.badge(), ModeBadge::Write);
-        assert!(editable.can_toggle_preview());
+        assert_eq!(editable.toolbar().badge(), ModeBadge::Write);
+        assert_eq!(
+            editable.toolbar().preview_toggle(),
+            Some(PreviewToggle::Preview)
+        );
         assert_eq!(editable.overlay(), None);
 
         let preview_only = InteractionState::preview_only().view();
         assert_eq!(preview_only.surface(), Surface::Preview);
-        assert_eq!(preview_only.badge(), ModeBadge::View);
-        assert!(!preview_only.can_toggle_preview());
+        assert_eq!(preview_only.toolbar().badge(), ModeBadge::View);
+        assert_eq!(preview_only.toolbar().preview_toggle(), None);
         assert!(!preview_only.visual());
     }
 
@@ -550,7 +590,10 @@ mod tests {
         for write in [WriteState::Editor, WriteState::Find] {
             let mut state = active(Workspace::Editable(EditableWorkspace::Write(write)));
             let before = state;
-            assert_eq!(state.toggle_visual(), Err(TransitionError::RequiresPreview));
+            assert_eq!(
+                state.toggle_visual(),
+                Err(InteractionError::RequiresPreview)
+            );
             assert_eq!(state, before);
         }
 
@@ -573,7 +616,7 @@ mod tests {
                 let before = state;
                 assert_eq!(
                     state.toggle_visual(),
-                    Err(TransitionError::OverlayOwnsInput)
+                    Err(InteractionError::OverlayOwnsInput)
                 );
                 assert_eq!(state, before);
             }
@@ -620,13 +663,13 @@ mod tests {
 
         let mut pending = counted_canvas(PreviewMode::View, 4);
         assert_eq!(pending.cancel_preview(), Ok(()));
-        assert_eq!(pending.view().pending_count(), None);
+        assert_eq!(pending.view().toolbar().pending_count(), None);
 
         let mut write = InteractionState::editable();
         let before = write;
         assert_eq!(
             write.cancel_preview(),
-            Err(TransitionError::RequiresPreview)
+            Err(InteractionError::RequiresPreview)
         );
         assert_eq!(write, before);
     }
@@ -636,7 +679,7 @@ mod tests {
         for write in [WriteState::Editor, WriteState::Find] {
             let mut state = active(Workspace::Editable(EditableWorkspace::Write(write)));
             let before = state;
-            assert_eq!(state.open_note(), Err(TransitionError::RequiresPreview));
+            assert_eq!(state.open_note(), Err(InteractionError::RequiresPreview));
             assert_eq!(state, before);
         }
 
@@ -727,7 +770,10 @@ mod tests {
         let help_over_active = state.root;
         state.open_help();
         assert_eq!(state.root, help_over_active);
-        assert_eq!(state.view().pending_count().map(NonZeroU32::get), Some(3));
+        assert_eq!(
+            state.view().toolbar().pending_count().map(NonZeroU32::get),
+            Some(3)
+        );
         assert!(state.has_prefix(Prefix::G));
         assert_eq!(state.close_help(), None);
         assert_eq!(state.root, active_root);
@@ -736,7 +782,7 @@ mod tests {
 
         state.open_unsaved(action);
         let unsaved_root = state.root;
-        assert_eq!(state.view().pending_count(), None);
+        assert_eq!(state.view().toolbar().pending_count(), None);
         assert!(!state.has_prefix(Prefix::G));
         state.open_unsaved(other);
         assert_eq!(
@@ -765,7 +811,7 @@ mod tests {
             help_first.view().overlays(),
             vec![Overlay::Unsaved(action), Overlay::Help]
         );
-        assert_eq!(help_first.view().pending_count(), None);
+        assert_eq!(help_first.view().toolbar().pending_count(), None);
         let nested = help_first.root;
         help_first.open_unsaved(other);
         assert_eq!(help_first.root, nested);
@@ -874,7 +920,7 @@ mod tests {
         for (workspace, surface, badge, visual, overlays) in cases {
             let projection = active(workspace).view();
             assert_eq!(projection.surface(), surface);
-            assert_eq!(projection.badge(), badge);
+            assert_eq!(projection.toolbar().badge(), badge);
             assert_eq!(projection.visual(), visual);
             assert_eq!(projection.overlays(), overlays);
         }
@@ -898,11 +944,14 @@ mod tests {
             let editable = active(editable_preview(preview)).view();
             let preview_only = active(Workspace::PreviewOnly(preview)).view();
             assert_eq!(preview_only.surface(), editable.surface());
-            assert_eq!(preview_only.badge(), editable.badge());
+            assert_eq!(preview_only.toolbar().badge(), editable.toolbar().badge());
             assert_eq!(preview_only.visual(), editable.visual());
             assert_eq!(preview_only.overlays(), editable.overlays());
-            assert!(editable.can_toggle_preview());
-            assert!(!preview_only.can_toggle_preview());
+            assert_eq!(
+                editable.toolbar().preview_toggle(),
+                Some(PreviewToggle::Write)
+            );
+            assert_eq!(preview_only.toolbar().preview_toggle(), None);
         }
 
         let mut nested = active(editable_preview(PreviewState::Find {
@@ -911,7 +960,7 @@ mod tests {
         nested.open_unsaved(UnsavedAction::OpenFile);
         nested.open_help();
         let projection = nested.view();
-        assert_eq!(projection.badge(), ModeBadge::Find);
+        assert_eq!(projection.toolbar().badge(), ModeBadge::Find);
         assert_eq!(projection.overlay(), Some(Overlay::Help));
         assert_eq!(
             projection.overlays(),

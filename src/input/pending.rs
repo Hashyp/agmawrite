@@ -28,6 +28,10 @@ impl Count {
     fn get(self) -> u32 {
         self.0.get()
     }
+
+    fn non_zero(self) -> NonZeroU32 {
+        self.0
+    }
 }
 
 /// A preview command prefix awaiting its second key.
@@ -50,9 +54,9 @@ pub(super) enum Pending {
 }
 
 impl Pending {
-    /// The count shown by the mode badge, or zero when no count is pending.
-    pub(super) fn pending_count(self) -> u32 {
-        self.count().map_or(0, Count::get)
+    /// The count shown by the toolbar, when one is pending.
+    pub(super) fn display_count(self) -> Option<NonZeroU32> {
+        self.count().map(Count::non_zero)
     }
 
     /// The count a motion repeats: the typed digits, or once.
@@ -108,6 +112,8 @@ impl Pending {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::{Count, Pending, Prefix, MAX_COUNT};
 
     #[derive(Clone, Copy)]
@@ -240,7 +246,11 @@ mod tests {
         ];
 
         for (name, pending, badge, motion, jump) in cases {
-            assert_eq!(pending.pending_count(), badge, "{name}: badge");
+            assert_eq!(
+                pending.display_count(),
+                NonZeroU32::new(badge),
+                "{name}: badge"
+            );
             assert_eq!(pending.motion_count(), motion, "{name}: motion");
             assert_eq!(pending.jump_count(), jump, "{name}: jump");
         }

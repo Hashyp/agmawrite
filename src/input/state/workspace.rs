@@ -23,9 +23,9 @@ impl Workspace {
         }
     }
 
-    pub(super) fn toggle_visual(self) -> Result<Self, TransitionError> {
+    pub(super) fn toggle_visual(self) -> Result<Self, InteractionError> {
         match self {
-            Self::Editable(EditableWorkspace::Write(_)) => Err(TransitionError::RequiresPreview),
+            Self::Editable(EditableWorkspace::Write(_)) => Err(InteractionError::RequiresPreview),
             Self::Editable(EditableWorkspace::Preview(preview)) => preview
                 .toggle_visual()
                 .map(|preview| Self::Editable(EditableWorkspace::Preview(preview))),
@@ -43,9 +43,9 @@ impl Workspace {
         }
     }
 
-    pub(super) fn open_note(self) -> Result<Self, TransitionError> {
+    pub(super) fn open_note(self) -> Result<Self, InteractionError> {
         match self {
-            Self::Editable(EditableWorkspace::Write(_)) => Err(TransitionError::RequiresPreview),
+            Self::Editable(EditableWorkspace::Write(_)) => Err(InteractionError::RequiresPreview),
             Self::Editable(EditableWorkspace::Preview(preview)) => Ok(Self::Editable(
                 EditableWorkspace::Preview(preview.open_note()),
             )),
@@ -136,9 +136,9 @@ impl Workspace {
         match self {
             Self::Editable(EditableWorkspace::Write(write)) => ViewProjection::write(write),
             Self::Editable(EditableWorkspace::Preview(preview)) => {
-                ViewProjection::preview(preview, true)
+                ViewProjection::editable_preview(preview)
             }
-            Self::PreviewOnly(preview) => ViewProjection::preview(preview, false),
+            Self::PreviewOnly(preview) => ViewProjection::preview_only(preview),
         }
     }
 
@@ -166,10 +166,10 @@ impl PreviewState {
         }
     }
 
-    fn toggle_visual(self) -> Result<Self, TransitionError> {
+    fn toggle_visual(self) -> Result<Self, InteractionError> {
         match self {
             Self::Canvas { mode, .. } => Ok(Self::canvas(mode.toggled())),
-            Self::Note { .. } | Self::Find { .. } => Err(TransitionError::OverlayOwnsInput),
+            Self::Note { .. } | Self::Find { .. } => Err(InteractionError::OverlayOwnsInput),
         }
     }
 

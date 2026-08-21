@@ -4,7 +4,7 @@ use iced::widget::{button, canvas, container, row, text, tooltip, Space};
 use iced::{alignment, Background, Border, Color, Element, Font, Length, Theme};
 
 use super::icons::{OpenFileIcon, PreviewIcon, SaveIcon, WriteIcon, ICON_BUTTON_SIZE, ICON_SIZE};
-use crate::input::Mode;
+use crate::input::{ModeBadge, PreviewToggle, ToolbarPresentation};
 use crate::theme::Palette;
 
 const TOOLBAR_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -20,26 +20,14 @@ pub(crate) enum Message {
 /// The read-only state needed to render the bottom toolbar.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Model {
-    preview: bool,
-    can_toggle_preview: bool,
-    mode: Mode,
-    pending_count: u32,
+    presentation: ToolbarPresentation,
     palette: Palette,
 }
 
 impl Model {
-    pub(crate) fn new(
-        preview: bool,
-        can_toggle_preview: bool,
-        mode: Mode,
-        pending_count: u32,
-        palette: Palette,
-    ) -> Self {
+    pub(crate) fn new(presentation: ToolbarPresentation, palette: Palette) -> Self {
         Self {
-            preview,
-            can_toggle_preview,
-            mode,
-            pending_count,
+            presentation,
             palette,
         }
     }
@@ -110,12 +98,10 @@ where
 /// The eye invites switching to preview while writing; the pencil switches
 /// back to writing while previewing. Preview-only mode has no toggle.
 fn toggle_presentation(model: Model) -> Option<(&'static str, Element<'static, Message>)> {
-    if !model.can_toggle_preview {
-        None
-    } else if model.preview {
-        Some(("Ctrl + p, Write", icon(WriteIcon)))
-    } else {
-        Some(("Ctrl + p, Preview", icon(PreviewIcon)))
+    match model.presentation.preview_toggle() {
+        Some(PreviewToggle::Preview) => Some(("Ctrl + p, Preview", icon(PreviewIcon))),
+        Some(PreviewToggle::Write) => Some(("Ctrl + p, Write", icon(WriteIcon))),
+        None => None,
     }
 }
 
@@ -126,8 +112,8 @@ fn tooltip_label(label: &'static str) -> container::Container<'static, Message> 
 }
 
 fn mode_badge(model: Model) -> Element<'static, Message> {
-    let color = mode_color(model.mode, model.palette);
-    let label = mode_label(model.mode, model.pending_count);
+    let color = mode_color(model.presentation.badge(), model.palette);
+    let label = mode_label(model.presentation);
 
     container(text(label).font(TOOLBAR_FONT).size(12).color(color))
         // The extra bottom padding pushes the label a few pixels up, level
@@ -144,30 +130,28 @@ fn mode_badge(model: Model) -> Element<'static, Message> {
         .into()
 }
 
-fn mode_label(mode: Mode, pending_count: u32) -> String {
-    let mode = match mode {
-        Mode::Visual => "VISUAL",
-        Mode::Note => "NOTE",
-        Mode::Find => "FIND",
-        Mode::View => "VIEW",
-        Mode::Write => "WRITE",
+fn mode_label(presentation: ToolbarPresentation) -> String {
+    let mode = match presentation.badge() {
+        ModeBadge::Visual => "VISUAL",
+        ModeBadge::Note => "NOTE",
+        ModeBadge::Find => "FIND",
+        ModeBadge::View => "VIEW",
+        ModeBadge::Write => "WRITE",
     };
 
     // A pending count shows beside the mode, like vim's cmdline — the `3`
     // of a `3j` waiting for its motion.
-    if pending_count > 0 {
-        format!("{pending_count} {mode}")
-    } else {
-        mode.to_owned()
-    }
+    presentation
+        .pending_count()
+        .map_or_else(|| mode.to_owned(), |count| format!("{count} {mode}"))
 }
 
-fn mode_color(mode: Mode, palette: Palette) -> Color {
+fn mode_color(mode: ModeBadge, palette: Palette) -> Color {
     match mode {
-        Mode::Visual => palette.blue,
-        Mode::Note => palette.yellow,
-        Mode::Find => palette.orange,
-        Mode::View | Mode::Write => palette.light_foreground,
+        ModeBadge::Visual => palette.blue,
+        ModeBadge::Note => palette.yellow,
+        ModeBadge::Find => palette.orange,
+        ModeBadge::View | ModeBadge::Write => palette.light_foreground,
     }
 }
 
@@ -208,31 +192,57 @@ fn mode_badge_style(color: Color) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::{mode_color, mode_label, toggle_presentation, Model};
-    use crate::input::Mode;
+    use crate::input::{InteractionState, ModeBadge};
     use crate::theme::Palette;
 
     #[test]
-    fn mode_badge_formats_every_mode_and_pending_count() {
-        assert_eq!(mode_label(Mode::Write, 0), "WRITE");
-        assert_eq!(mode_label(Mode::View, 0), "VIEW");
-        assert_eq!(mode_label(Mode::Visual, 3), "3 VISUAL");
-        assert_eq!(mode_label(Mode::Note, 12), "12 NOTE");
-        assert_eq!(mode_label(Mode::Find, 0), "FIND");
+    fn mode_badge_formats_every_legal_presentation() {
+        let write = InteractionState::editable();
+        assert_eq!(mode_label(write.view().toolbar()), "WRITE");
+
+        let mut preview = write;
+        assert!(preview.toggle_preview());
+        assert_eq!(mode_label(preview.view().toolbar()), "VIEW");
+
+        let mut visual = preview;
+        visual.toggle_visual().unwrap();
+        visual.push_count_digit(1);
+        visual.push_count_digit(2);
+        assert_eq!(mode_label(visual.view().toolbar()), "12 VISUAL");
+
+        let mut note = preview;
+        note.open_note().unwrap();
+        assert_eq!(mode_label(note.view().toolbar()), "NOTE");
+
+        let mut find = preview;
+        find.open_find();
+        assert_eq!(mode_label(find.view().toolbar()), "FIND");
 
         let palette = Palette::default();
-        assert_eq!(mode_color(Mode::Visual, palette), palette.blue);
-        assert_eq!(mode_color(Mode::Note, palette), palette.yellow);
-        assert_eq!(mode_color(Mode::Find, palette), palette.orange);
-        assert_eq!(mode_color(Mode::View, palette), palette.light_foreground);
-        assert_eq!(mode_color(Mode::Write, palette), palette.light_foreground);
+        assert_eq!(mode_color(ModeBadge::Visual, palette), palette.blue);
+        assert_eq!(mode_color(ModeBadge::Note, palette), palette.yellow);
+        assert_eq!(mode_color(ModeBadge::Find, palette), palette.orange);
+        assert_eq!(
+            mode_color(ModeBadge::View, palette),
+            palette.light_foreground
+        );
+        assert_eq!(
+            mode_color(ModeBadge::Write, palette),
+            palette.light_foreground
+        );
     }
 
     #[test]
-    fn preview_toggle_preserves_labels_and_is_hidden_in_preview_only_mode() {
+    fn preview_toggle_comes_from_the_workspace_presentation() {
         let palette = Palette::default();
-        let write = Model::new(false, true, Mode::Write, 0, palette);
-        let preview = Model::new(true, true, Mode::View, 0, palette);
-        let preview_only = Model::new(true, false, Mode::View, 0, palette);
+        let write_state = InteractionState::editable();
+        let mut preview_state = write_state;
+        assert!(preview_state.toggle_preview());
+        let preview_only_state = InteractionState::preview_only();
+
+        let write = Model::new(write_state.view().toolbar(), palette);
+        let preview = Model::new(preview_state.view().toolbar(), palette);
+        let preview_only = Model::new(preview_only_state.view().toolbar(), palette);
 
         assert_eq!(toggle_presentation(write).unwrap().0, "Ctrl + p, Preview");
         assert_eq!(toggle_presentation(preview).unwrap().0, "Ctrl + p, Write");

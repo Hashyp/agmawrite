@@ -500,7 +500,7 @@ Gate:
 - `guard.rs` contains widget adaptation, not modal business rules.
 - No duplicate Help/Unsaved/Find/Note priority chain remains.
 
-### [ ] Phase 6 — Migrate presentation and remove compatibility code
+### [x] Phase 6 — Migrate presentation and remove compatibility code
 
 Files:
 
