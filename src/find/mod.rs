@@ -34,6 +34,8 @@ pub(crate) enum Message {
 /// Exact navigation selected by the reducer for the composing app to apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
+    Opened,
+    Closed,
     SelectSource(SourceMatch),
     SelectPreview { element: usize, range: Range<usize> },
 }
@@ -44,15 +46,11 @@ pub(crate) struct Update {
 }
 
 impl Update {
-    fn none() -> Self {
+    fn task_and_event(task: Task<Message>, event: Event) -> Self {
         Self {
-            task: Task::none(),
-            event: None,
+            task,
+            event: Some(event),
         }
-    }
-
-    fn task(task: Task<Message>) -> Self {
-        Self { task, event: None }
     }
 
     fn event(event: Option<Event>) -> Self {
@@ -94,8 +92,8 @@ impl State {
 /// Applies a find-local transition against a read-only source or preview.
 pub(crate) fn update(state: &mut State, message: Message, surface: Surface<'_>) -> Update {
     match message {
-        Message::Open => Update::task(view::focus_input()),
-        Message::Close => Update::none(),
+        Message::Open => Update::task_and_event(view::focus_input(), Event::Opened),
+        Message::Close => Update::event(Some(Event::Closed)),
         Message::QueryChanged(query) => {
             state.model.set_query(&query);
             Update::event(select(state, Way::First, surface))

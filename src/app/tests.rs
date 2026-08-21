@@ -1,6 +1,6 @@
 use super::comments::{self, Mark};
 use super::find;
-use super::input::{Command, Keymap, PreviewCommand, Transition};
+use super::input::{Command, InteractionState, Overlay, PreviewCommand, Surface};
 use super::preview::{self, CaretPosition};
 use super::theme::Palette;
 use super::ui::toolbar;
@@ -17,18 +17,19 @@ enum RootLayer {
 }
 
 fn root_layer_order(app: &App) -> Vec<RootLayer> {
+    let interaction = app.interaction.view();
     let mut layers = vec![RootLayer::Base];
 
-    if app.keymap.note_open() {
+    if interaction.contains(Overlay::Note) {
         layers.push(RootLayer::Note);
     }
-    if app.keymap.find_open() {
+    if interaction.contains(Overlay::Find) {
         layers.push(RootLayer::Find);
     }
-    if app.keymap.unsaved_open() && app.document.pending_action().is_some() {
+    if interaction.unsaved_action().is_some() {
         layers.push(RootLayer::Unsaved);
     }
-    if app.keymap.help_open() {
+    if interaction.contains(Overlay::Help) {
         layers.push(RootLayer::Help);
     }
 
@@ -36,9 +37,20 @@ fn root_layer_order(app: &App) -> Vec<RootLayer> {
     layers
 }
 
+fn is_preview(app: &App) -> bool {
+    matches!(app.interaction.view().surface(), Surface::Preview)
+}
+
+fn pending_count(app: &App) -> u32 {
+    app.interaction
+        .view()
+        .pending_count()
+        .map_or(0, std::num::NonZeroU32::get)
+}
+
 fn app_at(contents: &str, position: CaretPosition) -> App {
-    let mut keymap = Keymap::new(false);
-    keymap.note(Transition::PreviewToggled);
+    let mut interaction = InteractionState::editable();
+    assert!(interaction.toggle_preview());
 
     let mut preview = preview::State::new(contents);
     preview.place_caret(position);
@@ -46,7 +58,7 @@ fn app_at(contents: &str, position: CaretPosition) -> App {
     App {
         document: super::document::State::new(contents, None),
         preview,
-        keymap,
+        interaction,
         comments: comments::State::new(),
         find: find::State::new(),
         help: super::help::Help::new(),
@@ -72,7 +84,7 @@ fn set_composer_text(editor: &mut App, text: &str) {
 }
 
 fn save_comment(editor: &mut App, text: &str) {
-    editor.keymap.note(Transition::NoteOpened);
+    editor.interaction.open_note().unwrap();
     set_composer_text(editor, text);
     let _ = update(editor, Message::Comments(comments::Message::SaveComposer));
 }
@@ -120,13 +132,55 @@ fn toolbar_actions_map_to_document_and_preview_interactions() {
             column: 0,
         },
     );
-    assert!(editor.keymap.preview());
+    assert!(is_preview(&editor));
 
     let _ = update(
         &mut editor,
         Message::Toolbar(toolbar::Message::TogglePreview),
     );
-    assert!(!editor.keymap.preview());
+    assert!(!is_preview(&editor));
+}
+
+#[test]
+fn rejected_feature_operations_do_not_transition_interaction_state() {
+    let mut editor = App {
+        document: super::document::State::new("body", None),
+        preview: preview::State::new("body"),
+        interaction: InteractionState::editable(),
+        comments: comments::State::new(),
+        find: find::State::new(),
+        help: super::help::Help::new(),
+        palette: Palette::default(),
+    };
+
+    let _ = update(
+        &mut editor,
+        Message::Comments(comments::Message::OpenComposer),
+    );
+    assert!(!editor.interaction.view().contains(Overlay::Note));
+
+    let _ = update(
+        &mut editor,
+        Message::Comments(comments::Message::EditActive),
+    );
+    assert!(!editor.interaction.view().contains(Overlay::Note));
+
+    let _ = update(
+        &mut editor,
+        Message::Preview(preview::Message::ToggleVisual),
+    );
+    assert_eq!(editor.interaction.view().surface(), Surface::Write);
+    assert!(!editor.interaction.view().visual());
+
+    assert!(editor.interaction.toggle_preview());
+    save_comment(&mut editor, "saved note");
+    assert!(editor.interaction.toggle_preview());
+    let _ = update(
+        &mut editor,
+        Message::Comments(comments::Message::EditActive),
+    );
+    assert!(editor.comments.editing_target().is_none());
+    assert!(!editor.interaction.view().contains(Overlay::Note));
 }
 
 #[test]
@@ -148,7 +202,7 @@ fn input_commands_stay_grouped_and_preserve_multi_digit_counts() {
         Message::Input(Command::Preview(PreviewCommand::Count(0))),
     );
 
-    assert_eq!(editor.keymap.pending_count(), 10);
+    assert_eq!(pending_count(&editor), 10);
 }
 
 #[test]
@@ -288,7 +342,7 @@ fn entering_preview_policy_projects_edits_and_places_caret_from_source() {
             column: 3,
         },
     );
-    editor.keymap.note(Transition::PreviewToggled);
+    assert!(editor.interaction.toggle_preview());
     let contents = "first\n\nsecond\n\nthird";
     let _ = update(
         &mut editor,
@@ -302,9 +356,9 @@ fn entering_preview_policy_projects_edits_and_places_caret_from_source() {
         selection: Some(Position { line: 2, column: 1 }),
     });
     let source_cursor = editor.document.content().cursor();
-    editor.keymap.note(Transition::PreviewToggled);
+    assert!(editor.interaction.toggle_preview());
     save_comment(&mut editor, "keep me");
-    editor.keymap.note(Transition::PreviewToggled);
+    assert!(editor.interaction.toggle_preview());
 
     let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
     assert_eq!(editor.document.content().cursor(), source_cursor);
@@ -329,7 +383,7 @@ fn help_preserves_underlying_editor_state() {
     let mut source = App {
         document: super::document::State::new("first\nsecond", None),
         preview: preview::State::new("first\nsecond"),
-        keymap: Keymap::new(false),
+        interaction: InteractionState::editable(),
         comments: comments::State::new(),
         find: find::State::new(),
         help: super::help::Help::new(),
@@ -402,6 +456,82 @@ fn unsaved_modal_is_above_editing_surface_and_below_help() {
             RootLayer::InputGuard,
         ]
     );
+    assert_eq!(
+        editor.interaction.view().unsaved_action(),
+        Some(super::document::UnsavedAction::OpenFile)
+    );
+
+    let _ = update(&mut editor, Message::Help(super::help::Message::Close));
+    assert_eq!(
+        editor.interaction.view().unsaved_action(),
+        Some(super::document::UnsavedAction::OpenFile)
+    );
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::UnsavedCancel),
+    );
+    assert!(editor.interaction.view().unsaved_action().is_none());
+}
+
+#[test]
+fn unsaved_save_reopens_the_same_action_after_a_stale_async_completion() {
+    use iced::widget::text_editor::{Action, Edit};
+
+    let mut editor = app_at(
+        "draft",
+        CaretPosition {
+            element: 0,
+            column: 0,
+        },
+    );
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::OpenLoaded(Some((
+            "/tmp/phase-3-stale-save.md".into(),
+            "draft".to_owned(),
+        )))),
+    );
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::Edit(Action::Edit(Edit::Insert(
+            '!',
+        )))),
+    );
+    let id = iced::window::Id::unique();
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::CloseRequested(id)),
+    );
+    assert_eq!(
+        editor.interaction.view().unsaved_action(),
+        Some(super::document::UnsavedAction::CloseWindow(id))
+    );
+
+    let snapshot = editor.document.text();
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::UnsavedSave),
+    );
+    assert!(editor.interaction.view().unsaved_action().is_none());
+
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::Edit(Action::Edit(Edit::Insert(
+            '?',
+        )))),
+    );
+    let _ = update(
+        &mut editor,
+        Message::Document(super::document::Message::Saved(
+            Ok("/tmp/phase-3-stale-save.md".into()),
+            snapshot,
+        )),
+    );
+
+    assert_eq!(
+        editor.interaction.view().unsaved_action(),
+        Some(super::document::UnsavedAction::CloseWindow(id))
+    );
 }
 
 #[test]
@@ -425,9 +555,9 @@ fn root_features_keep_base_note_find_unsaved_help_guard_order() {
         &mut editor,
         Message::Document(super::document::Message::OpenRequested),
     );
-    editor.keymap.note(Transition::NoteOpened);
-    editor.keymap.note(Transition::FindOpened);
-    editor.keymap.note(Transition::HelpOpened);
+    editor.interaction.open_note().unwrap();
+    editor.interaction.open_find();
+    editor.interaction.open_help();
 
     assert_eq!(
         root_layer_order(&editor),
@@ -487,12 +617,12 @@ fn preview_toggle_preserves_an_open_find_across_surfaces() {
     let _ = update(&mut editor, Message::Find(find::Message::Open));
 
     let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
-    assert!(!editor.keymap.preview());
-    assert!(editor.keymap.find_open());
+    assert!(!is_preview(&editor));
+    assert!(editor.interaction.view().contains(Overlay::Find));
 
     let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
-    assert!(editor.keymap.preview());
-    assert!(editor.keymap.find_open());
+    assert!(is_preview(&editor));
+    assert!(editor.interaction.view().contains(Overlay::Find));
 }
 
 /// Clicking a comment card activates its comment and moves the cursor
@@ -533,7 +663,7 @@ fn clicking_a_comment_card_moves_the_cursor_to_its_anchor() {
 
     // In write mode the source cursor lands on the anchored element's
     // source instead.
-    editor.keymap.note(Transition::PreviewToggled);
+    assert!(editor.interaction.toggle_preview());
     let _ = update(
         &mut editor,
         Message::Comments(comments::Message::ActivateCard(0, 0)),
@@ -558,7 +688,7 @@ fn find_navigation_routes_to_source_and_preview_features() {
             column: 0,
         },
     );
-    editor.keymap.note(Transition::FindOpened);
+    editor.interaction.open_find();
 
     let _ = update(
         &mut editor,
@@ -576,7 +706,7 @@ fn find_navigation_routes_to_source_and_preview_features() {
         Position { line: 0, column: 0 }
     );
 
-    editor.keymap.note(Transition::PreviewToggled);
+    assert!(editor.interaction.toggle_preview());
     let preview_caret = editor.preview.caret();
     let _ = update(
         &mut editor,

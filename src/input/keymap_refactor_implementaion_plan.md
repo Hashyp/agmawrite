@@ -420,7 +420,7 @@ Gate:
 - The Find-over-Note badge test passes.
 - State transition tests cover every variant and restoration path.
 
-### [ ] Phase 3 — Migrate application ownership
+### [x] Phase 3 — Migrate application ownership
 
 Files:
 

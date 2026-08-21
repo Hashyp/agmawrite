@@ -46,6 +46,7 @@ pub(crate) struct Context {
 pub(crate) enum Event {
     NavigateTo(CaretPosition),
     FocusComposer,
+    ComposerClosed,
     PublishRequested,
 }
 
@@ -141,9 +142,13 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
     match message {
         Message::OpenComposer => Update::event(Event::FocusComposer),
         Message::CloseComposer => {
+            if !context.composer_open {
+                return Update::none();
+            }
+
             state.composer = text_editor::Content::new();
             state.editing_target = None;
-            Update::none()
+            Update::event(Event::ComposerClosed)
         }
         Message::EditComposer(action) => {
             state.composer.perform(action);
@@ -166,7 +171,7 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
             }
 
             state.composer = text_editor::Content::new();
-            Update::none()
+            Update::event(Event::ComposerClosed)
         }
         Message::EditActive => {
             let Some(text) = state.model.active_text().map(str::to_owned) else {
@@ -188,12 +193,17 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
         Message::DeleteComment(thread, entry) => {
             state.model.delete(thread, entry);
 
-            if state.editing_target == Some((thread, entry)) {
-                state.editing_target = None;
-                state.composer = text_editor::Content::new();
+            if state.editing_target != Some((thread, entry)) {
+                return Update::none();
             }
 
-            Update::none()
+            state.editing_target = None;
+            state.composer = text_editor::Content::new();
+            if context.composer_open {
+                Update::event(Event::ComposerClosed)
+            } else {
+                Update::none()
+            }
         }
         Message::ResolveThread(thread) => {
             state.model.resolve(thread);

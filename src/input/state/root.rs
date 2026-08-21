@@ -4,7 +4,7 @@ use super::*;
 
 impl InteractionState {
     /// Wraps Active or Unsaved with Help. Duplicate opens are idempotent.
-    pub(in crate::input) fn open_help(&mut self) {
+    pub(crate) fn open_help(&mut self) {
         self.root = match self.root {
             RootState::Active(workspace) => RootState::Help {
                 resume: HelpResume::Active(workspace),
@@ -17,7 +17,8 @@ impl InteractionState {
     }
 
     /// Removes exactly one Help layer and restores the suspended root.
-    pub(in crate::input) fn close_help(&mut self) {
+    pub(crate) fn close_help(&mut self) -> Option<FocusTarget> {
+        let was_open = matches!(self.root, RootState::Help { .. });
         self.root = match self.root {
             RootState::Help {
                 resume: HelpResume::Active(workspace),
@@ -27,11 +28,12 @@ impl InteractionState {
             } => RootState::Unsaved { action, resume },
             root @ (RootState::Active(_) | RootState::Unsaved { .. }) => root,
         };
+        was_open.then(|| self.focus_target()).flatten()
     }
 
     /// Opens Unsaved below Help when necessary and consumes pending input.
     /// A duplicate request retains the first action being confirmed.
-    pub(in crate::input) fn open_unsaved(&mut self, action: UnsavedAction) {
+    pub(crate) fn open_unsaved(&mut self, action: UnsavedAction) {
         self.root = match self.root {
             RootState::Active(workspace) => RootState::Unsaved {
                 action,
@@ -52,20 +54,29 @@ impl InteractionState {
         };
     }
 
-    /// Closes or answers Unsaved without disturbing a Help layer above it.
-    pub(in crate::input) fn close_unsaved(&mut self) {
-        self.root = match self.root {
-            RootState::Unsaved { resume, .. } => RootState::Active(resume),
+    /// Extracts the action being answered without disturbing Help above it.
+    pub(crate) fn resolve_unsaved(&mut self) -> Option<UnsavedResolution> {
+        let (root, action) = match self.root {
+            RootState::Unsaved { action, resume } => (RootState::Active(resume), Some(action)),
             RootState::Help {
-                resume: HelpResume::Unsaved { resume, .. },
-            } => RootState::Help {
-                resume: HelpResume::Active(resume),
-            },
+                resume: HelpResume::Unsaved { action, resume },
+            } => (
+                RootState::Help {
+                    resume: HelpResume::Active(resume),
+                },
+                Some(action),
+            ),
             root @ (RootState::Active(_)
             | RootState::Help {
                 resume: HelpResume::Active(_),
-            }) => root,
+            }) => (root, None),
         };
+        self.root = root;
+
+        action.map(|action| UnsavedResolution {
+            action,
+            focus: self.focus_target(),
+        })
     }
 }
 

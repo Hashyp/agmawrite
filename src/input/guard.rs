@@ -235,7 +235,7 @@ where
 mod tests {
     use super::{action, GuardAction};
     use crate::document::UnsavedAction;
-    use crate::input::{Keymap, Transition};
+    use crate::input::{InteractionState, Keymap};
     use iced::keyboard::{self, key, Location, Modifiers};
 
     fn pressed(key: keyboard::Key, modifiers: Modifiers) -> iced::Event {
@@ -271,8 +271,9 @@ mod tests {
         assert_eq!(action(write, &chord), GuardAction::OpenHelp);
         assert_eq!(action(write, &slash_chord), GuardAction::OpenHelp);
 
-        let mut help = write;
-        help.note(Transition::HelpOpened);
+        let mut help_state = InteractionState::editable();
+        help_state.open_help();
+        let help = Keymap::from(help_state);
         let typing = pressed(keyboard::Key::Character("x".into()), Modifiers::default());
         assert_eq!(action(help, &typing), GuardAction::Pass);
         assert_eq!(action(help, &chord), GuardAction::CloseHelp);
@@ -291,13 +292,14 @@ mod tests {
 
     #[test]
     fn help_over_unsaved_over_find_over_note_unwinds_to_note() {
-        let mut keymap = Keymap::new(false);
-        keymap.note(Transition::PreviewToggled);
-        keymap.note(Transition::NoteOpened);
-        keymap.note(Transition::FindOpened);
-        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
-        keymap.note(Transition::HelpOpened);
+        let mut state = InteractionState::editable();
+        assert!(state.toggle_preview());
+        state.open_note().unwrap();
+        state.open_find();
+        state.open_unsaved(UnsavedAction::OpenFile);
+        state.open_help();
 
+        let keymap = Keymap::from(state);
         assert!(keymap.preview());
         assert!(keymap.note_open());
         assert!(keymap.find_open());
@@ -305,65 +307,86 @@ mod tests {
         assert!(keymap.help_open());
         assert_eq!(action(keymap, &escape()), GuardAction::CloseHelp);
 
-        keymap.note(Transition::HelpClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::CancelUnsaved);
+        let _ = state.close_help();
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CancelUnsaved
+        );
 
-        keymap.note(Transition::UnsavedClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseFind);
+        let _ = state.resolve_unsaved();
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CloseFind
+        );
 
-        keymap.note(Transition::FindClosed);
-        assert!(keymap.note_open());
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseNote);
+        let _ = state.close_find();
+        assert!(Keymap::from(state).note_open());
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CloseNote
+        );
     }
 
     #[test]
     fn modal_priority_is_help_unsaved_find_note_then_focused_widgets() {
-        let mut keymap = Keymap::new(false);
-        keymap.note(Transition::PreviewToggled);
-        keymap.note(Transition::NoteOpened);
-        keymap.note(Transition::FindOpened);
-        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
-        keymap.note(Transition::HelpOpened);
+        let mut state = InteractionState::editable();
+        assert!(state.toggle_preview());
+        state.open_note().unwrap();
+        state.open_find();
+        state.open_unsaved(UnsavedAction::OpenFile);
+        state.open_help();
 
         // Help has first refusal even when every lower modal is open, and
         // its field receives passed input-method events.
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseHelp);
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CloseHelp
+        );
         assert_eq!(
             action(
-                keymap,
+                Keymap::from(state),
                 &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
             ),
             GuardAction::Pass
         );
 
-        keymap.note(Transition::HelpClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::CancelUnsaved);
+        let _ = state.close_help();
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CancelUnsaved
+        );
         assert_eq!(
             action(
-                keymap,
+                Keymap::from(state),
                 &iced::Event::InputMethod(iced::advanced::input_method::Event::Closed)
             ),
             GuardAction::Capture
         );
         assert_eq!(
             action(
-                keymap,
+                Keymap::from(state),
                 &pressed(keyboard::Key::Character("x".into()), Modifiers::default())
             ),
             GuardAction::Capture
         );
 
-        keymap.note(Transition::UnsavedClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseFind);
+        let _ = state.resolve_unsaved();
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CloseFind
+        );
 
-        keymap.note(Transition::FindClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::CloseNote);
+        let _ = state.close_find();
+        assert_eq!(
+            action(Keymap::from(state), &escape()),
+            GuardAction::CloseNote
+        );
 
-        keymap.note(Transition::NoteClosed);
-        assert_eq!(action(keymap, &escape()), GuardAction::Pass);
+        let _ = state.close_note();
+        assert_eq!(action(Keymap::from(state), &escape()), GuardAction::Pass);
         assert_eq!(
             action(
-                keymap,
+                Keymap::from(state),
                 &pressed(keyboard::Key::Character("x".into()), Modifiers::default())
             ),
             GuardAction::Pass

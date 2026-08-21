@@ -1,15 +1,20 @@
 //! Application composition and cross-feature coordination.
+mod coordination;
 mod shell;
 
 use crate::cli::Args;
 use crate::input::{
-    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, Keymap,
-    PreviewCommand, Transition,
+    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand,
+    InteractionState, Keymap, Overlay, PreviewCommand, Surface,
 };
 use crate::theme::Palette;
-use crate::{comments, document, editing, find, help, highlight, input, preview, theme, ui};
+use crate::{comments, document, find, help, highlight, input, preview, theme, ui};
+use coordination::{
+    focus_target, handle_comments_event, handle_document_event, handle_find_event,
+    handle_preview_event,
+};
 
-use iced::widget::{operation::focus, operation::focus_next, text_editor, Id};
+use iced::widget::{operation::focus_next, text_editor, Id};
 use iced::{keyboard, Background, Border, Element, Font, Length, Subscription, Task, Theme};
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -17,7 +22,7 @@ const SOURCE_EDITOR_ID: &str = "source-editor";
 pub(crate) struct App {
     document: document::State,
     preview: preview::State,
-    keymap: Keymap,
+    interaction: InteractionState,
     comments: comments::State,
     find: find::State,
     help: help::Help,
@@ -100,38 +105,9 @@ fn message_for_guard_action(action: GuardAction) -> Message {
     }
 }
 
-fn input_transition(message: &Message) -> Transition {
-    match message {
-        Message::Document(document::Message::OpenLoaded(Some(_))) => Transition::DocumentLoaded,
-        Message::Preview(preview::Message::Toggle) => Transition::PreviewToggled,
-        Message::Preview(preview::Message::ToggleVisual) => Transition::VisualToggled,
-        Message::Preview(preview::Message::Cancel) => Transition::PreviewCancelled,
-        Message::Preview(preview::Message::AcknowledgeG) => Transition::GArmed,
-        Message::Preview(preview::Message::AcknowledgeZ) => Transition::ZArmed,
-        Message::Preview(preview::Message::AcknowledgeCount(digit)) => {
-            Transition::CountPressed(*digit)
-        }
-        Message::Comments(comments::Message::OpenComposer) => Transition::NoteOpened,
-        Message::Comments(comments::Message::CloseComposer | comments::Message::SaveComposer) => {
-            Transition::NoteClosed
-        }
-        Message::Find(find::Message::Open) => Transition::FindOpened,
-        Message::Find(find::Message::Close) => Transition::FindClosed,
-        Message::Help(help::Message::Open) => Transition::HelpOpened,
-        Message::Help(help::Message::Close) => Transition::HelpClosed,
-        Message::Help(_) => Transition::HelpActivity,
-        Message::Document(
-            document::Message::UnsavedCancel
-            | document::Message::UnsavedSave
-            | document::Message::UnsavedDiscard,
-        ) => Transition::UnsavedClosed,
-        _ => Transition::Activity,
-    }
-}
-
 pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
     let keys = keyboard::listen()
-        .with(editor.keymap)
+        .with(Keymap::from(editor.interaction))
         .filter_map(|(keymap, event)| keymap.handle(event))
         .map(Message::Input);
 
@@ -152,106 +128,6 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
     }
 }
 
-fn handle_document_event(editor: &mut App, event: document::Event) -> Task<Message> {
-    match event {
-        document::Event::SourceReplaced { reason } => {
-            let source = editor.document.text();
-
-            match reason {
-                document::SourceReplacement::Loaded => {
-                    editor.preview.load_source(&source);
-                    editor.comments = comments::State::new();
-                    Task::none()
-                }
-                document::SourceReplacement::External => {
-                    editor.preview.replace_source(&source);
-
-                    if editor.keymap.preview() {
-                        preview::reveal_caret().map(Message::Preview)
-                    } else {
-                        Task::none()
-                    }
-                }
-            }
-        }
-        document::Event::CloseWindow(id) => iced::window::close(id),
-        document::Event::UnsavedVisibilityChanged(visible) => {
-            let transition = editor
-                .document
-                .pending_action()
-                .filter(|_| visible)
-                .map_or(Transition::UnsavedClosed, Transition::UnsavedOpened);
-            editor.keymap.note(transition);
-            Task::none()
-        }
-    }
-}
-
-fn handle_preview_event(editor: &mut App, event: preview::Event) -> Task<Message> {
-    match event {
-        preview::Event::ToggleRequested => {
-            if !editor.keymap.can_toggle_preview() {
-                return Task::none();
-            }
-
-            if editor.keymap.preview() {
-                let source = editor.document.text();
-                editor
-                    .preview
-                    .refresh_from_source(&source, editor.document.content());
-                preview::reveal_caret().map(Message::Preview)
-            } else {
-                editor.preview.clear_visual_selection();
-                focus(Id::new(SOURCE_EDITOR_ID))
-            }
-        }
-        preview::Event::OpenLink(_uri) => Task::none(),
-    }
-}
-
-fn handle_comments_event(editor: &mut App, event: comments::Event) -> Task<Message> {
-    match event {
-        comments::Event::NavigateTo(anchor) => {
-            if editor.keymap.preview() {
-                editor.preview.clear_visual_selection();
-                editor.preview.place_caret(anchor);
-                preview::reveal_caret().map(Message::Preview)
-            } else {
-                let source = editor.document.text();
-                let element = editor.preview.elements().get(anchor.element);
-
-                if let Some(element) = element {
-                    editor.document.move_to(text_editor::Cursor {
-                        position: editing::position_at(&source, element.source().start),
-                        selection: None,
-                    });
-                    focus(Id::new(SOURCE_EDITOR_ID))
-                } else {
-                    Task::none()
-                }
-            }
-        }
-        comments::Event::FocusComposer => {
-            editor.keymap.note(Transition::NoteOpened);
-            comments::focus_composer().map(Message::Comments)
-        }
-        comments::Event::PublishRequested => Task::none(),
-    }
-}
-
-fn handle_find_event(editor: &mut App, event: find::Event) -> Task<Message> {
-    match event {
-        find::Event::SelectSource(matched) => {
-            editor.document.apply_find_selection(matched);
-            Task::none()
-        }
-        find::Event::SelectPreview { element, range } => {
-            editor.preview.apply_find_selection(element, range);
-            preview::reveal_caret().map(Message::Preview)
-        }
-    }
-}
-
 pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
     let message = match message {
         Message::Input(command) => message_for_command(command),
@@ -259,96 +135,158 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
         message => message,
     };
 
-    let note_was_open = editor.keymap.note_open();
-    editor.keymap.note(input_transition(&message));
-
     match message {
+        Message::Document(document::Message::UnsavedCancel) => {
+            let Some(resolution) = editor.interaction.resolve_unsaved() else {
+                return Task::none();
+            };
+            focus_target(resolution.focus())
+        }
+        Message::Document(
+            prompt @ (document::Message::UnsavedSave | document::Message::UnsavedDiscard),
+        ) => {
+            let Some(resolution) = editor.interaction.resolve_unsaved() else {
+                return Task::none();
+            };
+            let continuation = match prompt {
+                document::Message::UnsavedSave => document::Message::SaveThen(resolution.action()),
+                document::Message::UnsavedDiscard => {
+                    document::Message::RunUnsavedAction(resolution.action())
+                }
+                _ => unreachable!(),
+            };
+            let document::Update { task, event } =
+                document::update(&mut editor.document, continuation);
+            let event_task =
+                event.map_or_else(Task::none, |event| handle_document_event(editor, event));
+            Task::batch([
+                task.map(Message::Document),
+                event_task,
+                focus_target(resolution.focus()),
+            ])
+        }
         Message::Document(message) => {
             let document::Update { task, event } = document::update(&mut editor.document, message);
             let event_task =
                 event.map_or_else(Task::none, |event| handle_document_event(editor, event));
-
-            return Task::batch([task.map(Message::Document), event_task]);
+            editor.interaction.activity();
+            Task::batch([task.map(Message::Document), event_task])
         }
-        Message::Theme(theme::Event::Changed) => editor.palette = Palette::current(),
-        Message::Preview(message) => {
+        Message::Theme(theme::Event::Changed) => {
+            editor.palette = Palette::current();
+            editor.interaction.activity();
+            Task::none()
+        }
+        Message::Preview(preview::Message::AcknowledgeG) => {
+            editor.interaction.arm_g();
+            Task::none()
+        }
+        Message::Preview(preview::Message::AcknowledgeZ) => {
+            editor.interaction.arm_z();
+            Task::none()
+        }
+        Message::Preview(preview::Message::AcknowledgeCount(digit)) => {
+            editor.interaction.push_count_digit(digit);
+            Task::none()
+        }
+        Message::Preview(message @ preview::Message::ToggleVisual) => {
+            let mut accepted = editor.interaction;
+            if accepted.toggle_visual().is_err() {
+                return Task::none();
+            }
             let context = preview::Context {
-                visual_active: editor.keymap.visual(),
+                visual_active: accepted.view().visual(),
+            };
+            let preview::Update { task, event } =
+                preview::update(&mut editor.preview, message, context);
+            debug_assert!(event.is_none());
+            editor.interaction = accepted;
+            task.map(Message::Preview)
+        }
+        Message::Preview(message @ preview::Message::Cancel) => {
+            let mut accepted = editor.interaction;
+            if accepted.cancel_preview().is_err() {
+                return Task::none();
+            }
+            let context = preview::Context {
+                visual_active: accepted.view().visual(),
+            };
+            let preview::Update { task, event } =
+                preview::update(&mut editor.preview, message, context);
+            debug_assert!(event.is_none());
+            editor.interaction = accepted;
+            task.map(Message::Preview)
+        }
+        Message::Preview(message) => {
+            let toggles_surface = matches!(message, preview::Message::Toggle);
+            let context = preview::Context {
+                visual_active: editor.interaction.view().visual(),
             };
             let preview::Update { task, event } =
                 preview::update(&mut editor.preview, message, context);
             let event_task =
                 event.map_or_else(Task::none, |event| handle_preview_event(editor, event));
-
-            return Task::batch([task.map(Message::Preview), event_task]);
+            if !toggles_surface {
+                editor.interaction.activity();
+            }
+            Task::batch([task.map(Message::Preview), event_task])
         }
         Message::Comments(message) => {
-            let closes_composer = matches!(
+            if matches!(
                 &message,
-                comments::Message::DeleteComment(thread, entry)
-                    if editor.comments.editing_target() == Some((*thread, *entry))
-            );
+                comments::Message::OpenComposer | comments::Message::EditActive
+            ) {
+                let mut legal = editor.interaction;
+                if legal.open_note().is_err() {
+                    return Task::none();
+                }
+            }
+
+            let interaction = editor.interaction.view();
             let context = comments::Context {
                 caret: editor.preview.caret(),
                 selection: editor.preview.visual_selection(),
-                composer_open: note_was_open,
+                composer_open: interaction.contains(Overlay::Note),
             };
             let comments::Update { event } =
                 comments::update(&mut editor.comments, message, context);
-
-            if closes_composer {
-                editor.keymap.note(Transition::NoteClosed);
-            }
-
-            return event.map_or_else(Task::none, |event| handle_comments_event(editor, event));
+            event.map_or_else(Task::none, |event| handle_comments_event(editor, event))
         }
         Message::Find(message) => {
-            let closes = matches!(message, find::Message::Close);
             let source;
-            let surface = if editor.keymap.preview() {
-                find::Surface::Preview(editor.preview.elements())
-            } else {
-                source = editor.document.text();
-                find::Surface::Source(&source)
+            let surface = match editor.interaction.view().surface() {
+                Surface::Preview => find::Surface::Preview(editor.preview.elements()),
+                Surface::Write => {
+                    source = editor.document.text();
+                    find::Surface::Source(&source)
+                }
             };
             let find::Update { task, event } = find::update(&mut editor.find, message, surface);
             let event_task =
                 event.map_or_else(Task::none, |event| handle_find_event(editor, event));
-            let restore_task = if closes && !editor.keymap.preview() {
-                focus(Id::new(SOURCE_EDITOR_ID))
-            } else {
-                Task::none()
-            };
-
-            return Task::batch([task.map(Message::Find), event_task, restore_task]);
+            Task::batch([task.map(Message::Find), event_task])
+        }
+        Message::Help(help::Message::Open) => {
+            editor.help.update(help::Message::Open);
+            editor.interaction.open_help();
+            help::focus_input()
+        }
+        Message::Help(help::Message::Close) => {
+            if !matches!(editor.interaction.view().overlay(), Some(Overlay::Help)) {
+                return Task::none();
+            }
+            editor.help.update(help::Message::Close);
+            let target = editor.interaction.close_help();
+            focus_target(target)
         }
         Message::Help(message) => {
-            let opened = matches!(message, help::Message::Open);
-            let closed = matches!(message, help::Message::Close);
             editor.help.update(message);
-
-            if opened {
-                return help::focus_input();
-            }
-
-            if closed {
-                if editor.keymap.find_open() {
-                    return find::focus_input().map(Message::Find);
-                }
-                if editor.keymap.note_open() {
-                    return comments::focus_composer().map(Message::Comments);
-                }
-                if !editor.keymap.preview() {
-                    return focus(Id::new(SOURCE_EDITOR_ID));
-                }
-            }
+            Task::none()
         }
         Message::Input(_) | Message::Toolbar(_) => {
             unreachable!("boundary messages are translated before delegation")
         }
     }
-
-    Task::none()
 }
 
 fn editor_style(
@@ -367,29 +305,30 @@ fn editor_style(
 
 pub(crate) fn view(editor: &App) -> Element<'_, Message> {
     let palette = editor.palette;
+    let interaction = editor.interaction.view();
 
     let source = editor.document.text();
-    let find_surface = if editor.keymap.preview() {
-        find::Surface::Preview(editor.preview.elements())
-    } else {
-        find::Surface::Source(&source)
+    let find_surface = match interaction.surface() {
+        Surface::Preview => find::Surface::Preview(editor.preview.elements()),
+        Surface::Write => find::Surface::Source(&source),
     };
 
-    let base_area: Element<'_, Message> = if editor.keymap.preview() {
-        let current_match = editor.find.current_preview_match(editor.preview.elements());
+    let base_area: Element<'_, Message> = match interaction.surface() {
+        Surface::Preview => {
+            let current_match = editor.find.current_preview_match(editor.preview.elements());
 
-        preview::view(
-            &editor.preview,
-            preview::ViewContext::new(
-                &editor.comments,
-                editor.find.query(),
-                current_match,
-                palette,
-            ),
-        )
-        .map(Message::Preview)
-    } else {
-        text_editor(editor.document.content())
+            preview::view(
+                &editor.preview,
+                preview::ViewContext::new(
+                    &editor.comments,
+                    editor.find.query(),
+                    current_match,
+                    palette,
+                ),
+            )
+            .map(Message::Preview)
+        }
+        Surface::Write => text_editor(editor.document.content())
             .id(Id::new(SOURCE_EDITOR_ID))
             .on_action(|action| Message::Document(document::Message::Edit(action)))
             .font(EDITOR_FONT)
@@ -402,20 +341,21 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
                 highlight::format,
             )
             .style(move |theme, status| editor_style(&palette, theme, status))
-            .into()
+            .into(),
     };
 
-    let note = editor
-        .keymap
-        .note_open()
+    let note = interaction
+        .contains(Overlay::Note)
         .then(|| comments::composer::view(&editor.comments, palette).map(Message::Comments));
     let editing_area = shell::stack_layers(base_area, note);
 
     let toolbar = ui::toolbar::view(ui::toolbar::Model::new(
-        editor.keymap.preview(),
-        editor.keymap.can_toggle_preview(),
-        editor.keymap.mode(),
-        editor.keymap.pending_count(),
+        matches!(interaction.surface(), Surface::Preview),
+        interaction.can_toggle_preview(),
+        interaction.badge(),
+        interaction
+            .pending_count()
+            .map_or(0, std::num::NonZeroU32::get),
         palette,
     ))
     .map(Message::Toolbar);
@@ -431,23 +371,22 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
     .map(Message::Comments);
     let base = shell::layout(editing_area, toolbar, sidebar, palette.background);
 
-    let find = editor
-        .keymap
-        .find_open()
+    let find = interaction
+        .contains(Overlay::Find)
         .then(|| find::view(&editor.find, find_surface, palette).map(Message::Find));
-    let unsaved = editor.document.pending_action().and_then(|action| {
-        editor
-            .keymap
-            .unsaved_open()
-            .then(|| document::unsaved_view::view(action, palette).map(Message::Document))
-    });
-    let help = editor
-        .keymap
-        .help_open()
+    let unsaved = interaction
+        .unsaved_action()
+        .map(|action| document::unsaved_view::view(action, palette).map(Message::Document));
+    let help = interaction
+        .contains(Overlay::Help)
         .then(|| help::view(&editor.help, palette).map(Message::Help));
     let layers = shell::stack_layers(base, find.into_iter().chain(unsaved).chain(help));
 
-    input::guard(layers, editor.keymap, message_for_guard_action)
+    input::guard(
+        layers,
+        Keymap::from(editor.interaction),
+        message_for_guard_action,
+    )
 }
 
 pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {
@@ -468,7 +407,11 @@ pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {
             args.path.as_ref().map(std::path::PathBuf::from),
         ),
         preview: preview::State::new(contents.as_deref().unwrap_or_default()),
-        keymap: Keymap::new(args.preview),
+        interaction: if args.preview {
+            InteractionState::preview_only()
+        } else {
+            InteractionState::editable()
+        },
         comments: comments::State::new(),
         find: find::State::new(),
         help: help::Help::new(),

@@ -2,7 +2,7 @@
 //! filtering, rendering, and modal keyboard policy.
 //!
 //! The application owns where Help sits in the root stack and where focus
-//! returns when it closes. The keymap owns whether the modal is visible.
+//! returns when it closes. `InteractionState` owns whether the modal is visible.
 
 use iced::widget::{
     column, container, mouse_area, operation::focus, row, scrollable, text, text_input, Id,

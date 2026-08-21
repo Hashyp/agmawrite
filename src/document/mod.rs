@@ -38,6 +38,10 @@ pub(crate) enum Message {
     UnsavedCancel,
     UnsavedSave,
     UnsavedDiscard,
+    /// Starts a save and resumes this guarded action only after a clean result.
+    SaveThen(UnsavedAction),
+    /// Executes an action extracted from the interaction-owned prompt.
+    RunUnsavedAction(UnsavedAction),
 }
 
 /// Semantic consequences that remain owned by the composing application.
@@ -45,7 +49,7 @@ pub(crate) enum Message {
 pub(crate) enum Event {
     SourceReplaced { reason: SourceReplacement },
     CloseWindow(iced::window::Id),
-    UnsavedVisibilityChanged(bool),
+    UnsavedConfirmationRequested(UnsavedAction),
 }
 
 pub(crate) struct Update {
@@ -71,13 +75,6 @@ impl Update {
             event: Some(event),
         }
     }
-
-    fn task_and_event(task: Task<Message>, event: Event) -> Self {
-        Self {
-            task,
-            event: Some(event),
-        }
-    }
 }
 
 /// The source document and the state needed to preserve its persistence
@@ -86,7 +83,8 @@ pub(crate) struct State {
     content: text_editor::Content,
     path: Option<PathBuf>,
     saved_contents: String,
-    pending_unsaved: Option<UnsavedAction>,
+    /// A guarded action waiting for an asynchronous save to finish.
+    after_save: Option<UnsavedAction>,
 }
 
 impl State {
@@ -95,7 +93,7 @@ impl State {
             content: text_editor::Content::with_text(contents),
             path,
             saved_contents: contents.to_owned(),
-            pending_unsaved: None,
+            after_save: None,
         }
     }
 
@@ -118,11 +116,6 @@ impl State {
     /// snapshot.
     pub(crate) fn is_modified(&self) -> bool {
         self.content.text() != self.saved_contents
-    }
-
-    /// The action currently guarded by the unsaved-changes dialog.
-    pub(crate) fn pending_action(&self) -> Option<UnsavedAction> {
-        self.pending_unsaved
     }
 
     pub(crate) fn move_to(&mut self, cursor: text_editor::Cursor) {
@@ -190,7 +183,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
         }
         Message::OpenRequested => {
             if state.is_modified() {
-                show_unsaved(state, UnsavedAction::OpenFile)
+                request_unsaved(UnsavedAction::OpenFile)
             } else {
                 Update::task(Task::perform(io::open(), Message::OpenLoaded))
             }
@@ -212,17 +205,17 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
             ))
         }
         Message::SavePathChosen(None) => {
-            state.pending_unsaved = None;
-            Update::event(Event::UnsavedVisibilityChanged(false))
+            state.after_save = None;
+            Update::none()
         }
         Message::Saved(Ok(_path), snapshot) => {
             // The completed operation baselines what it actually wrote, not
             // whatever happens to be in the editor now.
             state.mark_saved(snapshot);
 
-            if let Some(action) = state.pending_unsaved.take() {
+            if let Some(action) = state.after_save.take() {
                 if state.is_modified() {
-                    return show_unsaved(state, action);
+                    return request_unsaved(action);
                 }
 
                 return run_unsaved_action(action);
@@ -232,25 +225,23 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
         }
         Message::Saved(Err(error), _snapshot) => {
             eprintln!("agmawrite: {error}");
-            state.pending_unsaved = None;
-            Update::event(Event::UnsavedVisibilityChanged(false))
+            state.after_save = None;
+            Update::none()
         }
-        // The card swallows clicks so they do not reach the editing surface.
-        Message::UnsavedCardPressed => Update::none(),
-        Message::UnsavedCancel => {
-            state.pending_unsaved = None;
-            Update::event(Event::UnsavedVisibilityChanged(false))
+        // These originate in the prompt view. The app must first resolve the
+        // interaction-owned action and translate Save/Discard explicitly.
+        Message::UnsavedCardPressed
+        | Message::UnsavedCancel
+        | Message::UnsavedSave
+        | Message::UnsavedDiscard => Update::none(),
+        Message::SaveThen(action) => {
+            state.after_save = Some(action);
+            Update::task(start_save(state))
         }
-        Message::UnsavedSave => {
-            Update::task_and_event(start_save(state), Event::UnsavedVisibilityChanged(false))
-        }
-        Message::UnsavedDiscard => match state.pending_unsaved.take() {
-            Some(action) => run_unsaved_action(action),
-            None => Update::none(),
-        },
+        Message::RunUnsavedAction(action) => run_unsaved_action(action),
         Message::CloseRequested(id) => {
             if state.is_modified() {
-                show_unsaved(state, UnsavedAction::CloseWindow(id))
+                request_unsaved(UnsavedAction::CloseWindow(id))
             } else {
                 Update::event(Event::CloseWindow(id))
             }
@@ -280,9 +271,8 @@ pub(crate) fn subscription(path: &Path) -> Subscription<Message> {
     watch::subscription(path).map(|_event| Message::ExternalChange)
 }
 
-fn show_unsaved(state: &mut State, action: UnsavedAction) -> Update {
-    state.pending_unsaved = Some(action);
-    Update::event(Event::UnsavedVisibilityChanged(true))
+fn request_unsaved(action: UnsavedAction) -> Update {
+    Update::event(Event::UnsavedConfirmationRequested(action))
 }
 
 fn start_save(state: &State) -> Task<Message> {
@@ -453,30 +443,33 @@ mod tests {
     }
 
     #[test]
-    fn guarded_open_cancels_discards_and_waits_for_a_clean_save() {
+    fn guarded_open_requests_an_action_and_waits_for_a_clean_save() {
         let mut document = State::new("draft", Some("/tmp/document-open.md".into()));
         update(&mut document, Message::Edit(insert('!')));
 
         let result = update(&mut document, Message::OpenRequested);
-        assert_eq!(result.event, Some(Event::UnsavedVisibilityChanged(true)));
-        assert_eq!(document.pending_action(), Some(UnsavedAction::OpenFile));
+        assert_eq!(
+            result.event,
+            Some(Event::UnsavedConfirmationRequested(UnsavedAction::OpenFile))
+        );
+        assert!(document.after_save.is_none());
 
-        let result = update(&mut document, Message::UnsavedCancel);
-        assert_eq!(result.event, Some(Event::UnsavedVisibilityChanged(false)));
-        assert!(document.pending_action().is_none());
+        // Prompt messages carry no document-owned action. The app must
+        // resolve InteractionState before asking the document to continue.
+        assert!(update(&mut document, Message::UnsavedCancel)
+            .event
+            .is_none());
+        assert!(update(&mut document, Message::UnsavedDiscard)
+            .event
+            .is_none());
         assert!(document.is_modified());
 
-        update(&mut document, Message::OpenRequested);
-        update(&mut document, Message::UnsavedDiscard);
-        assert!(document.pending_action().is_none());
-        assert!(document.is_modified());
-
-        update(&mut document, Message::OpenRequested);
-        update(&mut document, Message::UnsavedSave);
+        update(&mut document, Message::SaveThen(UnsavedAction::OpenFile));
+        assert_eq!(document.after_save, Some(UnsavedAction::OpenFile));
         let snapshot = document.text();
         let result = update(&mut document, Message::Saved(Ok("saved".into()), snapshot));
         assert!(result.event.is_none());
-        assert!(document.pending_action().is_none());
+        assert!(document.after_save.is_none());
         assert!(!document.is_modified());
     }
 
@@ -488,15 +481,17 @@ mod tests {
             selection: None,
         });
         update(&mut document, Message::Edit(insert('!')));
-        update(&mut document, Message::OpenRequested);
-        update(&mut document, Message::UnsavedSave);
+        update(&mut document, Message::SaveThen(UnsavedAction::OpenFile));
         let snapshot = document.text();
 
         update(&mut document, Message::Edit(insert('?')));
         let result = update(&mut document, Message::Saved(Ok("saved".into()), snapshot));
 
-        assert_eq!(result.event, Some(Event::UnsavedVisibilityChanged(true)));
-        assert_eq!(document.pending_action(), Some(UnsavedAction::OpenFile));
+        assert_eq!(
+            result.event,
+            Some(Event::UnsavedConfirmationRequested(UnsavedAction::OpenFile))
+        );
+        assert!(document.after_save.is_none());
         assert_eq!(document.text(), "draft!?");
         assert!(document.is_modified());
     }
@@ -505,14 +500,28 @@ mod tests {
     fn cancelling_save_path_drops_the_guarded_action() {
         let mut document = State::new("draft", None);
         update(&mut document, Message::Edit(insert('!')));
-        update(&mut document, Message::OpenRequested);
-        update(&mut document, Message::UnsavedSave);
+        update(&mut document, Message::SaveThen(UnsavedAction::OpenFile));
 
         let result = update(&mut document, Message::SavePathChosen(None));
 
-        assert_eq!(result.event, Some(Event::UnsavedVisibilityChanged(false)));
-        assert!(document.pending_action().is_none());
+        assert!(result.event.is_none());
+        assert!(document.after_save.is_none());
         assert!(document.is_modified());
+    }
+
+    #[test]
+    fn discarded_action_executes_only_after_the_app_returns_its_payload() {
+        let id = iced::window::Id::unique();
+        let mut document = State::new("draft", None);
+
+        let prompt_message = update(&mut document, Message::UnsavedDiscard);
+        assert!(prompt_message.event.is_none());
+
+        let execution = update(
+            &mut document,
+            Message::RunUnsavedAction(UnsavedAction::CloseWindow(id)),
+        );
+        assert_eq!(execution.event, Some(Event::CloseWindow(id)));
     }
 
     #[test]
@@ -526,27 +535,37 @@ mod tests {
         update(&mut document, Message::Edit(insert('!')));
 
         let result = update(&mut document, Message::CloseRequested(id));
-        assert_eq!(result.event, Some(Event::UnsavedVisibilityChanged(true)));
         assert_eq!(
-            document.pending_action(),
-            Some(UnsavedAction::CloseWindow(id))
+            result.event,
+            Some(Event::UnsavedConfirmationRequested(
+                UnsavedAction::CloseWindow(id)
+            ))
         );
+        assert!(document.after_save.is_none());
 
-        update(&mut document, Message::UnsavedSave);
+        update(
+            &mut document,
+            Message::SaveThen(UnsavedAction::CloseWindow(id)),
+        );
         let snapshot = document.text();
         update(&mut document, Message::Edit(insert('?')));
         let stale = update(&mut document, Message::Saved(Ok("saved".into()), snapshot));
-        assert_eq!(stale.event, Some(Event::UnsavedVisibilityChanged(true)));
         assert_eq!(
-            document.pending_action(),
-            Some(UnsavedAction::CloseWindow(id))
+            stale.event,
+            Some(Event::UnsavedConfirmationRequested(
+                UnsavedAction::CloseWindow(id)
+            ))
         );
+        assert!(document.after_save.is_none());
 
-        update(&mut document, Message::UnsavedSave);
+        update(
+            &mut document,
+            Message::SaveThen(UnsavedAction::CloseWindow(id)),
+        );
         let snapshot = document.text();
         let clean = update(&mut document, Message::Saved(Ok("saved".into()), snapshot));
         assert_eq!(clean.event, Some(Event::CloseWindow(id)));
-        assert!(document.pending_action().is_none());
+        assert!(document.after_save.is_none());
         assert!(!document.is_modified());
     }
 }

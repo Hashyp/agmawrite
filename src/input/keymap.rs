@@ -1,7 +1,8 @@
 //! Temporary keymap façade over the legal interaction-state hierarchy.
 //!
-//! [`Keymap::handle`] still resolves keys while callers migrate. All stored
-//! UI state and preview sequences live in [`InteractionState`].
+//! [`Keymap::handle`] still resolves keys while bindings migrate. The façade
+//! is only a copyable input snapshot; application-owned state lives in
+//! [`InteractionState`] and transitions there directly.
 
 use iced::keyboard;
 
@@ -9,63 +10,32 @@ use super::command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
 use super::pending::Prefix;
-use super::state::{InteractionState, ModeBadge, Overlay, Surface};
-use crate::document::UnsavedAction;
+#[cfg(test)]
+use super::state::ModeBadge;
+use super::state::{InteractionState, Overlay, Surface};
 use crate::help;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 
-/// The input mode façade used while binding callers migrate.
-///
-/// `Clone` + `Hash` so the keyboard subscription can carry a snapshot and
-/// re-listen when the mode changes; key handling reads the snapshot
-/// ([`Keymap::handle`]) while transitions happen through messages
-/// ([`Keymap::note`]).
+/// A copyable input snapshot used while binding callers migrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Keymap {
+pub(crate) struct Keymap {
     interaction: InteractionState,
-}
-
-/// An input-local state transition observed by the keymap.
-///
-/// The application translates its messages to this small vocabulary. This
-/// keeps mode and prefix bookkeeping independent of the root message enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transition {
-    /// Activity unrelated to input state clears pending prefixes and counts.
-    Activity,
-    DocumentLoaded,
-    PreviewToggled,
-    VisualToggled,
-    PreviewCancelled,
-    GArmed,
-    ZArmed,
-    CountPressed(u32),
-    NoteOpened,
-    NoteClosed,
-    FindOpened,
-    FindClosed,
-    HelpOpened,
-    HelpClosed,
-    /// Activity within Help is transparent to underlying prefixes/counts.
-    HelpActivity,
-    UnsavedOpened(UnsavedAction),
-    UnsavedClosed,
 }
 
 impl Keymap {
     /// A keymap starting in write mode — or in view mode when the app runs
     /// preview-only.
-    pub fn new(preview_only: bool) -> Self {
-        Self {
-            interaction: if preview_only {
-                InteractionState::preview_only()
-            } else {
-                InteractionState::editable()
-            },
-        }
+    #[cfg(test)]
+    pub(crate) fn new(preview_only: bool) -> Self {
+        Self::from(if preview_only {
+            InteractionState::preview_only()
+        } else {
+            InteractionState::editable()
+        })
     }
 
     /// The current mode, popups included — the badge reads this.
+    #[cfg(test)]
     pub fn mode(&self) -> ModeBadge {
         self.interaction.view().badge()
     }
@@ -100,11 +70,12 @@ impl Keymap {
     /// Whether the unsaved-changes dialog is open. The mode itself remains
     /// unchanged beneath it.
     pub fn unsaved_open(&self) -> bool {
-        self.interaction.view().has_unsaved()
+        self.interaction.view().unsaved_action().is_some()
     }
 
     /// The pending motion count, for the mode badge's `3×` hint. `0` when
     /// no count is pending.
+    #[cfg(test)]
     pub fn pending_count(&self) -> u32 {
         self.interaction
             .view()
@@ -123,18 +94,9 @@ impl Keymap {
         self.interaction.jump_count()
     }
 
-    /// Whether visual mode is active — motions extend the selection.
-    pub fn visual(&self) -> bool {
-        self.interaction.view().visual()
-    }
-
     /// Turns a key event into the semantic command it means in the current
-    /// mode, if any.
-    ///
-    /// This only reads the mode; the transitions themselves happen in
-    /// [`Keymap::note`] once the produced message is dispatched, so key
-    /// handling and message handling never see different states.
-    pub fn handle(&self, event: keyboard::Event) -> Option<Command> {
+    /// interaction snapshot, if any.
+    pub(crate) fn handle(&self, event: keyboard::Event) -> Option<Command> {
         // Help owns its chord and modal keyboard decisions; the keymap
         // only supplies the visibility state and translates the decision
         // into an application message.
@@ -374,34 +336,11 @@ impl Keymap {
             None
         }
     }
+}
 
-    /// Keeps the mode stack in sync with an input transition, so changes
-    /// triggered without keys (button and backdrop clicks) land exactly
-    /// like the key-driven ones.
-    pub fn note(&mut self, transition: Transition) {
-        match transition {
-            Transition::Activity => self.interaction.activity(),
-            Transition::DocumentLoaded => self.interaction.document_loaded(),
-            Transition::PreviewToggled => self.interaction.toggle_preview(),
-            Transition::VisualToggled => {
-                let _ = self.interaction.toggle_visual();
-            }
-            Transition::PreviewCancelled => self.interaction.cancel_preview(),
-            Transition::GArmed => self.interaction.arm_prefix(Prefix::G),
-            Transition::ZArmed => self.interaction.arm_prefix(Prefix::Z),
-            Transition::CountPressed(digit) => self.interaction.push_count_digit(digit),
-            Transition::NoteOpened => {
-                let _ = self.interaction.open_note();
-            }
-            Transition::NoteClosed => self.interaction.close_note(),
-            Transition::FindOpened => self.interaction.open_find(),
-            Transition::FindClosed => self.interaction.close_find(),
-            Transition::HelpOpened => self.interaction.open_help(),
-            Transition::HelpClosed => self.interaction.close_help(),
-            Transition::HelpActivity => {}
-            Transition::UnsavedOpened(action) => self.interaction.open_unsaved(action),
-            Transition::UnsavedClosed => self.interaction.close_unsaved(),
-        }
+impl From<InteractionState> for Keymap {
+    fn from(interaction: InteractionState) -> Self {
+        Self { interaction }
     }
 }
 
@@ -410,9 +349,9 @@ mod tests {
     use super::super::command::{
         Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
     };
-    use super::{Keymap, Transition};
+    use super::Keymap;
     use crate::document::UnsavedAction;
-    use crate::input::Mode;
+    use crate::input::{state::InteractionState, Mode};
     use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
     use iced::keyboard::{self, key, Modifiers};
 
@@ -475,7 +414,7 @@ mod tests {
     /// A keymap in view mode, as if `Ctrl+P` had switched to the preview.
     fn viewing() -> Keymap {
         let mut keymap = Keymap::new(false);
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         keymap
     }
 
@@ -488,37 +427,37 @@ mod tests {
         assert_eq!(keymap.mode(), Mode::Write);
         assert!(!keymap.preview());
 
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         assert_eq!(keymap.mode(), Mode::View);
         assert!(keymap.preview());
 
-        keymap.note(Transition::VisualToggled);
+        keymap.interaction.toggle_visual().unwrap();
         assert_eq!(keymap.mode(), Mode::Visual);
 
         // The note popup floats above visual mode and closing it returns
         // there.
-        keymap.note(Transition::NoteOpened);
+        keymap.interaction.open_note().unwrap();
         assert_eq!(keymap.mode(), Mode::Note);
-        keymap.note(Transition::NoteClosed);
+        let _ = keymap.interaction.close_note();
         assert_eq!(keymap.mode(), Mode::Visual);
 
-        keymap.note(Transition::VisualToggled);
+        keymap.interaction.toggle_visual().unwrap();
         assert_eq!(keymap.mode(), Mode::View);
 
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         assert_eq!(keymap.mode(), Mode::Write);
     }
 
     #[test]
     fn closing_find_above_note_restores_note() {
         let mut keymap = viewing();
-        keymap.note(Transition::NoteOpened);
-        keymap.note(Transition::FindOpened);
+        keymap.interaction.open_note().unwrap();
+        keymap.interaction.open_find();
 
         assert!(keymap.note_open());
         assert!(keymap.find_open());
 
-        keymap.note(Transition::FindClosed);
+        let _ = keymap.interaction.close_find();
 
         assert!(keymap.note_open());
         assert!(!keymap.find_open());
@@ -531,8 +470,8 @@ mod tests {
     #[test]
     fn find_above_note_uses_find_badge() {
         let mut keymap = viewing();
-        keymap.note(Transition::NoteOpened);
-        keymap.note(Transition::FindOpened);
+        keymap.interaction.open_note().unwrap();
+        keymap.interaction.open_find();
 
         assert_eq!(keymap.mode(), Mode::Find);
     }
@@ -540,16 +479,16 @@ mod tests {
     #[test]
     fn preview_toggle_preserves_find_and_drops_note_beneath_it() {
         let mut keymap = viewing();
-        keymap.note(Transition::NoteOpened);
-        keymap.note(Transition::FindOpened);
+        keymap.interaction.open_note().unwrap();
+        keymap.interaction.open_find();
 
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         assert!(!keymap.preview());
         assert!(keymap.find_open());
         assert!(!keymap.note_open());
         assert_eq!(keymap.mode(), Mode::Find);
 
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         assert!(keymap.preview());
         assert!(keymap.find_open());
         assert_eq!(keymap.mode(), Mode::Find);
@@ -639,33 +578,33 @@ mod tests {
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::First, 0)))
         ));
 
         // The sequence fired; a third `g` starts over.
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
 
         // Any other key ends the pending sequence.
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert!(matches!(
             keymap.handle(key_press("j", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Down, 1)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
 
         // `ge` moves to the end of the previous word.
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert!(matches!(
             keymap.handle(key_press("e", false)),
             Some(Command::Preview(PreviewCommand::MoveWord(
@@ -680,7 +619,7 @@ mod tests {
     #[test]
     fn note_popup_swallows_keys() {
         let mut keymap = viewing();
-        keymap.note(Transition::NoteOpened);
+        keymap.interaction.open_note().unwrap();
 
         assert!(matches!(
             keymap.handle(escape()),
@@ -716,7 +655,7 @@ mod tests {
                 keymap.handle(key_press_with("f", Modifiers::CTRL, false)),
                 Some(Command::Find(FindCommand::Open))
             ));
-            keymap.note(Transition::FindOpened);
+            keymap.interaction.open_find();
             assert_eq!(keymap.mode(), Mode::Find);
 
             // Typing reaches the query field, motions included.
@@ -737,7 +676,7 @@ mod tests {
                 keymap.handle(escape()),
                 Some(Command::Find(FindCommand::Close))
             ));
-            keymap.note(Transition::FindClosed);
+            let _ = keymap.interaction.close_find();
             assert!(keymap.mode() != Mode::Find);
         }
     }
@@ -748,7 +687,7 @@ mod tests {
     #[test]
     fn find_navigation_keys_step_through_matches() {
         let mut keymap = viewing();
-        keymap.note(Transition::FindOpened);
+        keymap.interaction.open_find();
 
         assert!(matches!(
             keymap.handle(named(key::Named::Enter, Modifiers::default())),
@@ -768,7 +707,7 @@ mod tests {
             Some(Command::Find(FindCommand::Next))
         ));
 
-        keymap.note(Transition::FindClosed);
+        let _ = keymap.interaction.close_find();
         assert!(keymap
             .handle(key_press_with("g", Modifiers::CTRL, false))
             .is_none());
@@ -796,7 +735,7 @@ mod tests {
             write.handle(key_press_with("/", Modifiers::CTRL, false)),
             Some(Command::Help(HelpCommand::Open))
         ));
-        write.note(Transition::HelpOpened);
+        write.interaction.open_help();
         assert!(write.help_open());
         assert_eq!(write.mode(), Mode::Write);
 
@@ -818,18 +757,17 @@ mod tests {
             write.handle(key_press_with("?", Modifiers::CTRL, false)),
             Some(Command::Help(HelpCommand::Close))
         ));
-        write.note(Transition::HelpClosed);
+        let _ = write.interaction.close_help();
         assert!(!write.help_open());
         assert_eq!(write.mode(), Mode::Write);
 
         let mut view = viewing();
         assert!(view.handle(key_press("?", false)).is_none());
-        view.note(Transition::CountPressed(3));
-        view.note(Transition::GArmed);
-        view.note(Transition::HelpOpened);
+        view.interaction.push_count_digit(3);
+        view.interaction.arm_g();
+        view.interaction.open_help();
         assert_eq!(view.mode(), Mode::View);
-        view.note(Transition::HelpActivity);
-        view.note(Transition::HelpClosed);
+        let _ = view.interaction.close_help();
         assert!(matches!(
             view.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::First, 3)))
@@ -839,10 +777,9 @@ mod tests {
     #[test]
     fn help_preserves_pending_count_and_prefixes() {
         let mut count = viewing();
-        count.note(Transition::CountPressed(4));
-        count.note(Transition::HelpOpened);
-        count.note(Transition::HelpActivity);
-        count.note(Transition::HelpClosed);
+        count.interaction.push_count_digit(4);
+        count.interaction.open_help();
+        let _ = count.interaction.close_help();
         assert_eq!(count.pending_count(), 4);
         assert!(matches!(
             count.handle(key_press("j", false)),
@@ -850,11 +787,10 @@ mod tests {
         ));
 
         let mut g = viewing();
-        g.note(Transition::CountPressed(3));
-        g.note(Transition::GArmed);
-        g.note(Transition::HelpOpened);
-        g.note(Transition::HelpActivity);
-        g.note(Transition::HelpClosed);
+        g.interaction.push_count_digit(3);
+        g.interaction.arm_g();
+        g.interaction.open_help();
+        let _ = g.interaction.close_help();
         assert_eq!(g.pending_count(), 3);
         assert!(matches!(
             g.handle(key_press("g", false)),
@@ -862,10 +798,9 @@ mod tests {
         ));
 
         let mut z = viewing();
-        z.note(Transition::ZArmed);
-        z.note(Transition::HelpOpened);
-        z.note(Transition::HelpActivity);
-        z.note(Transition::HelpClosed);
+        z.interaction.arm_z();
+        z.interaction.open_help();
+        let _ = z.interaction.close_help();
         assert!(matches!(
             z.handle(key_press("t", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
@@ -886,7 +821,7 @@ mod tests {
         }
 
         let mut keymap = viewing();
-        keymap.note(Transition::NoteOpened);
+        keymap.interaction.open_note().unwrap();
         assert!(matches!(
             keymap.handle(key_press_with("s", Modifiers::CTRL, false)),
             Some(Command::Comments(CommentsCommand::SaveNote))
@@ -920,7 +855,7 @@ mod tests {
             .handle(key_press_with("p", Modifiers::CTRL, false))
             .is_none());
 
-        keymap.note(Transition::PreviewToggled);
+        keymap.interaction.toggle_preview();
         assert_eq!(keymap.mode(), Mode::View);
     }
 
@@ -937,28 +872,28 @@ mod tests {
             keymap.handle(key_press("3", false)),
             Some(Command::Preview(PreviewCommand::Count(3)))
         ));
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.push_count_digit(3);
         assert_eq!(keymap.pending_count(), 3);
 
         assert!(matches!(
             keymap.handle(key_press("j", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Down, 3)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert_eq!(keymap.pending_count(), 0);
 
         // 10k: a `0` extends a pending count rather than starting a motion.
-        keymap.note(Transition::CountPressed(1));
+        keymap.interaction.push_count_digit(1);
         assert!(matches!(
             keymap.handle(key_press("0", false)),
             Some(Command::Preview(PreviewCommand::Count(0)))
         ));
-        keymap.note(Transition::CountPressed(0));
+        keymap.interaction.push_count_digit(0);
         assert!(matches!(
             keymap.handle(key_press("k", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Up, 10)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // A lone `0` is the element-start motion; a count then repeats it.
         assert!(matches!(
@@ -966,24 +901,24 @@ mod tests {
             Some(Command::Preview(PreviewCommand::Move(Motion::Start, 1)))
         ));
 
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // 2h and 3l carry their counts.
-        keymap.note(Transition::CountPressed(2));
+        keymap.interaction.push_count_digit(2);
         assert!(matches!(
             keymap.handle(key_press("h", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Left, 2)))
         ));
-        keymap.note(Transition::Activity);
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.activity();
+        keymap.interaction.push_count_digit(3);
         assert!(matches!(
             keymap.handle(key_press("l", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Right, 3)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // 3w carries its count like the character motions.
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.push_count_digit(3);
         assert!(matches!(
             keymap.handle(key_press("w", false)),
             Some(Command::Preview(PreviewCommand::MoveWord(
@@ -993,11 +928,11 @@ mod tests {
         ));
 
         // Held digits never extend the count.
-        keymap.note(Transition::CountPressed(1));
+        keymap.interaction.push_count_digit(1);
         assert!(keymap.handle(key_press("1", true)).is_none());
 
         // Any other message clears the pending count.
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert_eq!(keymap.pending_count(), 0);
 
         // Write mode never arms counts — digits type into the editor.
@@ -1011,27 +946,27 @@ mod tests {
     fn counts_survive_the_g_prefix() {
         let mut keymap = viewing();
 
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.push_count_digit(3);
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert_eq!(keymap.pending_count(), 3);
 
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::First, 3)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // 5G carries the count; plain G carries none.
-        keymap.note(Transition::CountPressed(5));
+        keymap.interaction.push_count_digit(5);
         assert!(matches!(
             keymap.handle(key_press("G", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::Last, 5)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert!(matches!(
             keymap.handle(key_press("G", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::Last, 0)))
@@ -1050,35 +985,35 @@ mod tests {
             keymap.handle(key_press("z", false)),
             Some(Command::Preview(PreviewCommand::ArmZ))
         ));
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("z", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
                 Placement::Center
             )))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // zt puts the caret at the top.
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("t", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
                 Placement::Top
             )))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // zb puts the caret at the bottom — `b` returns to its word motion
         // once the prefix ended.
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("b", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
                 Placement::Bottom
             )))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert!(matches!(
             keymap.handle(key_press("b", false)),
             Some(Command::Preview(PreviewCommand::MoveWord(
@@ -1088,12 +1023,12 @@ mod tests {
         ));
 
         // Any other key ends a pending `z` sequence.
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("j", false)),
             Some(Command::Preview(PreviewCommand::Move(Motion::Down, 1)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
         assert!(keymap.handle(key_press("t", false)).is_none());
 
         // Held `z` never arms or fires.
@@ -1142,7 +1077,7 @@ mod tests {
 
         // 3Ctrl+D scrolls three half pages.
         let mut keymap = viewing();
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.push_count_digit(3);
         assert!(matches!(
             keymap.handle(key_press_with("d", Modifiers::CTRL, false)),
             Some(Command::Preview(PreviewCommand::ScrollPage(
@@ -1186,14 +1121,14 @@ mod tests {
 
         // While the note popup is open, Enter types a newline instead.
         let mut note = viewing();
-        note.note(Transition::NoteOpened);
+        note.interaction.open_note().unwrap();
         assert!(note
             .handle(named(key::Named::Enter, Modifiers::default()))
             .is_none());
 
         // While find is open, Enter steps to the next match.
         let mut find = viewing();
-        find.note(Transition::FindOpened);
+        find.interaction.open_find();
         assert!(matches!(
             find.handle(named(key::Named::Enter, Modifiers::default())),
             Some(Command::Find(FindCommand::Next))
@@ -1222,7 +1157,7 @@ mod tests {
         // With the note popup open, the popup keeps every Ctrl combo but
         // Ctrl+S.
         let mut note = viewing();
-        note.note(Transition::NoteOpened);
+        note.interaction.open_note().unwrap();
         assert!(note
             .handle(key_press_named_enter(Modifiers::CTRL, false))
             .is_none());
@@ -1236,33 +1171,33 @@ mod tests {
         let mut keymap = viewing();
 
         // gzg: the middle z ends the g sequence; the final g only re-arms.
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert!(matches!(
             keymap.handle(key_press("z", false)),
             Some(Command::Preview(PreviewCommand::ArmZ))
         ));
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         // Now gg would fire — but the point is z's g did not. Arm z and
         // check the mirrored case.
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::Jump(Jump::First, 0)))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // zgb: the middle g ends the z sequence, so b is just a word
         // motion — never zb's scroll.
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("g", false)),
             Some(Command::Preview(PreviewCommand::ArmG))
         ));
-        keymap.note(Transition::GArmed);
+        keymap.interaction.arm_g();
         assert!(matches!(
             keymap.handle(key_press("b", false)),
             Some(Command::Preview(PreviewCommand::MoveWord(
@@ -1270,10 +1205,10 @@ mod tests {
                 1
             )))
         ));
-        keymap.note(Transition::Activity);
+        keymap.interaction.activity();
 
         // ztz fires normally after the fix: arm z fresh and complete it.
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("t", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
@@ -1282,13 +1217,13 @@ mod tests {
         ));
 
         // A digit ends a pending prefix: z3z is two fresh presses.
-        keymap.note(Transition::ZArmed);
-        keymap.note(Transition::CountPressed(3));
+        keymap.interaction.arm_z();
+        keymap.interaction.push_count_digit(3);
         assert!(matches!(
             keymap.handle(key_press("z", false)),
             Some(Command::Preview(PreviewCommand::ArmZ))
         ));
-        keymap.note(Transition::ZArmed);
+        keymap.interaction.arm_z();
         assert!(matches!(
             keymap.handle(key_press("z", false)),
             Some(Command::Preview(PreviewCommand::ScrollCaret(
@@ -1299,25 +1234,41 @@ mod tests {
 
     #[test]
     fn note_find_and_unsaved_cancel_pending_input() {
-        for (name, open, close) in [
-            ("note", Transition::NoteOpened, Transition::NoteClosed),
-            ("find", Transition::FindOpened, Transition::FindClosed),
-            (
-                "unsaved",
-                Transition::UnsavedOpened(UnsavedAction::OpenFile),
-                Transition::UnsavedClosed,
-            ),
-        ] {
+        fn open(state: &mut InteractionState, name: &str) {
+            match name {
+                "note" => state.open_note().unwrap(),
+                "find" => state.open_find(),
+                "unsaved" => state.open_unsaved(UnsavedAction::OpenFile),
+                _ => unreachable!(),
+            }
+        }
+
+        fn close(state: &mut InteractionState, name: &str) {
+            match name {
+                "note" => {
+                    let _ = state.close_note();
+                }
+                "find" => {
+                    let _ = state.close_find();
+                }
+                "unsaved" => {
+                    let _ = state.resolve_unsaved();
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        for name in ["note", "find", "unsaved"] {
             let mut g = viewing();
-            g.note(Transition::CountPressed(7));
-            g.note(Transition::GArmed);
-            g.note(open);
+            g.interaction.push_count_digit(7);
+            g.interaction.arm_g();
+            open(&mut g.interaction, name);
             assert_eq!(
                 g.pending_count(),
                 0,
                 "opening {name} should cancel the pending count"
             );
-            g.note(close);
+            close(&mut g.interaction, name);
             assert!(
                 matches!(
                     g.handle(key_press("g", false)),
@@ -1327,9 +1278,9 @@ mod tests {
             );
 
             let mut z = viewing();
-            z.note(Transition::ZArmed);
-            z.note(open);
-            z.note(close);
+            z.interaction.arm_z();
+            open(&mut z.interaction, name);
+            close(&mut z.interaction, name);
             assert!(
                 z.handle(key_press("t", false)).is_none(),
                 "opening {name} should cancel the pending z prefix"
@@ -1342,7 +1293,7 @@ mod tests {
     #[test]
     fn unsaved_dialog_is_a_modal() {
         let mut keymap = viewing();
-        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
+        keymap.interaction.open_unsaved(UnsavedAction::OpenFile);
         assert!(keymap.unsaved_open());
         assert_eq!(keymap.mode(), Mode::View);
 
@@ -1362,10 +1313,10 @@ mod tests {
         ));
 
         // Answering closes it too.
-        keymap.note(Transition::UnsavedClosed);
+        let _ = keymap.interaction.resolve_unsaved();
         assert!(!keymap.unsaved_open());
-        keymap.note(Transition::UnsavedOpened(UnsavedAction::OpenFile));
-        keymap.note(Transition::UnsavedClosed);
+        keymap.interaction.open_unsaved(UnsavedAction::OpenFile);
+        let _ = keymap.interaction.resolve_unsaved();
         assert!(!keymap.unsaved_open());
         assert_eq!(keymap.mode(), Mode::View);
     }

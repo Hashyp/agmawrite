@@ -140,6 +140,21 @@ impl Workspace {
             Self::PreviewOnly(preview) => ViewProjection::preview(preview, false),
         }
     }
+
+    pub(super) fn focus_target(self) -> Option<FocusTarget> {
+        match self {
+            Self::Editable(EditableWorkspace::Write(WriteState::Editor)) => {
+                Some(FocusTarget::SourceEditor)
+            }
+            Self::Editable(EditableWorkspace::Write(WriteState::Find))
+            | Self::Editable(EditableWorkspace::Preview(PreviewState::Find { .. }))
+            | Self::PreviewOnly(PreviewState::Find { .. }) => Some(FocusTarget::FindInput),
+            Self::Editable(EditableWorkspace::Preview(PreviewState::Note { .. }))
+            | Self::PreviewOnly(PreviewState::Note { .. }) => Some(FocusTarget::NoteComposer),
+            Self::Editable(EditableWorkspace::Preview(PreviewState::Canvas { .. }))
+            | Self::PreviewOnly(PreviewState::Canvas { .. }) => None,
+        }
+    }
 }
 
 impl PreviewState {
