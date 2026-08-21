@@ -3,8 +3,8 @@
 //!
 //! The mode is a small stack: write or view at the base, visual mode as a
 //! layer over view, and the note popup floating on top of either. [`Keymap`]
-//! owns the stack plus the pending `g` of a `gg`/`ge` sequence, behind two
-//! entry points: [`Keymap::handle`] turns a key event into an optional
+//! owns the stack plus pending preview prefixes and counts, behind two entry
+//! points: [`Keymap::handle`] turns a key event into an optional
 //! semantic command, and [`Keymap::note`] keeps the stack in sync with
 //! transition-driven changes (button clicks, backdrop clicks) so the two
 //! never disagree.
@@ -14,12 +14,9 @@ use iced::keyboard;
 use super::command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };
+use super::pending::{Pending, Prefix};
 use crate::help;
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
-
-/// The highest a pending count may grow: `99999j` and `9999999999j` both
-/// scroll to the document's end instead of overflowing.
-const MAX_COUNT: u32 = 99_999;
 
 /// The mode the editor is in, as shown by the bottom-bar badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,7 +42,7 @@ enum Layer {
     Visual,
 }
 
-/// The input mode stack and the pending `g` sequence state.
+/// The input mode stack and pending preview sequence state.
 ///
 /// `Clone` + `Hash` so the keyboard subscription can carry a snapshot and
 /// re-listen when the mode changes; key handling reads the snapshot
@@ -63,14 +60,8 @@ pub struct Keymap {
     /// above the underlying mode and swallows every key but Escape.
     unsaved_open: bool,
     preview_only: bool,
-    /// Whether a lone `g` is awaiting its second key of a `gg`/`ge`
-    /// sequence.
-    pending_g: bool,
-    /// Whether a lone `z` is awaiting its second key of a `zz`/`zt`/`zb`
-    /// sequence.
-    pending_z: bool,
-    /// The digits of a pending motion count, like vim's `3` of `3j`.
-    pending_count: Option<u32>,
+    /// A pending `g`/`z` prefix and optional motion count.
+    pending: Pending,
 }
 
 /// An input-local state transition observed by the keymap.
@@ -115,18 +106,16 @@ impl Keymap {
             help_open: false,
             unsaved_open: false,
             preview_only,
-            pending_g: false,
-            pending_z: false,
-            pending_count: None,
+            pending: Pending::default(),
         }
     }
 
     /// The current mode, popups included — the badge reads this.
     pub fn mode(&self) -> Mode {
-        if self.note_open {
-            Mode::Note
-        } else if self.find_open {
+        if self.find_open {
             Mode::Find
+        } else if self.note_open {
+            Mode::Note
         } else {
             match self.layer {
                 Layer::Write => Mode::Write,
@@ -173,19 +162,18 @@ impl Keymap {
     /// The pending motion count, for the mode badge's `3×` hint. `0` when
     /// no count is pending.
     pub fn pending_count(&self) -> u32 {
-        self.pending_count.unwrap_or(0)
+        self.pending.pending_count()
     }
 
     /// The count a motion repeats: the typed digits, or once.
     fn count(&self) -> usize {
-        self.pending_count.unwrap_or(1).min(MAX_COUNT) as usize
+        self.pending.motion_count()
     }
 
     /// The count a jump carries: the typed digits, or `0` — none — so a
     /// plain `gg`/`G` keeps its first/last meaning.
     fn jump_count(&self) -> usize {
-        self.pending_count
-            .map_or(0, |count| count.min(MAX_COUNT) as usize)
+        self.pending.jump_count()
     }
 
     /// Whether visual mode is active — motions extend the selection.
@@ -277,7 +265,7 @@ impl Keymap {
                 keyboard::Key::Character(c)
                     if !repeat && c.chars().all(|character| character.is_ascii_digit()) =>
                 {
-                    if c == "0" && self.pending_count.is_none() {
+                    if c == "0" && !self.pending.has_count() {
                         Some(Command::Preview(PreviewCommand::Move(Motion::Start, 1)))
                     } else {
                         Some(Command::Preview(PreviewCommand::Count(
@@ -311,30 +299,41 @@ impl Keymap {
                 )),
                 // `zz`/`zt`/`zb` — scroll the caret to the middle, top, or
                 // bottom of the viewport. The second key is always fresh.
-                keyboard::Key::Character("z") if self.pending_z && !repeat => Some(
-                    Command::Preview(PreviewCommand::ScrollCaret(Placement::Center)),
-                ),
-                keyboard::Key::Character("t") if self.pending_z && !repeat => Some(
-                    Command::Preview(PreviewCommand::ScrollCaret(Placement::Top)),
-                ),
-                keyboard::Key::Character("b") if self.pending_z && !repeat => Some(
-                    Command::Preview(PreviewCommand::ScrollCaret(Placement::Bottom)),
-                ),
+                keyboard::Key::Character("z") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                    Some(Command::Preview(PreviewCommand::ScrollCaret(
+                        Placement::Center,
+                    )))
+                }
+                keyboard::Key::Character("t") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                    Some(Command::Preview(PreviewCommand::ScrollCaret(
+                        Placement::Top,
+                    )))
+                }
+                keyboard::Key::Character("b") if self.pending.has_prefix(Prefix::Z) && !repeat => {
+                    Some(Command::Preview(PreviewCommand::ScrollCaret(
+                        Placement::Bottom,
+                    )))
+                }
                 // The first `z` of a `zz`/`zt`/`zb` sequence.
                 keyboard::Key::Character("z") if !repeat => {
                     Some(Command::Preview(PreviewCommand::ArmZ))
                 }
                 // `gg` — the second `g` of the sequence is always a fresh
                 // press.
-                keyboard::Key::Character("g") if self.pending_g && !repeat => Some(
-                    Command::Preview(PreviewCommand::Jump(Jump::First, self.jump_count())),
-                ),
+                keyboard::Key::Character("g") if self.pending.has_prefix(Prefix::G) && !repeat => {
+                    Some(Command::Preview(PreviewCommand::Jump(
+                        Jump::First,
+                        self.jump_count(),
+                    )))
+                }
                 // The first `g` of a `gg`/`ge` sequence.
                 keyboard::Key::Character("g") if !repeat => {
                     Some(Command::Preview(PreviewCommand::ArmG))
                 }
                 // `ge` — the `e` of the sequence is always a fresh press.
-                keyboard::Key::Character("e" | "E") if self.pending_g && !repeat => {
+                keyboard::Key::Character("e" | "E")
+                    if self.pending.has_prefix(Prefix::G) && !repeat =>
+                {
                     Some(Command::Preview(PreviewCommand::MoveWord(
                         WordMotion::PreviousEnd,
                         self.count(),
@@ -428,32 +427,11 @@ impl Keymap {
         // Help is transparent to pending state. Prefix/count transitions
         // update it; every other kind of activity clears it.
         match transition {
-            Transition::GArmed => {
-                self.pending_g = true;
-                self.pending_z = false;
-            }
-            Transition::ZArmed => {
-                self.pending_z = true;
-                self.pending_g = false;
-            }
-            Transition::CountPressed(digit) => {
-                self.pending_g = false;
-                self.pending_z = false;
-
-                let digits = self.pending_count.unwrap_or(0);
-                self.pending_count = Some(
-                    digits
-                        .saturating_mul(10)
-                        .saturating_add(digit)
-                        .min(MAX_COUNT),
-                );
-            }
+            Transition::GArmed => self.pending.arm(Prefix::G),
+            Transition::ZArmed => self.pending.arm(Prefix::Z),
+            Transition::CountPressed(digit) => self.pending.push_digit(digit),
             Transition::HelpOpened | Transition::HelpClosed | Transition::HelpActivity => {}
-            _ => {
-                self.pending_g = false;
-                self.pending_z = false;
-                self.pending_count = None;
-            }
+            _ => self.pending.consume(),
         }
 
         match transition {

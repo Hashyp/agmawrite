@@ -374,7 +374,7 @@ Gate:
 
 - All characterization tests except the deliberately corrected Find badge expectation pass against the old implementation.
 
-### [ ] Phase 1 — Replace prefix/count fields
+### [x] Phase 1 — Replace prefix/count fields
 
 Files:
 

@@ -3,6 +3,7 @@
 mod command;
 mod guard;
 mod keymap;
+mod pending;
 
 pub(crate) use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
