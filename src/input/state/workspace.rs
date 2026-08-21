@@ -115,6 +115,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn pending(self) -> Pending {
         match self {
             Self::Editable(EditableWorkspace::Preview(PreviewState::Canvas {

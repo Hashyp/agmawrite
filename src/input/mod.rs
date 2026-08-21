@@ -1,11 +1,13 @@
 //! Semantic keyboard input, mode state, and root event interception.
 
+mod bindings;
 mod command;
 mod guard;
 mod keymap;
 mod pending;
 mod state;
 
+pub(crate) use bindings::InputMessage;
 pub(crate) use command::{
     Command, CommentsCommand, DocumentCommand, FindCommand, HelpCommand, PreviewCommand,
 };

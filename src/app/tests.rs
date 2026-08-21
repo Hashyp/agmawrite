@@ -1,6 +1,6 @@
 use super::comments::{self, Mark};
 use super::find;
-use super::input::{Command, InteractionState, Overlay, PreviewCommand, Surface};
+use super::input::{InputMessage, InteractionState, Overlay, Surface};
 use super::preview::{self, CaretPosition};
 use super::theme::Palette;
 use super::ui::toolbar;
@@ -184,7 +184,7 @@ fn rejected_feature_operations_do_not_transition_interaction_state() {
 }
 
 #[test]
-fn input_commands_stay_grouped_and_preserve_multi_digit_counts() {
+fn input_parser_messages_preserve_multi_digit_counts_without_entering_preview() {
     let mut editor = app_at(
         "one\n\ntwo",
         CaretPosition {
@@ -192,17 +192,13 @@ fn input_commands_stay_grouped_and_preserve_multi_digit_counts() {
             column: 0,
         },
     );
+    let caret = editor.preview.caret();
 
-    let _ = update(
-        &mut editor,
-        Message::Input(Command::Preview(PreviewCommand::Count(1))),
-    );
-    let _ = update(
-        &mut editor,
-        Message::Input(Command::Preview(PreviewCommand::Count(0))),
-    );
+    let _ = update(&mut editor, Message::Input(InputMessage::PushCountDigit(1)));
+    let _ = update(&mut editor, Message::Input(InputMessage::PushCountDigit(0)));
 
     assert_eq!(pending_count(&editor), 10);
+    assert_eq!(editor.preview.caret(), caret);
 }
 
 #[test]

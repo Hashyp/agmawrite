@@ -15,11 +15,11 @@ impl Count {
         NonZeroU32::new(value.min(MAX_COUNT)).map(Self)
     }
 
-    fn push_digit(self, digit: u32) -> Self {
+    fn push_digit(self, digit: u8) -> Self {
         let value = self
             .get()
             .saturating_mul(10)
-            .saturating_add(digit)
+            .saturating_add(u32::from(digit))
             .min(MAX_COUNT);
 
         Self(NonZeroU32::new(value).expect("appending to a non-zero count stays non-zero"))
@@ -32,7 +32,7 @@ impl Count {
 
 /// A preview command prefix awaiting its second key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum Prefix {
+pub(crate) enum Prefix {
     G,
     Z,
 }
@@ -53,11 +53,6 @@ impl Pending {
     /// The count shown by the mode badge, or zero when no count is pending.
     pub(super) fn pending_count(self) -> u32 {
         self.count().map_or(0, Count::get)
-    }
-
-    /// Whether digits have already started a count.
-    pub(super) fn has_count(self) -> bool {
-        self.count().is_some()
     }
 
     /// The count a motion repeats: the typed digits, or once.
@@ -87,10 +82,10 @@ impl Pending {
     /// Appends one digit, cancelling a prefix while preserving its count.
     /// A zero without an existing count returns to idle, so [`Count`] can
     /// never represent zero.
-    pub(super) fn push_digit(&mut self, digit: u32) {
+    pub(super) fn push_digit(&mut self, digit: u8) {
         *self = match self.count() {
             Some(count) => Self::Count(count.push_digit(digit)),
-            None => Count::new(digit).map_or(Self::Idle, Self::Count),
+            None => Count::new(u32::from(digit)).map_or(Self::Idle, Self::Count),
         };
     }
 
@@ -117,7 +112,7 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum Operation {
-        Digit(u32),
+        Digit(u8),
         Arm(Prefix),
         Consume,
     }

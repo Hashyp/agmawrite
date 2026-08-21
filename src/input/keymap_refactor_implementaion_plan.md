@@ -445,7 +445,7 @@ Gate:
 - The unsaved view cannot be rendered without an `UnsavedAction` payload.
 - No feature visibility is mirrored into a second boolean representation.
 
-### [ ] Phase 4 — Separate bindings from state
+### [x] Phase 4 — Separate bindings from state
 
 Files:
 

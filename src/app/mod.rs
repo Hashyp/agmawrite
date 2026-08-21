@@ -4,7 +4,7 @@ mod shell;
 
 use crate::cli::Args;
 use crate::input::{
-    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand,
+    Command, CommentsCommand, DocumentCommand, FindCommand, GuardAction, HelpCommand, InputMessage,
     InteractionState, Keymap, Overlay, PreviewCommand, Surface,
 };
 use crate::theme::Palette;
@@ -36,7 +36,7 @@ pub(crate) enum Message {
     Comments(comments::Message),
     Find(find::Message),
     Help(help::Message),
-    Input(Command),
+    Input(InputMessage),
     Toolbar(ui::toolbar::Message),
     Theme(theme::Event),
 }
@@ -53,9 +53,6 @@ fn message_for_command(command: Command) -> Message {
             PreviewCommand::Move(motion, count) => preview::Message::Move(motion, count),
             PreviewCommand::MoveWord(motion, count) => preview::Message::MoveWord(motion, count),
             PreviewCommand::Jump(jump, count) => preview::Message::Jump(jump, count),
-            PreviewCommand::ArmG => preview::Message::AcknowledgeG,
-            PreviewCommand::ArmZ => preview::Message::AcknowledgeZ,
-            PreviewCommand::Count(digit) => preview::Message::AcknowledgeCount(digit),
             PreviewCommand::Cancel => preview::Message::Cancel,
             PreviewCommand::ToggleVisual => preview::Message::ToggleVisual,
             PreviewCommand::ScrollPage(page, count) => preview::Message::ScrollPage(page, count),
@@ -130,7 +127,15 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
 
 pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
     let message = match message {
-        Message::Input(command) => message_for_command(command),
+        Message::Input(InputMessage::Execute(command)) => message_for_command(command),
+        Message::Input(InputMessage::ArmPrefix(prefix)) => {
+            editor.interaction.arm_prefix(prefix);
+            return Task::none();
+        }
+        Message::Input(InputMessage::PushCountDigit(digit)) => {
+            editor.interaction.push_count_digit(digit);
+            return Task::none();
+        }
         Message::Toolbar(message) => message_for_toolbar(message),
         message => message,
     };
@@ -175,18 +180,6 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
         Message::Theme(theme::Event::Changed) => {
             editor.palette = Palette::current();
             editor.interaction.activity();
-            Task::none()
-        }
-        Message::Preview(preview::Message::AcknowledgeG) => {
-            editor.interaction.arm_g();
-            Task::none()
-        }
-        Message::Preview(preview::Message::AcknowledgeZ) => {
-            editor.interaction.arm_z();
-            Task::none()
-        }
-        Message::Preview(preview::Message::AcknowledgeCount(digit)) => {
-            editor.interaction.push_count_digit(digit);
             Task::none()
         }
         Message::Preview(message @ preview::Message::ToggleVisual) => {

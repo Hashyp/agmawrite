@@ -12,11 +12,11 @@ mod workspace;
 /// only move between legal states through transition methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct InteractionState {
-    root: RootState,
+    pub(super) root: RootState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum RootState {
+pub(super) enum RootState {
     Active(Workspace),
     Unsaved {
         action: UnsavedAction,
@@ -28,7 +28,7 @@ enum RootState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum HelpResume {
+pub(super) enum HelpResume {
     Active(Workspace),
     Unsaved {
         action: UnsavedAction,
@@ -37,32 +37,32 @@ enum HelpResume {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Workspace {
+pub(super) enum Workspace {
     Editable(EditableWorkspace),
     PreviewOnly(PreviewState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum EditableWorkspace {
+pub(super) enum EditableWorkspace {
     Write(WriteState),
     Preview(PreviewState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum WriteState {
+pub(super) enum WriteState {
     Editor,
     Find,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PreviewState {
+pub(super) enum PreviewState {
     Canvas { mode: PreviewMode, pending: Pending },
     Note { resume: PreviewMode },
     Find { resume: FindResume },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum FindResume {
+pub(super) enum FindResume {
     Canvas(PreviewMode),
     Note(PreviewMode),
 }
@@ -215,40 +215,22 @@ impl InteractionState {
         self.map_workspace(Workspace::clear_pending);
     }
 
-    pub(super) fn arm_prefix(&mut self, prefix: Prefix) {
+    pub(crate) fn arm_prefix(&mut self, prefix: Prefix) {
         self.map_workspace(|workspace| workspace.update_pending(|pending| pending.arm(prefix)));
     }
 
-    pub(crate) fn arm_g(&mut self) {
-        self.arm_prefix(Prefix::G);
-    }
-
-    pub(crate) fn arm_z(&mut self) {
-        self.arm_prefix(Prefix::Z);
-    }
-
-    pub(crate) fn push_count_digit(&mut self, digit: u32) {
+    pub(crate) fn push_count_digit(&mut self, digit: u8) {
         self.map_workspace(|workspace| {
             workspace.update_pending(|pending| pending.push_digit(digit))
         });
     }
 
-    pub(super) fn has_count(self) -> bool {
-        self.pending().has_count()
-    }
-
-    pub(super) fn has_prefix(self, prefix: Prefix) -> bool {
+    #[cfg(test)]
+    fn has_prefix(self, prefix: Prefix) -> bool {
         self.pending().has_prefix(prefix)
     }
 
-    pub(super) fn motion_count(self) -> usize {
-        self.pending().motion_count()
-    }
-
-    pub(super) fn jump_count(self) -> usize {
-        self.pending().jump_count()
-    }
-
+    #[cfg(test)]
     fn pending(self) -> Pending {
         match self.root {
             RootState::Active(workspace)
@@ -453,7 +435,7 @@ mod tests {
         PreviewState::canvas(mode)
     }
 
-    fn counted_canvas(mode: PreviewMode, digit: u32) -> InteractionState {
+    fn counted_canvas(mode: PreviewMode, digit: u8) -> InteractionState {
         let mut state = active(editable_preview(canvas(mode)));
         state.push_count_digit(digit);
         state

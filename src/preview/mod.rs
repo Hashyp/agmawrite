@@ -24,9 +24,6 @@ pub(crate) enum Message {
     Move(Motion, usize),
     MoveWord(WordMotion, usize),
     Jump(Jump, usize),
-    AcknowledgeG,
-    AcknowledgeZ,
-    AcknowledgeCount(u32),
     Cancel,
     ToggleVisual,
     ScrollBy(f32),
@@ -197,9 +194,6 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
             } else {
                 Update::none()
             }
-        }
-        Message::AcknowledgeG | Message::AcknowledgeZ | Message::AcknowledgeCount(_) => {
-            Update::none()
         }
         Message::Cancel => {
             state.clear_visual_selection();
