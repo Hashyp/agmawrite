@@ -2,6 +2,7 @@
 
 use iced::widget::{
     button, canvas, column, container, mouse_area, row, scrollable, text, text_editor, tooltip,
+    Space,
 };
 use iced::{alignment, Background, Border, Color, Element, Font, Length, Theme};
 
@@ -29,13 +30,33 @@ pub(crate) struct ViewContext<'a> {
 /// beside the editing surface and maps its local messages.
 pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a, Message> {
     if state.sidebar_shown() {
-        container(expanded(state, context))
-            .width(Length::Fixed(SIDEBAR_WIDTH))
-            .height(Length::Fill)
-            .into()
+        container(row![
+            edge_separator(context.palette),
+            container(expanded(state, context))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ])
+        .width(Length::Fixed(SIDEBAR_WIDTH))
+        .height(Length::Fill)
+        .into()
     } else {
-        collapsed(state, context.palette, context.font)
+        row![
+            edge_separator(context.palette),
+            collapsed(state, context.palette, context.font)
+        ]
+        .into()
     }
+}
+
+/// The 1px divider at the sidebar's left edge, drawn as a real element
+/// rather than a container border so full-width comment cards can never
+/// paint over it.
+fn edge_separator(palette: Palette) -> Element<'static, Message> {
+    container(Space::new().width(Length::Fixed(1.0)).height(Length::Fill))
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(move |_theme| edge_separator_style(palette))
+        .into()
 }
 
 /// The collapsed sidebar rail: the visual indication that a sidebar exists
@@ -147,6 +168,8 @@ fn expanded<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a, Messa
             )
             .padding(iced::Padding {
                 top: 4.0,
+                left: 8.0,
+                right: 8.0,
                 ..iced::Padding::new(0.0)
             }),
             scrollable(column(list).spacing(8).width(Length::Fill))
@@ -175,7 +198,12 @@ fn expanded<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a, Messa
                 .width(Length::Fill),
             )
             .width(Length::Fill)
-            .padding(6)
+            .padding(iced::Padding {
+                top: 6.0,
+                bottom: 6.0,
+                left: 8.0,
+                right: 8.0,
+            })
             .style(move |_theme| publish_field_style(&palette)),
             row![
                 button(text("Add").font(font).size(15).color(palette.foreground),)
@@ -195,7 +223,12 @@ fn expanded<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a, Messa
                 .style(move |_theme, status| publish_button_style(&palette, status)),
             ]
             .spacing(8)
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                left: 8.0,
+                right: 8.0,
+                ..iced::Padding::new(0.0)
+            }),
         ]
         .spacing(8)
         .width(Length::Fill)
@@ -206,8 +239,7 @@ fn expanded<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a, Messa
     .padding(iced::Padding {
         top: 8.0,
         bottom: 8.0,
-        left: 8.0,
-        right: 8.0,
+        ..iced::Padding::new(0.0)
     })
     .style(move |_theme| sidebar_style(&palette))
     .into()
@@ -317,11 +349,7 @@ fn comment_card(card: CommentCard, palette: Palette, font: Font) -> Element<'sta
 fn sidebar_style(palette: &Palette) -> container::Style {
     container::Style {
         background: Some(Background::Color(palette.dark_background)),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 0.0.into(),
-        },
+        border: Border::default(),
         ..Default::default()
     }
 }
@@ -329,11 +357,14 @@ fn sidebar_style(palette: &Palette) -> container::Style {
 fn rail_style(palette: Palette) -> container::Style {
     container::Style {
         background: Some(Background::Color(palette.dark_background)),
-        border: Border {
-            color: palette.muted,
-            width: 1.0,
-            radius: 0.0.into(),
-        },
+        border: Border::default(),
+        ..Default::default()
+    }
+}
+
+fn edge_separator_style(palette: Palette) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(palette.muted)),
         ..Default::default()
     }
 }
@@ -363,27 +394,17 @@ fn tooltip_style(_theme: &Theme) -> container::Style {
 }
 
 fn comment_card_style(palette: &Palette, active: bool, resolved: bool) -> container::Style {
-    let (background, border) = if active {
-        (
-            Background::Color(palette.tint(palette.accent, 0.1)),
-            palette.accent,
-        )
+    let background = if active {
+        palette.tint(palette.accent, 0.1)
     } else if resolved {
-        (
-            Background::Color(palette.dark_background),
-            palette.dark_foreground,
-        )
+        palette.dark_background
     } else {
-        (Background::Color(palette.darker_background), palette.muted)
+        palette.darker_background
     };
 
     container::Style {
-        background: Some(background),
-        border: Border {
-            color: border,
-            width: if active { 1.5 } else { 1.0 },
-            radius: 4.0.into(),
-        },
+        background: Some(Background::Color(background)),
+        border: Border::default(),
         ..Default::default()
     }
 }
@@ -471,7 +492,10 @@ fn publish_button_style(palette: &Palette, status: button::Status) -> button::St
 
 #[cfg(test)]
 mod tests {
-    use super::{comment_card_style, publish_editor_style, sidebar_style, view, ViewContext};
+    use super::{
+        comment_card_style, edge_separator_style, publish_editor_style, sidebar_style, view,
+        ViewContext,
+    };
     use crate::comments::{update, Context, Message, State};
     use crate::preview::{CaretPosition, ElementMap};
     use crate::theme::Palette;
@@ -527,9 +551,15 @@ mod tests {
             sidebar.background,
             Some(Background::Color(palette.dark_background))
         );
-        assert_eq!(sidebar.border.color, palette.muted);
-        assert_eq!(active.border.color, palette.accent);
-        assert_eq!(active.border.width, 1.5);
+        assert_eq!(sidebar.border.width, 0.0);
+        assert_eq!(
+            edge_separator_style(palette).background,
+            Some(Background::Color(palette.muted))
+        );
+        assert_eq!(
+            active.background,
+            Some(Background::Color(palette.tint(palette.accent, 0.1)))
+        );
         assert_eq!(publish.value, palette.foreground);
         assert_eq!(
             publish.selection,
