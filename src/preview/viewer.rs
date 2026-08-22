@@ -8,7 +8,7 @@
 use std::ops::Range;
 
 use super::decorations::{self, Config, Pipeline};
-use super::scroll::{caret_id, scrollable_id};
+use super::scroll::{anchor_id, caret_id, scrollable_id};
 use super::{Message, PreviewElement, State};
 use crate::{comments, interactive_text, theme::Palette};
 
@@ -183,14 +183,16 @@ impl<'a> PreviewViewer<'a> {
         preview_element: &PreviewElement,
     ) -> interactive_text::TextDecorations {
         Pipeline::new()
-            // Preserve paint order: comment element/span, ordinary/current
-            // find matches, visual selection, then caret.
+            // Preserve paint order: comment element tint and outlines, span
+            // tint, ordinary/current find matches, visual selection, then
+            // caret.
             .append(|output| {
                 decorations::append_comments(
                     output,
                     self.comments,
                     element,
                     preview_element.len(),
+                    anchor_id(),
                     &self.decoration_config,
                 )
             })

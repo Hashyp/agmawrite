@@ -10,6 +10,24 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const PARAGRAPH_PADDING: f32 = 4.0;
 
+/// Corner rounding of outlined ranges, so a framing rectangle reads as a
+/// deliberate marker rather than a stray box.
+const OUTLINE_RADIUS: Border = Border {
+    color: Color::TRANSPARENT,
+    width: 0.0,
+    radius: iced::border::Radius {
+        top_left: 2.0,
+        top_right: 2.0,
+        bottom_right: 2.0,
+        bottom_left: 2.0,
+    },
+};
+
+/// Horizontal breathing room between an outline and the glyphs it frames.
+const OUTLINE_HORIZONTAL_PAD: f32 = 1.0;
+/// Vertical inset keeping outlines of consecutive wrapped lines apart.
+const OUTLINE_VERTICAL_INSET: f32 = 1.0;
+
 /// A caret painted at a grapheme column. The optional widget ID lets scroll
 /// operations locate the element containing the caret.
 #[derive(Debug, Clone)]
@@ -26,30 +44,35 @@ pub struct RangedBackground {
     pub color: Color,
 }
 
+/// A border framing a grapheme range — a rectangle with no fill, so the
+/// backgrounds underneath (tints, highlights) stay visible through it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangedOutline {
+    pub range: std::ops::Range<usize>,
+    pub color: Color,
+    pub width: f32,
+}
+
 /// A background tint covering the whole interactive element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WholeElementBackground {
     pub color: Color,
 }
 
-/// A vertical bar painted at the left edge of the interactive element.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GutterDecoration {
-    pub width: f32,
-    pub color: Color,
-}
-
 /// Generic decorations painted around Markdown text.
 ///
 /// Ranged backgrounds are painted in vector order. The complete layer order
-/// is Markdown span backgrounds, the whole-element background and gutters,
-/// ranged backgrounds, the caret, and finally the text.
+/// is Markdown span backgrounds, the whole-element background, ranged
+/// backgrounds, ranged outlines, the caret, and finally the text.
 #[derive(Debug, Clone, Default)]
 pub struct TextDecorations {
     pub whole_element_background: Option<WholeElementBackground>,
-    pub gutters: Vec<GutterDecoration>,
     pub ranged_backgrounds: Vec<RangedBackground>,
+    pub ranged_outlines: Vec<RangedOutline>,
     pub caret: Option<CaretDecoration>,
+    /// A widget id registered on the element the active comment anchors to,
+    /// so activation can scroll it into view without moving the caret.
+    pub reveal_id: Option<Id>,
 }
 
 pub fn paragraph<'a, M: 'a>(
@@ -225,10 +248,6 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
             );
         }
 
-        for gutter in &self.decorations.gutters {
-            draw_gutter(renderer, bounds, gutter.width, gutter.color);
-        }
-
         let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
         let line_height = self.line_height.to_absolute(self.size).0;
         let width = state.paragraph.min_bounds().width;
@@ -250,6 +269,32 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
                         ..Default::default()
                     },
                     background.color,
+                );
+            }
+        }
+
+        // Outlines paint above the backgrounds they frame, so their borders
+        // read on top of the tints — and below the text, whose glyphs stay
+        // fully legible over the border.
+        for outline in &self.decorations.ranged_outlines {
+            for bounds in outline_rects(
+                &state.paragraph,
+                &text,
+                outline.range.clone(),
+                width,
+                line_height,
+            ) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: bounds + translation,
+                        border: Border {
+                            color: outline.color,
+                            width: outline.width,
+                            ..OUTLINE_RADIUS
+                        },
+                        ..Default::default()
+                    },
+                    Background::Color(Color::TRANSPARENT),
                 );
             }
         }
@@ -300,23 +345,11 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         {
             operation.container(Some(id), layout.bounds());
         }
+
+        if let Some(id) = self.decorations.reveal_id.as_ref() {
+            operation.container(Some(id), layout.bounds());
+        }
     }
-}
-
-/// Draws a left-edge gutter on an interactive element.
-fn draw_gutter(renderer: &mut Renderer, bounds: Rectangle, width: f32, color: Color) {
-    let bar = Rectangle::new(
-        Point::new(bounds.x, bounds.y + 1.0),
-        Size::new(width, (bounds.height - 2.0).max(2.0)),
-    );
-
-    renderer.fill_quad(
-        renderer::Quad {
-            bounds: bar,
-            ..Default::default()
-        },
-        color,
-    );
 }
 
 /// The wrapped lines of a paragraph, as `(line index, byte start, byte
@@ -388,6 +421,33 @@ fn caret_point(
     }
 
     Point::ORIGIN
+}
+
+/// Computes the border rectangles framing a grapheme range: the same
+/// wrapped-line geometry the ranged backgrounds paint, padded horizontally
+/// so the border clears the first and last glyph and inset vertically so
+/// outlines of consecutive wrapped lines keep a hair of separation.
+fn outline_rects(
+    paragraph: &RendererParagraph,
+    text: &str,
+    range: std::ops::Range<usize>,
+    width: f32,
+    line_height: f32,
+) -> Vec<Rectangle> {
+    selection_rects(paragraph, text, range, width, line_height)
+        .into_iter()
+        .map(|rect| {
+            let height = (rect.height - OUTLINE_VERTICAL_INSET * 2.0).max(2.0);
+
+            Rectangle::new(
+                Point::new(
+                    rect.x - OUTLINE_HORIZONTAL_PAD,
+                    rect.y + (rect.height - height) / 2.0,
+                ),
+                Size::new(rect.width + OUTLINE_HORIZONTAL_PAD * 2.0, height),
+            )
+        })
+        .collect()
 }
 
 /// Computes the highlight rectangles for a visual-mode selection (given as
@@ -476,7 +536,7 @@ mod tests {
     use iced::Color;
 
     #[test]
-    fn text_decorations_preserve_ranged_background_insertion_order() {
+    fn text_decorations_preserve_ranged_insertion_order() {
         let first = RangedBackground {
             range: 1..3,
             color: Color::BLACK,
@@ -492,7 +552,8 @@ mod tests {
 
         assert_eq!(decorations.ranged_backgrounds, vec![first, second]);
         assert!(decorations.whole_element_background.is_none());
-        assert!(decorations.gutters.is_empty());
+        assert!(decorations.ranged_outlines.is_empty());
         assert!(decorations.caret.is_none());
+        assert!(decorations.reveal_id.is_none());
     }
 }

@@ -10,7 +10,7 @@ pub(crate) use model::{
     element_selection, CaretPosition, Claims, ElementMap, Jump, Motion, Page, Placement,
     PreviewElement, WordMotion,
 };
-pub(crate) use scroll::{place_caret_in_view, reveal_caret, scroll_by, scroll_page};
+pub(crate) use scroll::{place_caret_in_view, reveal_anchor, reveal_caret, scroll_by, scroll_page};
 pub(crate) use viewer::{view, ViewContext};
 
 use iced::widget::{markdown, text_editor};
@@ -117,7 +117,9 @@ impl State {
         self.clear_visual_selection();
     }
 
-    /// Places the caret for app-coordinated comment navigation.
+    /// Places the caret for tests: production code moves the caret only
+    /// through the preview reducer and its own projections.
+    #[cfg(test)]
     pub(crate) fn place_caret(&mut self, position: CaretPosition) {
         self.caret.place(position);
     }

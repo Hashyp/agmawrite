@@ -84,9 +84,11 @@ pub(super) fn handle_comments_event(editor: &mut App, event: comments::Event) ->
     match event {
         comments::Event::NavigateTo(anchor) => {
             if matches!(editor.interaction.view().surface(), Surface::Preview) {
+                // Activation frames the commented text with its rectangle and
+                // scrolls it into view — no caret is dropped onto the
+                // selection's start.
                 editor.preview.clear_visual_selection();
-                editor.preview.place_caret(anchor);
-                preview::reveal_caret().map(Message::Preview)
+                preview::reveal_anchor().map(Message::Preview)
             } else {
                 let source = editor.document.text();
                 let element = editor.preview.elements().get(anchor.element);

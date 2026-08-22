@@ -6,8 +6,8 @@ pub(crate) mod sidebar;
 
 pub(crate) use composer::focus_composer;
 
-pub use model::Mark;
 use model::{CommentCard, Comments, Span};
+pub use model::{Mark, Outline};
 
 use iced::widget::text_editor;
 
@@ -93,6 +93,16 @@ impl State {
 
     pub(crate) fn mark_for(&self, element: usize, len: usize) -> Mark {
         self.model.mark_for(element, len)
+    }
+
+    pub(crate) fn outlines_for(&self, element: usize, len: usize) -> Vec<Outline> {
+        self.model.outlines_for(element, len)
+    }
+
+    /// Whether the active comment's thread anchors this element, so the
+    /// preview can scroll it into view on activation.
+    pub(crate) fn anchors_element(&self, element: usize, len: usize) -> bool {
+        self.model.anchors_element(element, len)
     }
 
     pub(crate) fn anchor_selection_for(

@@ -22,10 +22,15 @@ preview and anchored comments.
 - **Mark** — whether a preview element carries a comment: `None`,
   `Commented`, or `Active` — the element the currently active comment is
   anchored to. (`Mark`, via `Comments::mark_for`)
+- **Outline** — the bordered rectangle framing commented text in a
+  preview element: exactly the selected span for selection anchors, the
+  whole element for spot anchors — a border with no fill, amber when
+  merely commented and cyan when active, painted on top of the unchanged
+  tints. (`Outline`, via `Comments::outlines_for`)
 - **Active comment** — the comment highlighted in the preview and the
   sidebar. `Ctrl+N` cycles it forward through the anchored comments,
-  wrapping around; clicking a card activates that comment and moves the
-  cursor to its anchor.
+  wrapping around; clicking a card activates that comment and scrolls
+  its anchor into view — without placing the caret on it.
 - **Note popup** — the modal text field over the preview whose text becomes
   a comment on save. Dismissing it (Escape, the Close button, a backdrop
   click) discards the draft, so the next note starts fresh.

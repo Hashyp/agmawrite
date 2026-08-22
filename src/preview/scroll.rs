@@ -16,6 +16,7 @@ use iced::{Rectangle, Task, Vector};
 
 const PREVIEW_SCROLL_ID: &str = "preview-scroll";
 const PREVIEW_CARET_ID: &str = "preview-caret";
+const PREVIEW_ANCHOR_ID: &str = "preview-comment-anchor";
 /// Margin kept between the preview caret and the viewport edges.
 const CARET_MARGIN: f32 = 8.0;
 /// Deltas smaller than half a logical pixel do not visibly move the viewport.
@@ -31,6 +32,11 @@ pub(crate) fn caret_id() -> Id {
     Id::new(PREVIEW_CARET_ID)
 }
 
+/// The widget id attached to the element the active comment anchors to.
+pub(crate) fn anchor_id() -> Id {
+    Id::new(PREVIEW_ANCHOR_ID)
+}
+
 /// Scrolls the preview by an absolute delta emitted by a measuring operation.
 pub(crate) fn scroll_by(delta: f32) -> Task<Message> {
     iced_scroll_by(scrollable_id(), AbsoluteOffset { x: 0.0, y: delta })
@@ -38,7 +44,14 @@ pub(crate) fn scroll_by(delta: f32) -> Task<Message> {
 
 /// Measures the preview scrollable and caret, then minimally reveals the caret.
 pub(crate) fn reveal_caret() -> Task<Message> {
-    iced::advanced::widget::operate(RevealCaret::new(CaretScroll::Reveal))
+    iced::advanced::widget::operate(RevealTarget::new(CaretScroll::Reveal, caret_id()))
+}
+
+/// Measures the preview scrollable and the active comment's anchored
+/// element, then minimally reveals that element — activating a comment
+/// scrolls to its text without placing a caret on it.
+pub(crate) fn reveal_anchor() -> Task<Message> {
+    iced::advanced::widget::operate(RevealTarget::new(CaretScroll::Reveal, anchor_id()))
 }
 
 /// Measures the preview viewport and scrolls by a whole or half page.
@@ -59,7 +72,7 @@ pub(crate) fn place_caret_in_view(placement: Placement) -> Task<Message> {
         Placement::Bottom => CaretScroll::Bottom,
     };
 
-    iced::advanced::widget::operate(RevealCaret::new(scroll))
+    iced::advanced::widget::operate(RevealTarget::new(scroll, caret_id()))
 }
 
 /// How a [`RevealCaret`] operation scrolls the caret into place.
@@ -126,28 +139,29 @@ fn page_delta(viewport_height: f32, page: Page, count: usize) -> f32 {
     sign * distance * count.max(1) as f32
 }
 
-/// Measures the preview scrollable and the caret element in the widget tree.
-struct RevealCaret {
+/// Measures the preview scrollable and one target element in the widget tree
+/// — the caret's element, or the element the active comment anchors to.
+struct RevealTarget {
     scroll_id: Id,
-    caret_id: Id,
+    target_id: Id,
     viewport: Option<(Rectangle, Vector)>,
-    caret: Option<Rectangle>,
+    target: Option<Rectangle>,
     scroll: CaretScroll,
 }
 
-impl RevealCaret {
-    fn new(scroll: CaretScroll) -> Self {
+impl RevealTarget {
+    fn new(scroll: CaretScroll, target_id: Id) -> Self {
         Self {
             scroll_id: scrollable_id(),
-            caret_id: caret_id(),
+            target_id,
             viewport: None,
-            caret: None,
+            target: None,
             scroll,
         }
     }
 }
 
-impl Operation<Message> for RevealCaret {
+impl Operation<Message> for RevealTarget {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
         operate(self);
     }
@@ -166,8 +180,8 @@ impl Operation<Message> for RevealCaret {
     }
 
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        if Some(&self.caret_id) == id {
-            self.caret = Some(bounds);
+        if Some(&self.target_id) == id && self.target.is_none() {
+            self.target = Some(bounds);
         }
     }
 
@@ -175,19 +189,19 @@ impl Operation<Message> for RevealCaret {
         let Some((viewport, translation)) = self.viewport else {
             return Outcome::None;
         };
-        let Some(caret) = self.caret else {
+        let Some(target) = self.target else {
             return Outcome::None;
         };
 
         // Child layouts live in unscrolled content space; the viewport shows
         // them shifted up by the current translation.
-        let caret_top = caret.y - translation.y;
+        let target_top = target.y - translation.y;
 
         caret_delta(
             viewport.y,
             viewport.height,
-            caret_top,
-            caret.height,
+            target_top,
+            target.height,
             self.scroll,
         )
         .map_or(Outcome::None, |delta| {

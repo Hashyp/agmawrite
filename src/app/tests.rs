@@ -626,11 +626,11 @@ fn preview_toggle_preserves_an_open_find_across_surfaces() {
     assert!(editor.interaction.view().contains(Overlay::Find));
 }
 
-/// Clicking a comment card activates its comment and moves the cursor
-/// to the anchored element: the preview caret jumps there, and in
-/// write mode the source cursor lands on the element's source.
+/// Clicking a comment card activates its comment without moving the
+/// preview caret onto it — the framed anchor scrolls into view instead —
+/// while in write mode the source cursor lands on the element's source.
 #[test]
-fn clicking_a_comment_card_moves_the_cursor_to_its_anchor() {
+fn clicking_a_comment_card_activates_without_placing_the_caret() {
     use iced::widget::text_editor::Position;
 
     let mut editor = app_at(
@@ -653,14 +653,17 @@ fn clicking_a_comment_card_moves_the_cursor_to_its_anchor() {
         Message::Comments(comments::Message::ActivateCard(0, 0)),
     );
 
+    // The caret stays where the reader left it; the comment itself is
+    // active, framing its element in the preview.
     assert_eq!(
         editor.preview.caret(),
         CaretPosition {
-            element: 2,
-            column: 3,
+            element: 0,
+            column: 0,
         }
     );
     assert_eq!(editor.comments.mark_for(2, 32), Mark::Active);
+    assert!(editor.comments.anchors_element(2, 32));
 
     // In write mode the source cursor lands on the anchored element's
     // source instead.

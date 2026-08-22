@@ -35,6 +35,15 @@ pub enum Mark {
     Active,
 }
 
+/// A bordered rectangle framing commented text in a preview element: the
+/// grapheme range the rectangle surrounds and whether it belongs to the
+/// currently active comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    pub range: std::ops::Range<usize>,
+    pub mark: Mark,
+}
+
 /// What a comment thread is anchored to: a caret position in the preview,
 /// a span of selected text, or nothing — a **global comment** about the
 /// document as a whole, labeled "Global" in the sidebar.
@@ -313,6 +322,51 @@ impl Comments {
         } else {
             Mark::None
         }
+    }
+
+    /// The bordered rectangles framing this element's commented text: one
+    /// per open thread anchored here — exactly its selected span for
+    /// selection anchors, the whole element for spot anchors. Commented
+    /// outlines come first and the active one last, so the active border
+    /// paints on top where threads overlap. Resolved threads frame
+    /// nothing.
+    pub fn outlines_for(&self, element: usize, len: usize) -> Vec<Outline> {
+        let mut outlines = Vec::new();
+
+        for (index, thread) in self.threads.iter().enumerate() {
+            if thread.resolved || !thread.anchor.marks(element, len) {
+                continue;
+            }
+
+            let range = match thread.anchor {
+                Anchor::Selection(span) => span_slice(span, element, len),
+                _ => (len > 0).then_some(0..len),
+            };
+
+            let Some(range) = range else {
+                continue;
+            };
+
+            let mark = if self.active.is_some_and(|(active, _)| active == index) {
+                Mark::Active
+            } else {
+                Mark::Commented
+            };
+
+            outlines.push(Outline { range, mark });
+        }
+
+        outlines.sort_by_key(|outline| outline.mark == Mark::Active);
+        outlines
+    }
+
+    /// Whether the active comment's thread anchors this element — resolved
+    /// or not — so activating a comment can scroll its element into view
+    /// without moving the caret onto it.
+    pub fn anchors_element(&self, element: usize, len: usize) -> bool {
+        self.active
+            .and_then(|(index, _)| self.threads.get(index))
+            .is_some_and(|thread| thread.anchor.marks(element, len))
     }
 
     /// The slice of the element's text the active selection anchor
@@ -642,7 +696,7 @@ fn condensed(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaretPosition, Comments, Mark, Span};
+    use super::{CaretPosition, Comments, Mark, Outline, Span};
     use crate::preview::ElementMap;
 
     fn at(element: usize) -> CaretPosition {
@@ -1047,6 +1101,68 @@ mod tests {
         let cards = comments.cards("", &[]);
         assert_eq!((cards[1].thread, cards[1].entry), (1, 0));
         assert!(cards[1].active);
+    }
+
+    /// The outlines framing commented text follow the anchors: selections
+    /// frame exactly their slice, spot anchors frame their whole element,
+    /// the active thread frames last (on top), and resolved threads frame
+    /// nothing — while the reveal query follows the active thread even
+    /// into history.
+    #[test]
+    fn outlines_frame_anchors_and_resolved_threads_frame_nothing() {
+        let elements = crate::preview::ElementMap::parse("aaaa\n\nbbbb\n\ncccc")
+            .elements()
+            .to_vec();
+        let lens = |element: usize| elements[element].len();
+
+        let mut comments = Comments::new();
+        comments.save_selection("first", span(pos(1, 1), pos(1, 3)));
+        comments.save("spot", at(2));
+
+        // The freshest thread is active: its outline comes last.
+        assert_eq!(
+            comments.outlines_for(1, lens(1)),
+            vec![Outline {
+                range: 1..3,
+                mark: Mark::Commented,
+            },]
+        );
+        assert_eq!(
+            comments.outlines_for(2, lens(2)),
+            vec![Outline {
+                range: 0..4,
+                mark: Mark::Active,
+            }]
+        );
+        assert!(comments.anchors_element(2, lens(2)));
+        assert!(!comments.anchors_element(1, lens(1)));
+
+        // Activating the selection thread puts its outline on top.
+        comments.activate(0, 0);
+        assert_eq!(
+            comments.outlines_for(1, lens(1)),
+            vec![Outline {
+                range: 1..3,
+                mark: Mark::Active,
+            }]
+        );
+        assert_eq!(
+            comments.outlines_for(2, lens(2)),
+            vec![Outline {
+                range: 0..4,
+                mark: Mark::Commented,
+            }]
+        );
+
+        // Resolved threads frame nothing, but the reveal query still finds
+        // the active thread's element — history stays reachable.
+        comments.resolve(0);
+        assert!(comments.outlines_for(1, lens(1)).is_empty());
+        assert!(comments.anchors_element(1, lens(1)));
+
+        // Elements without comments frame nothing.
+        assert!(comments.outlines_for(0, lens(0)).is_empty());
+        assert!(!comments.anchors_element(0, lens(0)));
     }
 
     /// A selection touching an element only at its column 0 — an

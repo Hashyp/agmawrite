@@ -12,32 +12,32 @@ use iced::Color;
 
 use super::{element_selection, CaretPosition, PreviewElement};
 use crate::interactive_text::{
-    CaretDecoration, GutterDecoration, RangedBackground, TextDecorations, WholeElementBackground,
+    CaretDecoration, RangedBackground, RangedOutline, TextDecorations, WholeElementBackground,
 };
 use crate::{comments, editing, theme::Palette};
 
-const COMMENTED_BAR_WIDTH: f32 = 3.0;
-const ACTIVE_COMMENT_BAR_WIDTH: f32 = 4.0;
+const COMMENTED_BORDER_WIDTH: f32 = 1.0;
+const ACTIVE_BORDER_WIDTH: f32 = 1.5;
 
 /// Producer configuration for one preview theme.
 ///
-/// Caret and comment colors follow palette roles. The palette has no dedicated
-/// visual-selection or find-highlight roles, so their established colors live
-/// in the default annotation policy. Keeping those defaults here preserves the
-/// existing rendering while removing color policy from the viewer and leaf
-/// widget.
+/// Caret, visual-selection, and comment colors follow palette roles — the
+/// visual selection paints with the theme's own selection color, the same
+/// role the write-mode editor selects with. Only find highlights lack a
+/// palette role; their established colors live in the default annotation
+/// policy.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Config {
     caret: Color,
     visual_selection: Color,
-    commented_bar: Color,
-    active_comment_bar: Color,
+    commented_border: Color,
+    active_border: Color,
     active_comment_tint: Color,
     commented_span_tint: Color,
     find_match: Color,
     current_find_match: Color,
-    commented_bar_width: f32,
-    active_comment_bar_width: f32,
+    commented_border_width: f32,
+    active_border_width: f32,
 }
 
 impl Config {
@@ -46,15 +46,15 @@ impl Config {
 
         Self {
             caret: palette.foreground,
-            visual_selection: defaults.visual_selection,
-            commented_bar: palette.tint(palette.yellow, 0.75),
-            active_comment_bar: palette.accent,
+            visual_selection: palette.selection,
+            commented_border: palette.yellow,
+            active_border: palette.accent,
             active_comment_tint: palette.tint(palette.accent, 0.09),
             commented_span_tint: palette.tint(palette.yellow, 0.22),
             find_match: defaults.find_match,
             current_find_match: defaults.current_find_match,
-            commented_bar_width: defaults.commented_bar_width,
-            active_comment_bar_width: defaults.active_comment_bar_width,
+            commented_border_width: defaults.commented_border_width,
+            active_border_width: defaults.active_border_width,
         }
     }
 }
@@ -65,15 +65,15 @@ impl Default for Config {
 
         Self {
             caret: palette.foreground,
-            visual_selection: Color::from_rgba(0.25, 0.5, 1.0, 0.4),
-            commented_bar: palette.tint(palette.yellow, 0.75),
-            active_comment_bar: palette.accent,
+            visual_selection: palette.selection,
+            commented_border: palette.yellow,
+            active_border: palette.accent,
             active_comment_tint: palette.tint(palette.accent, 0.09),
             commented_span_tint: palette.tint(palette.yellow, 0.22),
             find_match: Color::from_rgba(0.95, 0.75, 0.25, 0.4),
             current_find_match: Color::from_rgba(0.98, 0.62, 0.15, 0.75),
-            commented_bar_width: COMMENTED_BAR_WIDTH,
-            active_comment_bar_width: ACTIVE_COMMENT_BAR_WIDTH,
+            commented_border_width: COMMENTED_BORDER_WIDTH,
+            active_border_width: ACTIVE_BORDER_WIDTH,
         }
     }
 }
@@ -136,31 +136,37 @@ pub(crate) fn append_visual(
     }
 }
 
-/// Appends whole-element, gutter, and selected-span primitives for comments.
+/// Appends whole-element, outline, and selected-span primitives for comments:
+/// the commented text is framed by a bordered rectangle — amber when merely
+/// commented, cyan when active — with no fill of its own, so the tints and
+/// backgrounds underneath stay exactly as they were.
 pub(crate) fn append_comments(
     output: &mut TextDecorations,
     comments: &comments::State,
     element: usize,
     element_len: usize,
+    anchor_id: Id,
     config: &Config,
 ) {
-    let mark = comments.mark_for(element, element_len);
+    if let comments::Mark::Active = comments.mark_for(element, element_len) {
+        output.whole_element_background = Some(WholeElementBackground {
+            color: config.active_comment_tint,
+        });
+    }
 
-    match mark {
-        comments::Mark::Active => {
-            output.whole_element_background = Some(WholeElementBackground {
-                color: config.active_comment_tint,
-            });
-            output.gutters.push(GutterDecoration {
-                width: config.active_comment_bar_width,
-                color: config.active_comment_bar,
-            });
-        }
-        comments::Mark::Commented => output.gutters.push(GutterDecoration {
-            width: config.commented_bar_width,
-            color: config.commented_bar,
-        }),
-        comments::Mark::None => {}
+    for outline in comments.outlines_for(element, element_len) {
+        let (color, width) = match outline.mark {
+            comments::Mark::Active => (config.active_border, config.active_border_width),
+            comments::Mark::Commented | comments::Mark::None => {
+                (config.commented_border, config.commented_border_width)
+            }
+        };
+
+        output.ranged_outlines.push(RangedOutline {
+            range: outline.range,
+            color,
+            width,
+        });
     }
 
     if let Some(range) = comments.anchor_selection_for(element, element_len) {
@@ -168,6 +174,10 @@ pub(crate) fn append_comments(
             range,
             color: config.commented_span_tint,
         });
+    }
+
+    if comments.anchors_element(element, element_len) {
+        output.reveal_id = Some(anchor_id);
     }
 }
 
@@ -204,16 +214,14 @@ pub(crate) fn append_find(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append_caret, append_comments, append_find, append_visual, Config, Pipeline,
-        ACTIVE_COMMENT_BAR_WIDTH,
-    };
+    use super::{append_caret, append_comments, append_find, append_visual, Config, Pipeline};
     use crate::comments;
-    use crate::interactive_text::{GutterDecoration, RangedBackground, WholeElementBackground};
+    use crate::interactive_text::{RangedBackground, RangedOutline, WholeElementBackground};
     use crate::preview::{CaretPosition, State};
     use crate::theme::Palette;
     use iced::widget::text_editor::{Action, Edit};
     use iced::widget::Id;
+    use iced::Color;
     use std::sync::Arc;
 
     fn at(element: usize, column: usize) -> CaretPosition {
@@ -243,23 +251,31 @@ mod tests {
         palette.foreground = palette.red;
         palette.accent = palette.blue;
         palette.yellow = palette.green;
+        palette.selection = Color::from_rgb(0.11, 0.22, 0.33);
 
         let config = Config::from_palette(&palette);
 
         assert_eq!(config.caret, palette.foreground);
-        assert_eq!(config.active_comment_bar, palette.accent);
+        // The visual selection paints with the theme's own selection role —
+        // the same color the write-mode editor selects with.
+        assert_eq!(config.visual_selection, palette.selection);
+        assert_eq!(config.active_border, palette.accent);
+        assert_eq!(config.commented_border, palette.yellow);
         assert_eq!(
             config.active_comment_tint,
             palette.tint(palette.accent, 0.09)
         );
-        assert_eq!(config.commented_bar, palette.tint(palette.yellow, 0.75));
         assert_eq!(
             config.commented_span_tint,
             palette.tint(palette.yellow, 0.22)
         );
-        assert_eq!(config.visual_selection, defaults.visual_selection);
         assert_eq!(config.find_match, defaults.find_match);
         assert_eq!(config.current_find_match, defaults.current_find_match);
+        assert_eq!(
+            config.commented_border_width,
+            defaults.commented_border_width
+        );
+        assert_eq!(config.active_border_width, defaults.active_border_width);
     }
 
     #[test]
@@ -270,9 +286,19 @@ mod tests {
         let palette = Palette::default();
         let config = Config::from_palette(&palette);
         let current_match = (0, 6..11);
+        let anchor = Id::unique();
 
         let decorations = Pipeline::new()
-            .append(|output| append_comments(output, &comments, 0, preview_element.len(), &config))
+            .append(|output| {
+                append_comments(
+                    output,
+                    &comments,
+                    0,
+                    preview_element.len(),
+                    anchor.clone(),
+                    &config,
+                )
+            })
             .append(|output| {
                 append_find(
                     output,
@@ -320,23 +346,137 @@ mod tests {
                 },
             ]
         );
+        // The active comment frames exactly its selected span — no gutter
+        // bars, no extra cursor at the span's start.
+        assert_eq!(
+            decorations.ranged_outlines,
+            vec![RangedOutline {
+                range: 1..10,
+                color: config.active_border,
+                width: config.active_border_width,
+            }]
+        );
         assert_eq!(
             decorations.whole_element_background,
             Some(WholeElementBackground {
                 color: config.active_comment_tint,
             })
         );
-        assert_eq!(
-            decorations.gutters,
-            vec![GutterDecoration {
-                width: ACTIVE_COMMENT_BAR_WIDTH,
-                color: config.active_comment_bar,
-            }]
-        );
+        assert_eq!(decorations.reveal_id, Some(anchor));
         assert_eq!(
             decorations.caret.as_ref().map(|caret| caret.column),
             Some(7)
         );
+    }
+
+    /// Commented threads frame their span with the commented border, the
+    /// active one on top; spot anchors frame their whole element, and only
+    /// the active comment's element carries the reveal id.
+    #[test]
+    fn comments_frame_spans_and_elements_without_extra_cursors() {
+        let preview = State::new("alpha alpha\n\nbeta");
+        let first = &preview.elements()[0];
+        let second = &preview.elements()[1];
+        let mut comments = comments::State::new();
+
+        let save = |comments: &mut comments::State, text: &str, context: comments::Context| {
+            comments::update(
+                comments,
+                comments::Message::EditComposer(Action::Edit(Edit::Paste(Arc::new(
+                    text.to_owned(),
+                )))),
+                context,
+            );
+            comments::update(comments, comments::Message::SaveComposer, context);
+        };
+
+        // Two distinct spans over the same element start two threads; a
+        // spot note on another element starts a third, active one.
+        save(
+            &mut comments,
+            "first",
+            comments::Context {
+                caret: at(0, 5),
+                selection: Some((at(0, 0), at(0, 5))),
+                composer_open: true,
+            },
+        );
+        save(
+            &mut comments,
+            "second",
+            comments::Context {
+                caret: at(0, 7),
+                selection: Some((at(0, 2), at(0, 7))),
+                composer_open: true,
+            },
+        );
+        save(
+            &mut comments,
+            "third",
+            comments::Context {
+                caret: at(1, 2),
+                selection: None,
+                composer_open: true,
+            },
+        );
+
+        let config = Config::from_palette(&Palette::default());
+        let anchor = Id::unique();
+        let mut decorations = crate::interactive_text::TextDecorations::default();
+
+        // Reactivating the middle thread: its span frames active, on top of
+        // the older commented one.
+        comments::update(
+            &mut comments,
+            comments::Message::ActivateCard(1, 0),
+            comments::Context {
+                caret: at(0, 0),
+                selection: None,
+                composer_open: false,
+            },
+        );
+
+        append_comments(
+            &mut decorations,
+            &comments,
+            0,
+            first.len(),
+            anchor.clone(),
+            &config,
+        );
+
+        assert_eq!(
+            decorations.ranged_outlines,
+            vec![
+                RangedOutline {
+                    range: 0..5,
+                    color: config.commented_border,
+                    width: config.commented_border_width,
+                },
+                RangedOutline {
+                    range: 2..7,
+                    color: config.active_border,
+                    width: config.active_border_width,
+                },
+            ]
+        );
+        assert_eq!(decorations.reveal_id, Some(anchor.clone()));
+
+        // The spot thread merely comments its element now — framed whole,
+        // without the active tint or reveal.
+        let mut spot = crate::interactive_text::TextDecorations::default();
+        append_comments(&mut spot, &comments, 1, second.len(), anchor, &config);
+
+        assert_eq!(
+            spot.ranged_outlines,
+            vec![RangedOutline {
+                range: 0..second.len(),
+                color: config.commented_border,
+                width: config.commented_border_width,
+            }]
+        );
+        assert!(spot.whole_element_background.is_none());
+        assert!(spot.reveal_id.is_none());
     }
 
     #[test]
@@ -359,6 +499,7 @@ mod tests {
             &comments,
             0,
             preview_element.len(),
+            Id::unique(),
             &config,
         );
         append_find(&mut decorations, preview_element, 0, "alpha", None, &config);
