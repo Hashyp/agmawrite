@@ -1,7 +1,7 @@
 //! Canvas-drawn icons shared by the application UI.
 
 use iced::widget::canvas;
-use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
+use iced::{mouse, Point, Rectangle, Renderer, Theme};
 
 /// The design space the icon glyphs are drawn in, before scaling to the
 /// canvas size.
@@ -10,6 +10,19 @@ const ICON_DESIGN_SIZE: f32 = 16.0;
 pub(crate) const ICON_SIZE: f32 = 24.0;
 /// The bottom-bar icon button size.
 pub(crate) const ICON_BUTTON_SIZE: f32 = 42.0;
+
+/// The stroke every icon glyph draws with. The color comes from the theme
+/// passed to `draw` — the runtime theme, whose foreground is the omarchy
+/// foreground — so icons follow the palette like every other surface.
+fn glyph_stroke(theme: &Theme) -> canvas::Stroke<'_> {
+    let color = theme.palette().text;
+
+    canvas::Stroke::default()
+        .with_color(color)
+        .with_width(1.4)
+        .with_line_cap(canvas::LineCap::Round)
+        .with_line_join(canvas::LineJoin::Round)
+}
 
 pub(crate) struct OpenFileIcon;
 
@@ -20,7 +33,7 @@ impl<Message> canvas::Program<Message> for OpenFileIcon {
         &self,
         _state: &Self::State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
@@ -38,14 +51,7 @@ impl<Message> canvas::Program<Message> for OpenFileIcon {
             path.close();
         });
 
-        frame.stroke(
-            &folder,
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round),
-        );
+        frame.stroke(&folder, glyph_stroke(theme));
 
         vec![frame.into_geometry()]
     }
@@ -60,7 +66,7 @@ impl<Message> canvas::Program<Message> for PreviewIcon {
         &self,
         _state: &Self::State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
@@ -75,17 +81,10 @@ impl<Message> canvas::Program<Message> for PreviewIcon {
             path.close();
         });
 
-        frame.stroke(
-            &eye,
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round),
-        );
+        frame.stroke(&eye, glyph_stroke(theme));
 
         let pupil = canvas::Path::circle(Point::new(8.0, 8.0), 2.8);
-        frame.fill(&pupil, Color::from_rgb(0.65, 0.65, 0.65));
+        frame.fill(&pupil, theme.palette().text);
 
         vec![frame.into_geometry()]
     }
@@ -103,7 +102,7 @@ impl<Message> canvas::Program<Message> for WriteIcon {
         &self,
         _state: &Self::State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
@@ -111,13 +110,7 @@ impl<Message> canvas::Program<Message> for WriteIcon {
         // The glyph is drawn in a 16x16 design space, scaled to the canvas.
         frame.scale(bounds.width / ICON_DESIGN_SIZE);
 
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
+        let stroke = || glyph_stroke(theme);
 
         // A pencil lying diagonal: a triangular tip at the bottom-left, a
         // band above it, and the body running to the top-right.
@@ -155,7 +148,7 @@ impl<Message> canvas::Program<Message> for SaveIcon {
         &self,
         _state: &Self::State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
@@ -163,13 +156,7 @@ impl<Message> canvas::Program<Message> for SaveIcon {
         // The glyph is drawn in a 16x16 design space, scaled to the canvas.
         frame.scale(bounds.width / ICON_DESIGN_SIZE);
 
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
+        let stroke = || glyph_stroke(theme);
 
         // A floppy disk: the body with a beveled corner, the shutter notch
         // on top, and the label slot at the bottom.
@@ -213,20 +200,15 @@ impl<Message> canvas::Program<Message> for CommentsIcon {
         &self,
         _state: &Self::State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The glyph is drawn in a 16x16 design space, scaled to the canvas.
         frame.scale(bounds.width / ICON_DESIGN_SIZE);
 
-        let stroke = || {
-            canvas::Stroke::default()
-                .with_color(Color::from_rgb(0.65, 0.65, 0.65))
-                .with_width(1.4)
-                .with_line_cap(canvas::LineCap::Round)
-                .with_line_join(canvas::LineJoin::Round)
-        };
+        let stroke = || glyph_stroke(theme);
 
         let bubble = canvas::Path::new(|path| {
             path.move_to(Point::new(8.0, 2.5));

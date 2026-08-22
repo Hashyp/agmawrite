@@ -8,12 +8,9 @@ use std::ops::Range;
 use iced::advanced::text::highlighter::{Format, Highlighter};
 use iced::{Color, Font, Theme};
 
-/// The dimmed grey Markdown syntax markers render in.
-const MARKER_COLOR: Color = Color::from_rgb(0.45, 0.45, 0.45);
-
-/// The amber find matches tint in — the same amber the preview paints
-/// them with.
-const FIND_MATCH_COLOR: Color = Color::from_rgb(0.95, 0.72, 0.25);
+/// The marker grey: the theme's foreground eased toward its background —
+/// between the omarchy foreground and muted roles, dimmed but legible.
+const MARKER_DIM_FACTOR: f32 = 0.45;
 
 /// A highlighted stretch of a source line: a Markdown syntax marker, or
 /// a find match.
@@ -23,17 +20,32 @@ pub enum Highlight {
     FindMatch,
 }
 
-/// Turns a highlight into its text format: Markdown markers dim to grey,
-/// find matches glow amber.
-pub fn format(highlight: &Highlight, _theme: &Theme) -> Format<Font> {
+/// Turns a highlight into its text format. The runtime theme carries the
+/// omarchy palette: markers dim toward its background, find matches paint
+/// in its warning yellow — the same amber family the preview tints them
+/// with.
+pub fn format(highlight: &Highlight, theme: &Theme) -> Format<Font> {
+    let roles = theme.palette();
+
     Format {
         color: match highlight {
-            Highlight::Marker => MARKER_COLOR,
-            Highlight::FindMatch => FIND_MATCH_COLOR,
+            Highlight::Marker => dimmed(roles.text, roles.background),
+            Highlight::FindMatch => roles.warning,
         }
         .into(),
         font: None,
     }
+}
+
+/// `text` eased toward `background` by [`MARKER_DIM_FACTOR`], per channel.
+fn dimmed(text: Color, background: Color) -> Color {
+    let mix = |t: f32, b: f32| t + (b - t) * MARKER_DIM_FACTOR;
+
+    Color::from_rgb(
+        mix(text.r, background.r),
+        mix(text.g, background.g),
+        mix(text.b, background.b),
+    )
 }
 
 /// The write-mode highlighter, driven by the find query: Markdown markers
@@ -215,8 +227,44 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
+    use super::dimmed as dimmed_color;
     use super::Highlight::{FindMatch, Marker};
-    use super::{line_highlights, marker_ranges};
+    use super::{format, line_highlights, marker_ranges};
+    use crate::theme::Palette;
+    use iced::{Color, Font};
+
+    /// Highlight formats paint with omarchy roles: markers dim the
+    /// foreground toward the background, find matches take the warning
+    /// yellow — never a hardcoded grey or amber.
+    #[test]
+    fn formats_follow_the_runtime_palette() {
+        let theme = Palette::default().runtime_theme();
+        let roles = theme.palette();
+
+        let marker = format(&Marker, &theme);
+        assert_eq!(
+            marker.color,
+            Some(dimmed_color(roles.text, roles.background))
+        );
+
+        let find = format(&FindMatch, &theme);
+        assert_eq!(find.color, Some(roles.warning));
+        assert_eq!(find.font, None::<Font>);
+    }
+
+    /// The marker grey eases the foreground toward the background per
+    /// channel: unchanged at 0, the background at 1, halfway between at
+    /// 0.45.
+    #[test]
+    fn dimming_eases_each_channel() {
+        let text = Color::from_rgb(1.0, 0.0, 0.5);
+        let background = Color::from_rgb(0.0, 1.0, 0.5);
+
+        let dim = dimmed_color(text, background);
+        assert!((dim.r - 0.55).abs() < 1e-6);
+        assert!((dim.g - 0.45).abs() < 1e-6);
+        assert!((dim.b - 0.5).abs() < 1e-6);
+    }
 
     /// The byte ranges of `line` that dim, as slices for readability.
     fn dimmed(line: &str) -> Vec<&str> {

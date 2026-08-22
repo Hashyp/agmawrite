@@ -4,7 +4,7 @@ use iced::widget::{
     button, canvas, column, container, mouse_area, row, scrollable, text, text_editor, tooltip,
     Space,
 };
-use iced::{alignment, Background, Border, Color, Element, Font, Length, Theme};
+use iced::{alignment, Background, Border, Element, Font, Length, Theme};
 
 use super::model::CommentCard;
 use super::{Message, State};
@@ -106,7 +106,7 @@ fn collapsed(state: &State, palette: Palette, font: Font) -> Element<'_, Message
                 .size(12),
         )
         .padding([4, 8])
-        .style(tooltip_style),
+        .style(move |theme| crate::ui::tooltip::style(&palette, theme)),
         tooltip::Position::Left,
     )
     .into()
@@ -376,18 +376,6 @@ fn rail_button_style(palette: Palette, _theme: &Theme, status: button::Status) -
                 Palette::lightened(palette.darker_background, 0.15),
             )),
             _ => None,
-        },
-        ..Default::default()
-    }
-}
-
-fn tooltip_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.15))),
-        text_color: Some(Color::WHITE),
-        border: Border {
-            radius: 3.0.into(),
-            ..Border::default()
         },
         ..Default::default()
     }

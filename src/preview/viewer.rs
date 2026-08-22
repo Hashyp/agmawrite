@@ -12,9 +12,8 @@ use super::scroll::{anchor_id, caret_id, scrollable_id};
 use super::{Message, PreviewElement, State};
 use crate::{comments, interactive_text, theme::Palette};
 
-use iced::widget::markdown::Catalog as _;
-use iced::widget::{container, markdown, scrollable};
-use iced::{Element, Font, Length, Theme};
+use iced::widget::{column, container, markdown, rich_text, scrollable};
+use iced::{border, Background, Color, Element, Font, Length};
 
 const PREVIEW_FONT: Font = Font::with_name("iA Writer Mono S");
 
@@ -65,7 +64,7 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a
                 comments: context.comments,
                 find_query: context.find_query,
                 current_match: context.current_find_match,
-                decoration_config: Config::from_palette(&palette),
+                palette,
             },
         ))
         .width(Length::Fill)
@@ -80,18 +79,54 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a
 }
 
 fn markdown_style(palette: &Palette) -> markdown::Style {
-    let theme = if palette.light {
-        &Theme::Light
-    } else {
-        &Theme::Dark
-    };
-
     markdown::Style {
         font: PREVIEW_FONT,
         inline_code_font: PREVIEW_FONT,
         code_block_font: PREVIEW_FONT,
-        ..markdown::Style::from(theme)
+        inline_code_highlight: markdown::Highlight {
+            background: Background::Color(palette.raised()),
+            border: border::rounded(4),
+        },
+        inline_code_color: palette.foreground,
+        link_color: palette.accent,
+        ..markdown::Style::from(palette.iced())
     }
+}
+
+/// The palette-styled container every code surface paints on — code blocks
+/// and image chips — instead of iced's stock `#111111` panel.
+fn surface_style(surface: Color) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(surface)),
+        border: border::rounded(4),
+        ..Default::default()
+    }
+}
+
+/// A code block's lines without interactive decorations — the fallback
+/// when the parse walk and the viewer's numbering disagree. Mirrors
+/// iced's own code block, but on the palette's surface instead of its
+/// stock dark panel.
+fn plain_code_block<'a>(
+    settings: markdown::Settings,
+    lines: &'a [markdown::Text],
+) -> Element<'a, Message> {
+    scrollable(
+        container(column(lines.iter().map(|line| {
+            rich_text(line.spans(settings.style))
+                .on_link_click(Message::LinkClicked)
+                .font(settings.style.code_block_font)
+                .size(settings.code_size)
+                .into()
+        })))
+        .padding(settings.code_size),
+    )
+    .direction(scrollable::Direction::Horizontal(
+        scrollable::Scrollbar::default()
+            .width(settings.code_size / 2)
+            .scroller_width(settings.code_size / 2),
+    ))
+    .into()
 }
 
 struct PreviewViewer<'a> {
@@ -109,8 +144,10 @@ struct PreviewViewer<'a> {
     find_query: &'a str,
     /// The current find match, as the element and range it lives in.
     current_match: Option<(usize, Range<usize>)>,
-    /// Producer colors and geometry derived from the current theme policy.
-    decoration_config: Config,
+    /// The palette the preview paints with: the base text color and code
+    /// surfaces come from it directly, the decoration producers' colors
+    /// through its [`Config`].
+    palette: Palette,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
@@ -144,6 +181,23 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
         self.text_element(settings, text)
     }
 
+    fn image(
+        &self,
+        settings: markdown::Settings,
+        _url: &'a String,
+        _title: &'a str,
+        alt: &markdown::Text,
+    ) -> Element<'a, Message> {
+        // Image alt text rides on the same palette surface as code, never
+        // iced's stock dark chip.
+        let surface = self.palette.raised();
+
+        container(rich_text(alt.spans(settings.style)).on_link_click(Message::LinkClicked))
+            .padding(settings.spacing.0)
+            .style(move |_theme| surface_style(surface))
+            .into()
+    }
+
     fn code_block(
         &self,
         settings: markdown::Settings,
@@ -154,21 +208,30 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
         // The map numbers code blocks like any element; if they ever
         // disagree, fall back to the plain, non-interactive look.
         let Some((element, preview_element)) = self.claims.claim() else {
-            return markdown::code_block(settings, lines, Message::LinkClicked);
+            let surface = self.palette.raised();
+
+            return container(plain_code_block(settings, lines))
+                .width(Length::Fill)
+                .padding(settings.code_size / 4.0)
+                .style(move |_theme| surface_style(surface))
+                .into();
         };
 
         let decorations = self.decorations(element, preview_element);
 
-        // The code block keeps the default look — dark surface, inset —
-        // with the interactive code inside instead of the plain lines.
+        // The code block keeps the default look — a palette surface, inset
+        // — with the interactive code inside instead of the plain lines.
+        let surface = self.palette.raised();
+
         container(interactive_text::code(
             settings,
             preview_element.text(),
+            self.palette.foreground,
             decorations,
         ))
         .width(Length::Fill)
         .padding(settings.code_size / 4.0)
-        .class(Theme::code_block())
+        .style(move |_theme| surface_style(surface))
         .into()
     }
 }
@@ -182,6 +245,8 @@ impl<'a> PreviewViewer<'a> {
         element: usize,
         preview_element: &PreviewElement,
     ) -> interactive_text::TextDecorations {
+        let config = Config::from_palette(&self.palette);
+
         Pipeline::new()
             // Preserve paint order: comment element tint and outlines, span
             // tint, ordinary/current find matches, visual selection, then
@@ -193,7 +258,7 @@ impl<'a> PreviewViewer<'a> {
                     element,
                     preview_element.len(),
                     anchor_id(),
-                    &self.decoration_config,
+                    &config,
                 )
             })
             .append(|output| {
@@ -203,7 +268,7 @@ impl<'a> PreviewViewer<'a> {
                     element,
                     self.find_query,
                     self.current_match.as_ref(),
-                    &self.decoration_config,
+                    &config,
                 )
             })
             .append(|output| {
@@ -212,7 +277,7 @@ impl<'a> PreviewViewer<'a> {
                     element,
                     preview_element.len(),
                     self.visual,
-                    &self.decoration_config,
+                    &config,
                 )
             })
             .append(|output| {
@@ -222,7 +287,7 @@ impl<'a> PreviewViewer<'a> {
                     self.focused_element,
                     self.caret_column,
                     caret_id(),
-                    &self.decoration_config,
+                    &config,
                 )
             })
             .finish()
@@ -240,12 +305,54 @@ impl<'a> PreviewViewer<'a> {
             return interactive_text::paragraph(
                 settings,
                 text,
+                self.palette.foreground,
                 interactive_text::TextDecorations::default(),
             );
         };
 
         let decorations = self.decorations(element, preview_element);
 
-        interactive_text::paragraph(settings, text, decorations)
+        interactive_text::paragraph(settings, text, self.palette.foreground, decorations)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{markdown_style, surface_style};
+    use crate::theme::Palette;
+    use iced::Background;
+
+    /// The markdown style paints with palette roles: links take the accent,
+    /// inline code the foreground, and code sits on the raised surface —
+    /// never iced's stock `#111111` chip with white glyphs.
+    #[test]
+    fn markdown_style_uses_palette_roles() {
+        let mut palette = Palette::default();
+        palette.foreground = palette.red;
+        palette.accent = palette.blue;
+        palette.lighter_background = palette.green;
+        palette.dark_background = palette.yellow;
+
+        let style = markdown_style(&palette);
+
+        assert_eq!(style.link_color, palette.blue);
+        assert_eq!(style.inline_code_color, palette.red);
+        assert_eq!(
+            style.inline_code_highlight.background,
+            Background::Color(palette.raised())
+        );
+    }
+
+    /// The shared surface style paints the given color with rounded
+    /// corners and nothing else.
+    #[test]
+    fn surface_style_paints_only_the_surface() {
+        let palette = Palette::default();
+        let style = surface_style(palette.raised());
+
+        assert_eq!(style.background, Some(Background::Color(palette.raised())));
+        assert_eq!(style.text_color, None);
+        assert_eq!(style.border.width, 0.0);
+        assert_eq!(style.border.radius.top_left, 4.0);
     }
 }

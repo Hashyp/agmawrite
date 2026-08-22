@@ -255,6 +255,37 @@ impl Palette {
         let mix = |channel: f32| channel + (1.0 - channel) * factor;
         Color::from_rgb(mix(color.r), mix(color.g), mix(color.b))
     }
+
+    /// The raised surface color: one step lighter than the page on dark
+    /// themes, one step darker on light ones — the surface code and
+    /// tooltips paint on, never touching the page itself.
+    pub fn raised(&self) -> Color {
+        if self.light {
+            self.darker_background
+        } else {
+            self.lighter_background
+        }
+    }
+
+    /// The omarchy palette mapped onto iced's theme roles, so the runtime
+    /// theme and every default-styled widget follow omarchy colors.
+    pub fn iced(&self) -> iced::theme::Palette {
+        iced::theme::Palette {
+            background: self.background,
+            text: self.foreground,
+            primary: self.accent,
+            success: self.green,
+            warning: self.yellow,
+            danger: self.red,
+        }
+    }
+
+    /// The iced runtime theme built from this palette — widgets without an
+    /// explicit style (text inputs, scrollbars, checkboxes, rules, list
+    /// bullets) inherit omarchy colors instead of iced's stock ones.
+    pub fn runtime_theme(&self) -> iced::Theme {
+        iced::Theme::custom("omarchy", self.iced())
+    }
 }
 
 fn home() -> PathBuf {
@@ -383,6 +414,37 @@ broken = \"nope\"
             Color::from_rgb(0.75, 0.75, 0.75)
         ));
         assert!(close(Palette::darkened(color, 0.0), color));
+    }
+
+    /// The raised surface sits one step off the page on both modes and
+    /// never collapses into the page or its text.
+    #[test]
+    fn raised_surface_stays_off_the_page() {
+        let mut palette = Palette::default();
+
+        assert!(close(palette.raised(), palette.lighter_background));
+        assert_ne!(palette.raised(), palette.background);
+        assert_ne!(palette.raised(), palette.foreground);
+
+        palette.light = true;
+        assert!(close(palette.raised(), palette.darker_background));
+        assert_ne!(palette.raised(), palette.background);
+        assert_ne!(palette.raised(), palette.foreground);
+    }
+
+    /// The runtime theme carries the omarchy roles: its iced palette maps
+    /// onto this palette, so default-styled widgets inherit omarchy colors.
+    #[test]
+    fn runtime_theme_carries_the_omarchy_roles() {
+        let palette = Palette::default();
+        let theme = palette.runtime_theme();
+        let roles = theme.palette();
+
+        assert!(close(roles.background, palette.background));
+        assert!(close(roles.text, palette.foreground));
+        assert!(close(roles.primary, palette.accent));
+        assert!(close(roles.warning, palette.yellow));
+        assert!(close(roles.danger, palette.red));
     }
 
     /// An absent or unreadable omarchy state falls back to the default

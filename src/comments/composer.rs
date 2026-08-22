@@ -110,7 +110,7 @@ pub(crate) fn view(state: &State, palette: Palette) -> Element<'_, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(modal::backdrop),
+            .style(move |_theme| modal::backdrop(&palette)),
     )
     .on_press(Message::CloseComposer)
     .into()

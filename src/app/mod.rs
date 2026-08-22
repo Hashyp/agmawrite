@@ -390,11 +390,7 @@ pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {
 }
 
 pub(crate) fn theme(editor: &App) -> Theme {
-    if editor.palette.light {
-        Theme::Light
-    } else {
-        Theme::Dark
-    }
+    editor.palette.runtime_theme()
 }
 
 #[cfg(test)]

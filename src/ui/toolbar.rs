@@ -1,7 +1,7 @@
 //! Bottom-bar document controls and the current input-mode badge.
 
 use iced::widget::{button, canvas, container, row, text, tooltip, Space};
-use iced::{alignment, Background, Border, Color, Element, Font, Length, Theme};
+use iced::{alignment, Border, Color, Element, Font, Length, Theme};
 
 use super::icons::{OpenFileIcon, PreviewIcon, SaveIcon, WriteIcon, ICON_BUTTON_SIZE, ICON_SIZE};
 use crate::input::{ModeBadge, PreviewToggle, ToolbarPresentation};
@@ -43,7 +43,7 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
             .height(Length::Fixed(ICON_BUTTON_SIZE))
             .padding(0)
             .style(move |theme, status| icon_button_style(&palette, theme, status)),
-        tooltip_label("Ctrl + o, Open"),
+        tooltip_label("Ctrl + o, Open", palette),
         tooltip::Position::Top,
     );
 
@@ -54,7 +54,7 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
             .height(Length::Fixed(ICON_BUTTON_SIZE))
             .padding(0)
             .style(move |theme, status| icon_button_style(&palette, theme, status)),
-        tooltip_label("Ctrl + s, Save"),
+        tooltip_label("Ctrl + s, Save", palette),
         tooltip::Position::Top,
     );
 
@@ -68,7 +68,7 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 .height(Length::Fixed(ICON_BUTTON_SIZE))
                 .padding(0)
                 .style(move |theme, status| icon_button_style(&palette, theme, status)),
-            tooltip_label(label),
+            tooltip_label(label, model.palette),
             tooltip::Position::Top,
         );
         controls.push(toggle_button.into());
@@ -105,10 +105,10 @@ fn toggle_presentation(model: Model) -> Option<(&'static str, Element<'static, M
     }
 }
 
-fn tooltip_label(label: &'static str) -> container::Container<'static, Message> {
+fn tooltip_label(label: &'static str, palette: Palette) -> container::Container<'static, Message> {
     container(text(label).font(TOOLBAR_FONT).size(12))
         .padding([4, 8])
-        .style(tooltip_style)
+        .style(move |theme| crate::ui::tooltip::style(&palette, theme))
 }
 
 fn mode_badge(model: Model) -> Element<'static, Message> {
@@ -160,18 +160,6 @@ fn icon_button_style(palette: &Palette, _theme: &Theme, status: button::Status) 
         text_color: match status {
             button::Status::Hovered | button::Status::Pressed => palette.light_foreground,
             _ => palette.foreground,
-        },
-        ..Default::default()
-    }
-}
-
-fn tooltip_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.15))),
-        text_color: Some(Color::WHITE),
-        border: Border {
-            radius: 3.0.into(),
-            ..Border::default()
         },
         ..Default::default()
     }

@@ -78,6 +78,7 @@ pub struct TextDecorations {
 pub fn paragraph<'a, M: 'a>(
     settings: markdown::Settings,
     text: &markdown::Text,
+    color: Color,
     decorations: TextDecorations,
 ) -> Element<'a, M> {
     let spans: Vec<_> = text.spans(settings.style).iter().cloned().collect();
@@ -88,6 +89,7 @@ pub fn paragraph<'a, M: 'a>(
         size: settings.text_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.font,
+        color,
         _message: std::marker::PhantomData,
     })
 }
@@ -97,6 +99,7 @@ pub fn paragraph<'a, M: 'a>(
 pub fn code<'a, M: 'a>(
     settings: markdown::Settings,
     code: &str,
+    color: Color,
     decorations: TextDecorations,
 ) -> Element<'a, M> {
     let span: text::Span<'static, markdown::Uri, Font> =
@@ -108,6 +111,7 @@ pub fn code<'a, M: 'a>(
         size: settings.code_size,
         line_height: iced::advanced::text::LineHeight::default(),
         font: settings.style.code_block_font,
+        color,
         _message: std::marker::PhantomData,
     })
 }
@@ -118,6 +122,9 @@ struct InteractiveText<M> {
     size: Pixels,
     line_height: iced::advanced::text::LineHeight,
     font: Font,
+    /// The color plain spans paint with — the preview palette's
+    /// foreground, instead of the runtime theme's stock text color.
+    color: Color,
     /// The widget never emits a message; the type parameter only keeps the
     /// dependency pointing one way, from the app root to this leaf module.
     _message: std::marker::PhantomData<M>,
@@ -207,7 +214,7 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         tree: &Tree,
         renderer: &mut Renderer,
         _theme: &Theme,
-        defaults: &renderer::Style,
+        _defaults: &renderer::Style,
         layout: Layout<'_>,
         _cursor: iced::advanced::mouse::Cursor,
         viewport: &Rectangle,
@@ -325,7 +332,7 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
         renderer.fill_paragraph(
             &state.paragraph,
             layout.position() + text_offset,
-            defaults.text_color,
+            self.color,
             *viewport,
         );
     }

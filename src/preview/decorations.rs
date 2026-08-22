@@ -21,11 +21,10 @@ const ACTIVE_BORDER_WIDTH: f32 = 1.5;
 
 /// Producer configuration for one preview theme.
 ///
-/// Caret, visual-selection, and comment colors follow palette roles — the
-/// visual selection paints with the theme's own selection color, the same
-/// role the write-mode editor selects with. Only find highlights lack a
-/// palette role; their established colors live in the default annotation
-/// policy.
+/// Every color — caret, visual-selection, comment, and find — follows a
+/// palette role: the visual selection paints with the theme's own selection
+/// color, the same role the write-mode editor selects with, and find
+/// highlights tint the theme's yellow and orange.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Config {
     caret: Color,
@@ -42,27 +41,18 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_palette(palette: &Palette) -> Self {
-        let defaults = Self::default();
-
-        Self {
-            caret: palette.foreground,
-            visual_selection: palette.selection,
-            commented_border: palette.yellow,
-            active_border: palette.accent,
-            active_comment_tint: palette.tint(palette.accent, 0.09),
-            commented_span_tint: palette.tint(palette.yellow, 0.22),
-            find_match: defaults.find_match,
-            current_find_match: defaults.current_find_match,
-            commented_border_width: defaults.commented_border_width,
-            active_border_width: defaults.active_border_width,
-        }
+        Self::from_roles(palette)
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let palette = Palette::default();
+        Self::from_roles(&Palette::default())
+    }
+}
 
+impl Config {
+    fn from_roles(palette: &Palette) -> Self {
         Self {
             caret: palette.foreground,
             visual_selection: palette.selection,
@@ -70,8 +60,8 @@ impl Default for Config {
             active_border: palette.accent,
             active_comment_tint: palette.tint(palette.accent, 0.09),
             commented_span_tint: palette.tint(palette.yellow, 0.22),
-            find_match: Color::from_rgba(0.95, 0.75, 0.25, 0.4),
-            current_find_match: Color::from_rgba(0.98, 0.62, 0.15, 0.75),
+            find_match: palette.tint(palette.yellow, 0.4),
+            current_find_match: palette.tint(palette.orange, 0.75),
             commented_border_width: COMMENTED_BORDER_WIDTH,
             active_border_width: ACTIVE_BORDER_WIDTH,
         }
@@ -269,8 +259,14 @@ mod tests {
             config.commented_span_tint,
             palette.tint(palette.yellow, 0.22)
         );
-        assert_eq!(config.find_match, defaults.find_match);
-        assert_eq!(config.current_find_match, defaults.current_find_match);
+        // Find highlights tint the theme's yellow and orange, like every
+        // other annotation.
+        assert_eq!(config.find_match, palette.tint(palette.yellow, 0.4));
+        assert_eq!(
+            config.current_find_match,
+            palette.tint(palette.orange, 0.75)
+        );
+        // The geometry defaults stay fixed.
         assert_eq!(
             config.commented_border_width,
             defaults.commented_border_width

@@ -5,14 +5,18 @@
 //! primitives.
 
 use iced::widget::{button, container};
-use iced::{Background, Border, Color, Theme};
+use iced::{Background, Border, Theme};
 
 use crate::theme::Palette;
 
-/// The translucent scrim behind a modal card.
-pub(crate) fn backdrop(_theme: &Theme) -> container::Style {
+/// The translucent scrim behind a modal card: the theme's deepest
+/// background tinted over the page, dark on dark themes and grey on light
+/// ones.
+pub(crate) fn backdrop(palette: &Palette) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
+        background: Some(Background::Color(
+            palette.tint(palette.darker_background, 0.6),
+        )),
         ..Default::default()
     }
 }
@@ -60,15 +64,17 @@ mod tests {
     use super::{backdrop, card, quiet_button};
     use crate::theme::Palette;
     use iced::widget::button;
-    use iced::{Background, Color, Theme};
+    use iced::{Background, Theme};
 
     #[test]
     fn shared_modal_primitives_follow_the_neutral_palette() {
         let palette = Palette::default();
 
         assert_eq!(
-            backdrop(&Theme::Dark).background,
-            Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6)))
+            backdrop(&palette).background,
+            Some(Background::Color(
+                palette.tint(palette.darker_background, 0.6)
+            ))
         );
 
         let card = card(&palette);
