@@ -12,7 +12,8 @@ use iced::Color;
 
 use super::{element_selection, CaretPosition, PreviewElement};
 use crate::interactive_text::{
-    CaretDecoration, RangedBackground, RangedOutline, TextDecorations, WholeElementBackground,
+    CaretDecoration, CurrentLine, RangedBackground, RangedOutline, TextDecorations,
+    WholeElementBackground,
 };
 use crate::{comments, editing, theme::Palette};
 
@@ -21,13 +22,16 @@ const ACTIVE_BORDER_WIDTH: f32 = 1.5;
 
 /// Producer configuration for one preview theme.
 ///
-/// Every color — caret, visual-selection, comment, and find — follows a
-/// palette role: the visual selection paints with the theme's own selection
-/// color, the same role the write-mode editor selects with, and find
-/// highlights tint the theme's yellow and orange.
+/// Every color — caret, current line, visual-selection, comment, and find —
+/// follows a palette role: the visual selection paints with the theme's own
+/// selection color, the same role the write-mode editor selects with, the
+/// current line tints the theme's lighter background — a barely-there step
+/// off the page, fainter than any raised surface — and find highlights tint
+/// the theme's yellow and orange.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Config {
     caret: Color,
+    current_line: Color,
     visual_selection: Color,
     commented_border: Color,
     active_border: Color,
@@ -55,6 +59,7 @@ impl Config {
     fn from_roles(palette: &Palette) -> Self {
         Self {
             caret: palette.foreground,
+            current_line: palette.tint(palette.lighter_background, 0.4),
             visual_selection: palette.selection,
             commented_border: palette.yellow,
             active_border: palette.accent,
@@ -87,6 +92,22 @@ impl Pipeline {
 
     pub(crate) fn finish(self) -> TextDecorations {
         self.output
+    }
+}
+
+/// Appends the current-line band, if this is the caret's element.
+pub(crate) fn append_current_line(
+    output: &mut TextDecorations,
+    element: usize,
+    focused_element: usize,
+    column: usize,
+    config: &Config,
+) {
+    if element == focused_element {
+        output.current_line = Some(CurrentLine {
+            column,
+            color: config.current_line,
+        });
     }
 }
 
@@ -204,9 +225,14 @@ pub(crate) fn append_find(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_caret, append_comments, append_find, append_visual, Config, Pipeline};
+    use super::{
+        append_caret, append_comments, append_current_line, append_find, append_visual, Config,
+        Pipeline,
+    };
     use crate::comments;
-    use crate::interactive_text::{RangedBackground, RangedOutline, WholeElementBackground};
+    use crate::interactive_text::{
+        CurrentLine, RangedBackground, RangedOutline, WholeElementBackground,
+    };
     use crate::preview::{CaretPosition, State};
     use crate::theme::Palette;
     use iced::widget::text_editor::{Action, Edit};
@@ -246,6 +272,12 @@ mod tests {
         let config = Config::from_palette(&palette);
 
         assert_eq!(config.caret, palette.foreground);
+        // The current line tints the theme's lighter background — one subtle
+        // step off the page, fainter than the solid raised surface.
+        assert_eq!(
+            config.current_line,
+            palette.tint(palette.lighter_background, 0.4)
+        );
         // The visual selection paints with the theme's own selection role —
         // the same color the write-mode editor selects with.
         assert_eq!(config.visual_selection, palette.selection);
@@ -285,6 +317,9 @@ mod tests {
         let anchor = Id::unique();
 
         let decorations = Pipeline::new()
+            .append(|output| {
+                append_current_line(output, 0, 0, 7, &config);
+            })
             .append(|output| {
                 append_comments(
                     output,
@@ -356,6 +391,13 @@ mod tests {
             decorations.whole_element_background,
             Some(WholeElementBackground {
                 color: config.active_comment_tint,
+            })
+        );
+        assert_eq!(
+            decorations.current_line,
+            Some(CurrentLine {
+                column: 7,
+                color: config.current_line,
             })
         );
         assert_eq!(decorations.reveal_id, Some(anchor));
@@ -473,6 +515,26 @@ mod tests {
         );
         assert!(spot.whole_element_background.is_none());
         assert!(spot.reveal_id.is_none());
+    }
+
+    #[test]
+    fn current_line_band_marks_only_the_carets_element() {
+        let config = Config::from_palette(&Palette::default());
+        let mut decorations = crate::interactive_text::TextDecorations::default();
+
+        // An element the caret is not on carries no band.
+        append_current_line(&mut decorations, 1, 0, 3, &config);
+        assert_eq!(decorations.current_line, None);
+
+        // The caret's element carries the band at its column.
+        append_current_line(&mut decorations, 0, 0, 3, &config);
+        assert_eq!(
+            decorations.current_line,
+            Some(CurrentLine {
+                column: 3,
+                color: config.current_line,
+            })
+        );
     }
 
     #[test]

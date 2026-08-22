@@ -53,6 +53,14 @@ pub struct RangedOutline {
     pub width: f32,
 }
 
+/// The current line painted as a band: a full-width highlight on the
+/// wrapped line the caret's grapheme column sits on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurrentLine {
+    pub column: usize,
+    pub color: Color,
+}
+
 /// A background tint covering the whole interactive element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WholeElementBackground {
@@ -62,10 +70,12 @@ pub struct WholeElementBackground {
 /// Generic decorations painted around Markdown text.
 ///
 /// Ranged backgrounds are painted in vector order. The complete layer order
-/// is Markdown span backgrounds, the whole-element background, ranged
-/// backgrounds, ranged outlines, the caret, and finally the text.
+/// is Markdown span backgrounds, the current line, the whole-element
+/// background, ranged backgrounds, ranged outlines, the caret, and finally
+/// the text.
 #[derive(Debug, Clone, Default)]
 pub struct TextDecorations {
+    pub current_line: Option<CurrentLine>,
     pub whole_element_background: Option<WholeElementBackground>,
     pub ranged_backgrounds: Vec<RangedBackground>,
     pub ranged_outlines: Vec<RangedOutline>,
@@ -241,10 +251,38 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
             }
         }
 
-        // Whole-element decorations paint above Markdown span backgrounds and
-        // below every ranged annotation.
+        let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
+        let line_height = self.line_height.to_absolute(self.size).0;
+        let width = state.paragraph.min_bounds().width;
         let bounds = layout.bounds();
 
+        // The current line paints above Markdown's own span backgrounds but
+        // below every annotation tint: a full-width band on the caret's
+        // wrapped line, so every highlight painted later stays legible over
+        // it.
+        if let Some(current_line) = self.decorations.current_line {
+            let origin = caret_point(
+                &state.paragraph,
+                &text,
+                current_line.column,
+                width,
+                line_height,
+            );
+
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(bounds.x, translation.y + origin.y),
+                        Size::new(bounds.width, line_height),
+                    ),
+                    ..Default::default()
+                },
+                current_line.color,
+            );
+        }
+
+        // Whole-element decorations paint above the current line and below
+        // every ranged annotation.
         if let Some(background) = self.decorations.whole_element_background {
             renderer.fill_quad(
                 renderer::Quad {
@@ -254,10 +292,6 @@ impl<M> Widget<M, Theme, Renderer> for InteractiveText<M> {
                 background.color,
             );
         }
-
-        let text: String = self.spans.iter().map(|span| span.text.as_ref()).collect();
-        let line_height = self.line_height.to_absolute(self.size).0;
-        let width = state.paragraph.min_bounds().width;
 
         // Ranged annotations paint in model order. The preview supplies the
         // comment span, ordinary find matches, current find match, and visual
@@ -558,6 +592,7 @@ mod tests {
         };
 
         assert_eq!(decorations.ranged_backgrounds, vec![first, second]);
+        assert!(decorations.current_line.is_none());
         assert!(decorations.whole_element_background.is_none());
         assert!(decorations.ranged_outlines.is_empty());
         assert!(decorations.caret.is_none());

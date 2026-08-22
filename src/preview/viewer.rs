@@ -248,9 +248,18 @@ impl<'a> PreviewViewer<'a> {
         let config = Config::from_palette(&self.palette);
 
         Pipeline::new()
-            // Preserve paint order: comment element tint and outlines, span
-            // tint, ordinary/current find matches, visual selection, then
-            // caret.
+            // Preserve paint order: the current-line band, comment element
+            // tint and outlines, span tint, ordinary/current find matches,
+            // visual selection, then caret.
+            .append(|output| {
+                decorations::append_current_line(
+                    output,
+                    element,
+                    self.focused_element,
+                    self.caret_column,
+                    &config,
+                )
+            })
             .append(|output| {
                 decorations::append_comments(
                     output,
