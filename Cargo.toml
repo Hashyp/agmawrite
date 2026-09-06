@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 iced = { version = "0.14.0", features = ["advanced", "canvas", "markdown"] }
 notify = "8"
 pulldown-cmark = "0.12"

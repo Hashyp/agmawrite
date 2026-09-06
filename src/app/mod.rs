@@ -1,6 +1,7 @@
 //! Application composition and cross-feature coordination.
 mod coordination;
 mod shell;
+mod status;
 
 use crate::cli::Args;
 use crate::input::{
@@ -27,6 +28,7 @@ pub(crate) struct App {
     find: find::State,
     help: help::Help,
     palette: Palette,
+    status_metadata: ui::status_bar::metadata::Metadata,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +40,9 @@ pub(crate) enum Message {
     Help(help::Message),
     Input(InputMessage),
     Toolbar(ui::toolbar::Message),
+    StatusBar(ui::status_bar::Message),
     Theme(theme::Event),
+    StatusMetadata(ui::status_bar::metadata::Metadata),
 }
 
 fn message_for_command(command: Command) -> Message {
@@ -95,6 +99,13 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
         .map(Message::Document);
 
     let theme = theme::subscription().map(Message::Theme);
+    let metadata = if ui::status_bar::visible(editor.interaction.view()) {
+        ui::status_bar::metadata::subscription(editor.document.path().map(ToOwned::to_owned))
+            .map(Message::StatusMetadata)
+    } else {
+        Subscription::none()
+    };
+    let theme = Subscription::batch([theme, metadata]);
 
     match editor.document.path() {
         Some(path) => Subscription::batch([
@@ -117,7 +128,13 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.interaction.push_count_digit(digit);
             return Task::none();
         }
-        Message::Toolbar(message) => message_for_toolbar(message),
+        Message::Toolbar(message)
+        | Message::StatusBar(ui::status_bar::Message::Toolbar(message)) => {
+            message_for_toolbar(message)
+        }
+        Message::StatusBar(ui::status_bar::Message::ToggleComments) => {
+            Message::Comments(comments::Message::ToggleSidebar)
+        }
         message => message,
     };
 
@@ -157,6 +174,10 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
                 event.map_or_else(Task::none, |event| handle_document_event(editor, event));
             editor.interaction.activity();
             Task::batch([task.map(Message::Document), event_task])
+        }
+        Message::StatusMetadata(metadata) => {
+            editor.status_metadata = metadata;
+            Task::none()
         }
         Message::Theme(theme::Event::Changed) => {
             editor.palette = Palette::current();
@@ -257,7 +278,7 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.help.update(message);
             Task::none()
         }
-        Message::Input(_) | Message::Toolbar(_) => {
+        Message::Input(_) | Message::Toolbar(_) | Message::StatusBar(_) => {
             unreachable!("boundary messages are translated before delegation")
         }
     }
@@ -323,8 +344,13 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
         .then(|| comments::composer::view(&editor.comments, palette).map(Message::Comments));
     let editing_area = shell::stack_layers(base_area, note);
 
-    let toolbar = ui::toolbar::view(ui::toolbar::Model::new(interaction.toolbar(), palette))
-        .map(Message::Toolbar);
+    let show_status = ui::status_bar::visible(interaction);
+    let toolbar = if show_status {
+        iced::widget::Space::new().into()
+    } else {
+        ui::toolbar::view(ui::toolbar::Model::new(interaction.toolbar(), palette))
+            .map(Message::Toolbar)
+    };
     let sidebar = comments::sidebar::view(
         &editor.comments,
         comments::sidebar::ViewContext {
@@ -332,10 +358,19 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
             preview_elements: editor.preview.elements(),
             palette,
             font: EDITOR_FONT,
+            collapsed_rail: !show_status,
         },
     )
     .map(Message::Comments);
     let base = shell::layout(editing_area, toolbar, sidebar, palette.background);
+    let base = if show_status {
+        shell::with_status_bar(
+            base,
+            ui::status_bar::view(status::model(editor, &source)).map(Message::StatusBar),
+        )
+    } else {
+        base
+    };
 
     let find = interaction
         .contains(Overlay::Find)
@@ -378,6 +413,7 @@ pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {
         find: find::State::new(),
         help: help::Help::new(),
         palette: Palette::current(),
+        status_metadata: ui::status_bar::metadata::Metadata::default(),
     };
 
     let task = if args.preview {

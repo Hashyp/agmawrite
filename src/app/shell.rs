@@ -80,6 +80,21 @@ pub(crate) fn layout<'a, Message: 'a>(
     .into()
 }
 
+/// A global, fixed-height status line spans the entire window, including the
+/// sidebar, just like LazyVim's `globalstatus`. The body keeps its own margins.
+pub(crate) fn with_status_bar<'a, Message: 'a>(
+    body: Element<'a, Message>,
+    bar: Element<'a, Message>,
+) -> Element<'a, Message> {
+    column![
+        container(body).width(Length::Fill).height(Length::Fill),
+        bar
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn root_background(background: Color) -> container::Style {
     container::Style {
         background: Some(Background::Color(background)),

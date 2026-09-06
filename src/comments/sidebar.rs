@@ -23,6 +23,8 @@ pub(crate) struct ViewContext<'a> {
     pub(crate) preview_elements: &'a [PreviewElement],
     pub(crate) palette: Palette,
     pub(crate) font: Font,
+    /// Preview's status bar provides the toggle instead of the icon rail.
+    pub(crate) collapsed_rail: bool,
 }
 
 /// Builds either the full sidebar or its collapsed rail. The comments feature
@@ -39,12 +41,14 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'_>) -> Element<'a
         .width(Length::Fixed(SIDEBAR_WIDTH))
         .height(Length::Fill)
         .into()
-    } else {
+    } else if context.collapsed_rail {
         row![
             edge_separator(context.palette),
             collapsed(state, context.palette, context.font)
         ]
         .into()
+    } else {
+        Space::new().into()
     }
 }
 
@@ -513,6 +517,7 @@ mod tests {
             preview_elements: elements.elements(),
             palette: Palette::default(),
             font: FONT,
+            collapsed_rail: true,
         };
         let mut state = State::new();
 

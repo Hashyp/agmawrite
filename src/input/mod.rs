@@ -21,4 +21,5 @@ pub(crate) use command::{
 pub(crate) use guard::guard;
 pub(crate) use state::{
     FocusTarget, InteractionState, ModeBadge, Overlay, PreviewToggle, Surface, ToolbarPresentation,
+    ViewProjection,
 };

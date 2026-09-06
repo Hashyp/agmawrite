@@ -64,6 +64,7 @@ fn app_at(contents: &str, position: CaretPosition) -> App {
         find: find::State::new(),
         help: super::help::Help::new(),
         palette: Palette::default(),
+        status_metadata: super::ui::status_bar::metadata::Metadata::default(),
     }
 }
 
@@ -143,6 +144,51 @@ fn toolbar_actions_map_to_document_and_preview_interactions() {
 }
 
 #[test]
+fn status_bar_keeps_existing_actions_and_metadata_does_not_consume_counts() {
+    use super::ui::status_bar::{metadata::Metadata, Message as StatusMessage};
+    let mut editor = app_at(
+        "body",
+        CaretPosition {
+            element: 0,
+            column: 0,
+        },
+    );
+    editor.interaction.push_count_digit(3);
+    let _ = update(&mut editor, Message::StatusMetadata(Metadata::default()));
+    assert_eq!(pending_count(&editor), 3);
+
+    let _ = update(
+        &mut editor,
+        Message::StatusBar(StatusMessage::ToggleComments),
+    );
+    assert!(is_preview(&editor));
+    let _ = update(
+        &mut editor,
+        Message::StatusBar(StatusMessage::Toolbar(toolbar::Message::TogglePreview)),
+    );
+    assert!(!is_preview(&editor));
+}
+
+#[test]
+fn preview_only_status_bar_cannot_enable_writing() {
+    let mut editor = app_at(
+        "body",
+        CaretPosition {
+            element: 0,
+            column: 0,
+        },
+    );
+    editor.interaction = InteractionState::preview_only();
+    let _ = update(
+        &mut editor,
+        Message::StatusBar(super::ui::status_bar::Message::Toolbar(
+            toolbar::Message::TogglePreview,
+        )),
+    );
+    assert!(is_preview(&editor));
+}
+
+#[test]
 fn rejected_feature_operations_do_not_transition_interaction_state() {
     let mut editor = App {
         document: super::document::State::new("body", None),
@@ -152,6 +198,7 @@ fn rejected_feature_operations_do_not_transition_interaction_state() {
         find: find::State::new(),
         help: super::help::Help::new(),
         palette: Palette::default(),
+        status_metadata: super::ui::status_bar::metadata::Metadata::default(),
     };
 
     let _ = update(
@@ -385,6 +432,7 @@ fn help_preserves_underlying_editor_state() {
         find: find::State::new(),
         help: super::help::Help::new(),
         palette: Palette::default(),
+        status_metadata: super::ui::status_bar::metadata::Metadata::default(),
     };
     source.document.move_to(Cursor {
         position: Position { line: 1, column: 3 },
