@@ -73,6 +73,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Save the document; save the note when its popup is open.",
     ),
     ("Ctrl + F", "Open find in the document."),
+    (
+        "/",
+        "Open find from the preview canvas (view or visual mode).",
+    ),
     ("Ctrl + G", "Find the next match while find is open."),
     ("Ctrl + B", "Show or hide the comments sidebar."),
     ("Ctrl + N", "Jump to the next saved comment in preview."),

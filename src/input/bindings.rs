@@ -295,6 +295,7 @@ fn route_preview(pending: Pending, event: &iced::Event) -> Decision {
     let jump_count = pending.jump_count();
 
     match modified_key.as_ref() {
+        keyboard::Key::Character("/") => one_shot(*repeat, Command::Find(FindCommand::Open)),
         keyboard::Key::Named(keyboard::key::Named::ArrowUp)
         | keyboard::Key::Character("k" | "K") => execute(Command::Preview(PreviewCommand::Move(
             Motion::Up,
@@ -568,6 +569,52 @@ mod tests {
 
     fn dispatch(command: Command) -> Decision {
         Decision::Dispatch(InputMessage::Execute(command))
+    }
+
+    #[test]
+    fn slash_opens_find_on_every_preview_canvas() {
+        for state in [
+            editable_preview(false),
+            editable_preview(true),
+            preview_only(false),
+            preview_only(true),
+        ] {
+            assert_eq!(
+                route(&state, &character("/")),
+                dispatch(Command::Find(FindCommand::Open))
+            );
+            // Some layouts produce slash with Shift.
+            assert_eq!(
+                route(&state, &character_with("/", Modifiers::SHIFT, false)),
+                dispatch(Command::Find(FindCommand::Open))
+            );
+            assert_eq!(
+                route(&state, &character_with("/", Modifiers::default(), true)),
+                Decision::Capture
+            );
+        }
+    }
+
+    #[test]
+    fn slash_remains_text_in_editable_fields_and_preserves_help_chord() {
+        for state in [
+            InteractionState::editable(),
+            note(editable_preview(false)),
+            find(editable_preview(false)),
+            find(preview_only(true)),
+        ] {
+            assert_eq!(route(&state, &character("/")), Decision::Pass);
+        }
+        let mut help = editable_preview(false);
+        help.open_help();
+        assert_eq!(route(&help, &character("/")), Decision::Pass);
+        assert_eq!(
+            route(
+                &editable_preview(false),
+                &character_with("/", Modifiers::CTRL, false)
+            ),
+            dispatch(Command::Help(HelpCommand::Open))
+        );
     }
 
     #[test]
