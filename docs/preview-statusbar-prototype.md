@@ -25,10 +25,12 @@ Based on this computer's installed LazyVim Lualine configuration:
 - `~/.local/share/nvim/lazy/LazyVim/lua/lazyvim/plugins/ui.lua`
 - Lualine's default Powerline section separators.
 - `nightfox.nvim/lua/nightfox/util/lualine.lua` (current Neovim: nordfox).
-- The installed `JetBrainsMono Nerd Font`, at 12 logical pixels.
+- The installed `JetBrainsMono Nerd Font`, at 14 logical pixels.
 
-A 26px strip uses a bold mode block, branch, Markdown file name, a flexible
-middle, text actions, progress/location, and a local 24-hour clock. Mode names
+A 32px strip uses a bold mode block, branch, Markdown file name, a flexible
+middle, text actions, progress/location, and a far-right Comments button in the
+accent-colored end section. Buttons and passive labels share the same vertically
+centered geometry. The clock has been removed. Mode names
 are VIEW / VISUAL rather than pretending the application is in Vim NORMAL mode.
 Blue and magenta come from the live Omarchy palette; secondary sections blend
 30% of the mode color into the dark background, matching Nightfox's Lualine
@@ -46,14 +48,14 @@ uses the latest palette, including the wedges, tooltips and action hover colors.
   blocks mean it is not an exact source cursor mapping.
 - Progress follows Lualine's **caret-line** convention: Top / percentage / Bot,
   not viewport scroll percentage. Mouse scrolling does not move the caret.
-- Git HEAD and local time refresh off the UI thread every two seconds while
+- Git HEAD refreshes off the UI thread every two seconds while
   preview is visible. Ordinary repositories, detached HEADs and worktree
   `.git` pointers are supported. Missing/unreadable Git metadata is hidden.
-- Long labels truncate; narrower windows hide branch, file, clock and ruler
+- Long labels truncate; narrower windows hide branch, file and ruler
   segments before the action controls. Full file paths have a tooltip when
   the file segment is visible.
 - The local Nerd Font is not bundled. Other machines need that font for the
-  exact typography and decorative branch/file/clock glyphs.
+  exact typography and decorative branch/file glyphs.
 - Find and note overlays retain their existing behavior and placement. The bar
   continues naming the underlying preview mode while overlays are open.
 - This deliberately follows the new prototype request rather than the older

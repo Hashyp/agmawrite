@@ -21,7 +21,8 @@ use crate::input::{Surface, ViewProjection};
 use crate::theme::Palette;
 use metadata::Metadata;
 
-const HEIGHT: f32 = 26.0;
+const HEIGHT: f32 = 32.0;
+const FONT_SIZE: f32 = 14.0;
 const FONT: Font = Font::with_name("JetBrainsMono Nerd Font");
 const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
@@ -129,7 +130,7 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
             .metadata
             .branch
             .as_ref()
-            .filter(|_| size.width >= 1100.0);
+            .filter(|_| size.width >= 1200.0);
         if let Some(branch) = branch {
             segments.push(separator(colors.mode, colors.raised, false));
             segments.push(segment(
@@ -142,10 +143,10 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
         } else {
             segments.push(separator(colors.mode, colors.base, false));
         }
-        if size.width >= 800.0 {
+        if size.width >= 900.0 {
             let label = format!(
                 "󰍔 {}",
-                shorten(&model.filename, if size.width < 1100.0 { 18 } else { 32 })
+                shorten(&model.filename, if size.width < 1200.0 { 18 } else { 32 })
             );
             segments.push(
                 tooltip(
@@ -192,19 +193,8 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 model.palette,
             ));
         }
-        segments.push(segment("", colors.base, colors.raised, false));
-        segments.push(action(
-            if compact {
-                "Comments".to_owned()
-            } else {
-                format!("Comments {}", model.comment_count)
-            },
-            "Toggle comments sidebar · Ctrl + B",
-            Message::ToggleComments,
-            colors,
-            model.palette,
-        ));
-        if size.width >= 560.0 {
+        let show_ruler = size.width >= 640.0;
+        if show_ruler {
             segments.push(separator(colors.raised, colors.base, true));
             segments.push(segment(
                 format!("{}  {}", model.progress, model.location),
@@ -213,15 +203,31 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 false,
             ));
         }
-        if !compact {
-            segments.push(separator(colors.mode, colors.raised, true));
-            segments.push(segment(
-                format!(" {}", model.metadata.clock),
-                colors.mode,
-                colors.on_mode,
-                true,
-            ));
-        }
+        segments.push(separator(
+            colors.mode,
+            if show_ruler {
+                colors.raised
+            } else {
+                colors.base
+            },
+            true,
+        ));
+        segments.push(action(
+            if compact {
+                "Comments".to_owned()
+            } else {
+                format!("Comments {}", model.comment_count)
+            },
+            "Toggle comments sidebar · Ctrl + B",
+            Message::ToggleComments,
+            Colors {
+                base: colors.mode,
+                raised: Palette::darkened(colors.mode, 0.12),
+                foreground: colors.on_mode,
+                ..colors
+            },
+            model.palette,
+        ));
         container(row(segments).align_y(alignment::Vertical::Center))
             .width(Length::Fill)
             .height(HEIGHT)
@@ -252,21 +258,27 @@ fn segment(
     foreground: Color,
     bold: bool,
 ) -> Element<'static, Message> {
+    centered_label(label, bold)
+        .padding([0, 8])
+        .style(move |_| container::Style {
+            background: Some(background.into()),
+            text_color: Some(foreground),
+            ..Default::default()
+        })
+        .into()
+}
+
+// Buttons and passive segments use identical label geometry, so their text
+// shares a baseline instead of buttons placing their labels at the top edge.
+fn centered_label(label: impl Into<String>, bold: bool) -> container::Container<'static, Message> {
     container(
         text(label.into())
             .font(if bold { BOLD } else { FONT })
-            .size(12)
+            .size(FONT_SIZE)
             .wrapping(text::Wrapping::None),
     )
-    .padding([0, 8])
     .height(HEIGHT)
     .align_y(alignment::Vertical::Center)
-    .style(move |_| container::Style {
-        background: Some(background.into()),
-        text_color: Some(foreground),
-        ..Default::default()
-    })
-    .into()
 }
 
 fn action(
@@ -277,23 +289,18 @@ fn action(
     palette: Palette,
 ) -> Element<'static, Message> {
     tooltip(
-        button(
-            text(label.into())
-                .font(FONT)
-                .size(12)
-                .wrapping(text::Wrapping::None),
-        )
-        .padding([0, 6])
-        .height(HEIGHT)
-        .on_press(message)
-        .style(move |_, status| button::Style {
-            background: Some(Background::Color(match status {
-                button::Status::Hovered | button::Status::Pressed => colors.raised,
-                _ => colors.base,
-            })),
-            text_color: colors.foreground,
-            ..Default::default()
-        }),
+        button(centered_label(label, false))
+            .padding([0, 6])
+            .height(HEIGHT)
+            .on_press(message)
+            .style(move |_, status| button::Style {
+                background: Some(Background::Color(match status {
+                    button::Status::Hovered | button::Status::Pressed => colors.raised,
+                    _ => colors.base,
+                })),
+                text_color: colors.foreground,
+                ..Default::default()
+            }),
         container(text(hint).font(FONT).size(12))
             .padding([4, 8])
             .style(move |theme| super::tooltip::style(&palette, theme)),

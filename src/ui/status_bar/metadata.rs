@@ -5,19 +5,9 @@ use std::time::Duration;
 
 use iced::Subscription;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Metadata {
     pub(crate) branch: Option<String>,
-    pub(crate) clock: String,
-}
-
-impl Default for Metadata {
-    fn default() -> Self {
-        Self {
-            branch: None,
-            clock: chrono::Local::now().format("%H:%M").to_string(),
-        }
-    }
 }
 
 /// Restart on document changes; poll HEAD too, so external branch switches and
@@ -33,7 +23,6 @@ pub(crate) fn subscription(path: Option<PathBuf>) -> Subscription<Metadata> {
                     loop {
                         let metadata = Metadata {
                             branch: path.as_deref().and_then(branch_for_file),
-                            ..Metadata::default()
                         };
                         if previous.as_ref() != Some(&metadata) {
                             match sender.try_send(metadata.clone()) {
