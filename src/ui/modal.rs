@@ -59,9 +59,35 @@ pub(crate) fn quiet_button(
     }
 }
 
+/// The keyboard-focused sibling of [`quiet_button`]: the same low-
+/// emphasis action with the theme's accent border and a faint accent
+/// wash, marking where `Enter` will land.
+pub(crate) fn focused_button(
+    palette: &Palette,
+    _theme: &Theme,
+    status: button::Status,
+) -> button::Style {
+    let quiet = quiet_button(palette, _theme, status);
+
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => quiet.background,
+        _ => Some(Background::Color(palette.tint(palette.accent, 0.12))),
+    };
+
+    button::Style {
+        background,
+        border: Border {
+            color: palette.accent,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..quiet
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{backdrop, card, quiet_button};
+    use super::{backdrop, card, focused_button, quiet_button};
     use crate::theme::Palette;
     use iced::widget::button;
     use iced::{Background, Theme};
@@ -86,5 +112,16 @@ mod tests {
         assert_eq!(idle.background, None);
         assert!(hovered.background.is_some());
         assert_eq!(idle.border.color, palette.muted);
+
+        // The keyboard-focused variant keeps the quiet shape but swaps in
+        // the accent border and a faint accent wash.
+        let focused = focused_button(&palette, &Theme::Dark, button::Status::Active);
+        assert_eq!(focused.border.color, palette.accent);
+        assert_eq!(focused.border.radius, idle.border.radius);
+        assert!(focused.background.is_some());
+
+        let focused_hover =
+            focused_button(&palette, &Theme::Dark, button::Status::Hovered);
+        assert_eq!(focused_hover.background, hovered.background);
     }
 }

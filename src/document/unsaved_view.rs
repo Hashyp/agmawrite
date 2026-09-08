@@ -9,12 +9,43 @@ use iced::{Element, Font, Length};
 use crate::theme::Palette;
 use crate::ui::modal;
 
-use super::{Message, UnsavedAction};
+use super::{Message, UnsavedAction, UnsavedButton};
 
 const EDITOR_FONT: Font = Font::with_name("iA Writer Mono S");
 
-/// Renders the modal for the pending guarded document action.
-pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, Message> {
+/// Renders the modal for the pending guarded document action. `focus` is
+/// the button `j`/`k` navigation highlights — the accent-outlined one —
+/// while `Enter` always saves, so the prompt opens focused on Save.
+pub(crate) fn view(
+    action: UnsavedAction,
+    focus: UnsavedButton,
+    palette: Palette,
+) -> Element<'static, Message> {
+    let button = |label: &'static str,
+                  message: Message,
+                  focused: bool,
+                  color: iced::Color| {
+        button(
+            text(label)
+                .font(EDITOR_FONT)
+                .size(14)
+                .color(if focused {
+                    palette.foreground
+                } else {
+                    color
+                }),
+        )
+        .on_press(message)
+        .padding([6, 12])
+        .style(move |theme, status| {
+            if focused {
+                modal::focused_button(&palette, theme, status)
+            } else {
+                modal::quiet_button(&palette, theme, status)
+            }
+        })
+    };
+
     let card = mouse_area(
         container(
             column![
@@ -28,33 +59,24 @@ pub(crate) fn view(action: UnsavedAction, palette: Palette) -> Element<'static, 
                     .color(palette.light_foreground),
                 row![
                     button(
-                        text("Cancel")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.light_foreground),
-                    )
-                    .on_press(Message::UnsavedCancel)
-                    .padding([6, 12])
-                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
+                        "Cancel",
+                        Message::UnsavedCancel,
+                        focus == UnsavedButton::Cancel,
+                        palette.light_foreground,
+                    ),
                     Space::new().width(Length::Fill),
                     button(
-                        text("Save")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.foreground),
-                    )
-                    .on_press(Message::UnsavedSave)
-                    .padding([6, 12])
-                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
+                        "Save",
+                        Message::UnsavedSave,
+                        focus == UnsavedButton::Save,
+                        palette.foreground,
+                    ),
                     button(
-                        text("Discard")
-                            .font(EDITOR_FONT)
-                            .size(14)
-                            .color(palette.red),
-                    )
-                    .on_press(Message::UnsavedDiscard)
-                    .padding([6, 12])
-                    .style(move |theme, status| { modal::quiet_button(&palette, theme, status) }),
+                        "Discard",
+                        Message::UnsavedDiscard,
+                        focus == UnsavedButton::Discard,
+                        palette.red,
+                    ),
                 ]
                 .width(Length::Fill),
             ]

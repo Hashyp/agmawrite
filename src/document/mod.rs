@@ -14,6 +14,38 @@ pub(crate) enum UnsavedAction {
     CloseWindow(iced::window::Id),
 }
 
+/// A button of the unsaved-changes dialog, in display order. The prompt
+/// opens focused on Save — `Enter` confirms it — and `j`/`k` step through
+/// the row, wrapping around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsavedButton {
+    Cancel,
+    Save,
+    Discard,
+}
+
+impl UnsavedButton {
+    pub(crate) const DEFAULT: Self = Self::Save;
+
+    /// The button to the right, wrapping around the row.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Cancel => Self::Save,
+            Self::Save => Self::Discard,
+            Self::Discard => Self::Cancel,
+        }
+    }
+
+    /// The button to the left, wrapping around the row.
+    pub(crate) fn previous(self) -> Self {
+        match self {
+            Self::Cancel => Self::Discard,
+            Self::Save => Self::Cancel,
+            Self::Discard => Self::Save,
+        }
+    }
+}
+
 /// Why the app needs to refresh projections derived from the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceReplacement {
@@ -38,6 +70,10 @@ pub(crate) enum Message {
     UnsavedCancel,
     UnsavedSave,
     UnsavedDiscard,
+    /// Steps the prompt's focused button forward (`j`).
+    UnsavedFocusNext,
+    /// Steps the prompt's focused button backward (`k`).
+    UnsavedFocusPrevious,
     /// Starts a save and resumes this guarded action only after a clean result.
     SaveThen(UnsavedAction),
     /// Executes an action extracted from the interaction-owned prompt.
@@ -85,6 +121,8 @@ pub(crate) struct State {
     saved_contents: String,
     /// A guarded action waiting for an asynchronous save to finish.
     after_save: Option<UnsavedAction>,
+    /// The button the unsaved-changes prompt highlights, when it is up.
+    unsaved_focus: UnsavedButton,
 }
 
 impl State {
@@ -94,6 +132,7 @@ impl State {
             path,
             saved_contents: contents.to_owned(),
             after_save: None,
+            unsaved_focus: UnsavedButton::DEFAULT,
         }
     }
 
@@ -110,6 +149,11 @@ impl State {
     /// The file the document came from and saves back to, once known.
     pub(crate) fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// The button the unsaved-changes prompt highlights.
+    pub(crate) fn unsaved_focus(&self) -> UnsavedButton {
+        self.unsaved_focus
     }
 
     /// Whether the live source differs from the last loaded or saved
@@ -183,7 +227,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
         }
         Message::OpenRequested => {
             if state.is_modified() {
-                request_unsaved(UnsavedAction::OpenFile)
+                request_unsaved(state, UnsavedAction::OpenFile)
             } else {
                 Update::task(Task::perform(io::open(), Message::OpenLoaded))
             }
@@ -215,7 +259,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
 
             if let Some(action) = state.after_save.take() {
                 if state.is_modified() {
-                    return request_unsaved(action);
+                    return request_unsaved(state, action);
                 }
 
                 return run_unsaved_action(action);
@@ -234,6 +278,14 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
         | Message::UnsavedCancel
         | Message::UnsavedSave
         | Message::UnsavedDiscard => Update::none(),
+        Message::UnsavedFocusNext => {
+            state.unsaved_focus = state.unsaved_focus.next();
+            Update::none()
+        }
+        Message::UnsavedFocusPrevious => {
+            state.unsaved_focus = state.unsaved_focus.previous();
+            Update::none()
+        }
         Message::SaveThen(action) => {
             state.after_save = Some(action);
             Update::task(start_save(state))
@@ -241,7 +293,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Update {
         Message::RunUnsavedAction(action) => run_unsaved_action(action),
         Message::CloseRequested(id) => {
             if state.is_modified() {
-                request_unsaved(UnsavedAction::CloseWindow(id))
+                request_unsaved(state, UnsavedAction::CloseWindow(id))
             } else {
                 Update::event(Event::CloseWindow(id))
             }
@@ -271,7 +323,10 @@ pub(crate) fn subscription(path: &Path) -> Subscription<Message> {
     watch::subscription(path).map(|_event| Message::ExternalChange)
 }
 
-fn request_unsaved(action: UnsavedAction) -> Update {
+fn request_unsaved(state: &mut State, action: UnsavedAction) -> Update {
+    // Every prompt — including a reopened one after a stale save — starts
+    // focused on Save, matching what `Enter` confirms.
+    state.unsaved_focus = UnsavedButton::DEFAULT;
     Update::event(Event::UnsavedConfirmationRequested(action))
 }
 
@@ -350,7 +405,9 @@ fn clamp_position(
 
 #[cfg(test)]
 mod tests {
-    use super::{update, Event, Message, SourceReplacement, State, UnsavedAction};
+    use super::{
+        update, Event, Message, SourceReplacement, State, UnsavedAction, UnsavedButton,
+    };
     use iced::widget::text_editor::{Action, Cursor, Edit, Position};
 
     fn insert(character: char) -> Action {
@@ -440,6 +497,38 @@ mod tests {
             document.content().cursor().position,
             Position { line: 2, column: 0 }
         );
+    }
+
+    #[test]
+    fn unsaved_focus_cycles_and_resets_on_each_prompt() {
+        let mut document = State::new("draft", Some("/tmp/document-focus.md".into()));
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Save);
+
+        update(&mut document, Message::UnsavedFocusPrevious);
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Cancel);
+        update(&mut document, Message::UnsavedFocusPrevious);
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Discard);
+        update(&mut document, Message::UnsavedFocusNext);
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Cancel);
+        update(&mut document, Message::UnsavedFocusNext);
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Save);
+
+        // A reopened prompt — here after a stale guarded save — starts
+        // focused on Save again.
+        update(&mut document, Message::Edit(insert('!')));
+        update(&mut document, Message::UnsavedFocusPrevious);
+        update(&mut document, Message::SaveThen(UnsavedAction::OpenFile));
+        let snapshot = document.text();
+        update(&mut document, Message::Edit(insert('?')));
+        let result = update(
+            &mut document,
+            Message::Saved(Ok("saved".into()), snapshot),
+        );
+        assert_eq!(
+            result.event,
+            Some(Event::UnsavedConfirmationRequested(UnsavedAction::OpenFile))
+        );
+        assert_eq!(document.unsaved_focus(), UnsavedButton::Save);
     }
 
     #[test]

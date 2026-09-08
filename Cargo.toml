@@ -9,3 +9,9 @@ notify = "8"
 pulldown-cmark = "0.12"
 rfd = "0.15"
 unicode-segmentation = "1"
+
+# agmawrite fork of iced_graphics: the source editor lays blank lines out
+# taller, visually separating Markdown paragraphs (see
+# vendor/iced_graphics/src/text/editor.rs).
+[patch.crates-io]
+iced_graphics = { path = "vendor/iced_graphics" }

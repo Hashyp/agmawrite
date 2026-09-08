@@ -51,6 +51,9 @@ fn message_for_command(command: Command) -> Message {
             DocumentCommand::Open => document::Message::OpenRequested,
             DocumentCommand::Save => document::Message::SaveRequested,
             DocumentCommand::CancelUnsaved => document::Message::UnsavedCancel,
+            DocumentCommand::ConfirmUnsaved => document::Message::UnsavedSave,
+            DocumentCommand::UnsavedNext => document::Message::UnsavedFocusNext,
+            DocumentCommand::UnsavedPrevious => document::Message::UnsavedFocusPrevious,
         }),
         Command::Preview(command) => Message::Preview(match command {
             PreviewCommand::Toggle => preview::Message::Toggle,
@@ -377,7 +380,10 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
         .then(|| find::view(&editor.find, find_surface, palette).map(Message::Find));
     let unsaved = interaction
         .unsaved_action()
-        .map(|action| document::unsaved_view::view(action, palette).map(Message::Document));
+        .map(|action| {
+            document::unsaved_view::view(action, editor.document.unsaved_focus(), palette)
+                .map(Message::Document)
+        });
     let help = interaction
         .contains(Overlay::Help)
         .then(|| help::view(&editor.help, palette).map(Message::Help));

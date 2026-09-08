@@ -1,7 +1,9 @@
 //! Syntax dimming for the write-mode editor: Markdown's own markers —
-//! heading hashes, list bullets, checkboxes, ordered numbers, blockquote
-//! bars, code fences, and thematic breaks — render in a dimmer grey than
-//! the text, so the writing stands out from the syntax.
+//! block prefixes like heading hashes, list bullets, checkboxes, ordered
+//! numbers, blockquote bars, code fences, and thematic breaks, plus the
+//! inline punctuation of emphasis, code spans, strikethroughs, links, and
+//! images — render in a dimmer grey than the text, so the writing stands
+//! out from the syntax.
 
 use std::ops::Range;
 
@@ -48,12 +50,30 @@ fn dimmed(text: Color, background: Color) -> Color {
     )
 }
 
+/// A fenced code block currently open around a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fence {
+    marker: char,
+    len: usize,
+}
+
 /// The write-mode highlighter, driven by the find query: Markdown markers
-/// dim, and every match of the query tints amber. Stateless like
-/// `PlainText`: every line is scanned fresh, so no cache invalidation is
-/// needed.
+/// dim, and every match of the query tints amber.
+///
+/// The editor feeds lines in document order and rewinds with
+/// [`change_line`] after an edit, so the highlighter tracks how far it has
+/// read and which fence is open — only that way can a line know whether it
+/// sits inside a code block. Settings changes (the find query) restart the
+/// scan, because every already-highlighted line must be re-fed with the
+/// new matches.
 pub struct MarkdownMarkers {
     query: String,
+    /// The index of the next line the editor will feed.
+    next_line: usize,
+    /// The fence open at the start of each fed line: entry `i` is the
+    /// fence state entering line `i`, so the vector always holds
+    /// `next_line + 1` snapshots.
+    fences: Vec<Option<Fence>>,
 }
 
 impl Highlighter for MarkdownMarkers {
@@ -64,32 +84,86 @@ impl Highlighter for MarkdownMarkers {
     fn new(settings: &Self::Settings) -> Self {
         Self {
             query: settings.clone(),
+            next_line: 0,
+            fences: vec![None],
         }
     }
 
     fn update(&mut self, new_settings: &Self::Settings) {
         self.query = new_settings.clone();
+        self.next_line = 0;
+        self.fences = vec![None];
     }
 
-    fn change_line(&mut self, _line: usize) {}
+    fn change_line(&mut self, line: usize) {
+        // Snapshots up to the changed line stay valid — an edit cannot
+        // alter the fence state of the lines above it. Lines beyond the
+        // ones fed so far have never been scanned; their state is guessed
+        // as the latest known one until they are fed for real.
+        if line < self.fences.len() {
+            self.fences.truncate(line + 1);
+        } else {
+            let last = self.fences.last().copied().flatten();
+            while self.fences.len() < line + 1 {
+                self.fences.push(last);
+            }
+        }
+
+        self.next_line = line;
+    }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        line_highlights(line, &self.query).into_iter()
+        let entering = self.fences.last().copied().flatten();
+        let highlights = line_highlights(line, &self.query, entering);
+        self.fences.push(fence_after(line, entering));
+        self.next_line += 1;
+        highlights.into_iter()
     }
 
     fn current_line(&self) -> usize {
-        usize::MAX
+        self.next_line
     }
 }
 
+/// The fence open after `line`, given the fence open before it: a run of
+/// at least three backticks or tildes opens a fence, and a later run of
+/// the same character at least as long closes it.
+fn fence_after(line: &str, entering: Option<Fence>) -> Option<Fence> {
+    let rest = line.trim_start_matches([' ', '\t']);
+
+    for marker in ['`', '~'] {
+        let run = rest.chars().take_while(|&c| c == marker).count();
+
+        if run >= 3 {
+            return match entering {
+                Some(fence) if fence.marker == marker && run >= fence.len => None,
+                Some(fence) => Some(fence),
+                None => Some(Fence { marker, len: run }),
+            };
+        }
+    }
+
+    entering
+}
+
 /// The highlights of a source line: the byte ranges holding Markdown
-/// markers and find matches, sorted by position. A match overlapping a
-/// marker wins the stretch they share — the match is what the eye is
-/// looking for.
-fn line_highlights(line: &str, query: &str) -> Vec<(Range<usize>, Highlight)> {
+/// markers and find matches, sorted by position. Inside a fenced code
+/// block only the closing fence marker and find matches highlight — code
+/// is prose to the writer, not syntax. A match overlapping a marker wins
+/// the stretch they share — the match is what the eye is looking for.
+fn line_highlights(
+    line: &str,
+    query: &str,
+    fence: Option<Fence>,
+) -> Vec<(Range<usize>, Highlight)> {
     let matches = crate::editing::byte_matches(line, query);
 
-    let mut markers: Vec<(Range<usize>, Highlight)> = marker_ranges(line)
+    let markers: Vec<Range<usize>> = match fence {
+        Some(fence) => closing_fence(line, fence).into_iter().collect(),
+        None => marker_ranges(line),
+    };
+
+    let mut highlights: Vec<(Range<usize>, Highlight)> = markers
         .into_iter()
         .flat_map(|range| {
             subtract(range, &matches)
@@ -99,13 +173,26 @@ fn line_highlights(line: &str, query: &str) -> Vec<(Range<usize>, Highlight)> {
         })
         .collect();
 
-    markers.extend(
+    highlights.extend(
         matches
             .into_iter()
             .map(|range| (range, Highlight::FindMatch)),
     );
-    markers.sort_by_key(|(range, _)| range.start);
-    markers
+    highlights.sort_by_key(|(range, _)| range.start);
+    highlights
+}
+
+/// The marker range of the line closing `fence`, if it does: a run of the
+/// fence's own character at least as long as the opening one.
+fn closing_fence(line: &str, fence: Fence) -> Option<Range<usize>> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let rest = &line[indent..];
+    let run = rest
+        .chars()
+        .take_while(|&c| c == fence.marker)
+        .count();
+
+    (run >= fence.len && run >= 3).then(|| indent..indent + run)
 }
 
 /// Removes `cuts` from `range`, returning the leftover sub-ranges in
@@ -134,7 +221,8 @@ fn subtract(range: Range<usize>, cuts: &[Range<usize>]) -> Vec<Range<usize>> {
 }
 
 /// The byte ranges of a source line that hold Markdown syntax markers
-/// rather than text.
+/// rather than text: the block prefixes of the line, then its inline
+/// punctuation.
 fn marker_ranges(line: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
@@ -188,14 +276,11 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
 
     if (1..=6).contains(&hashes) && rest[hashes..].starts_with(' ') {
         ranges.push(offset..offset + hashes);
-        return ranges;
-    }
-
-    // Unordered list bullets, with an optional task-list checkbox.
-    if rest.len() >= 2
+    } else if rest.len() >= 2
         && matches!(rest.as_bytes()[0], b'-' | b'*' | b'+')
         && rest.as_bytes()[1] == b' '
     {
+        // Unordered list bullets, with an optional task-list checkbox.
         ranges.push(offset..offset + 1);
 
         let item_offset = offset + 2;
@@ -207,18 +292,275 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
                 break;
             }
         }
+    } else {
+        // Ordered list numbers: digits followed by `. ` or `) `.
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
 
-        return ranges;
+        if digits > 0 {
+            let after = &rest[digits..];
+
+            if after.starts_with(". ") || after.starts_with(") ") {
+                ranges.push(offset..offset + digits + 1);
+            }
+        }
     }
 
-    // Ordered list numbers: digits followed by `. ` or `) `.
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    ranges.extend(inline_ranges(line));
+    ranges.sort_by_key(|range| range.start);
+    ranges
+}
 
-    if digits > 0 {
-        let after = &rest[digits..];
+/// The byte ranges of a line's inline Markdown punctuation: code-span
+/// backticks, emphasis and strikethrough delimiters, and link or image
+/// brackets.
+fn inline_ranges(line: &str) -> Vec<Range<usize>> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
 
-        if after.starts_with(". ") || after.starts_with(") ") {
-            ranges.push(offset..offset + digits + 1);
+    let code = code_spans(&chars);
+
+    let mut ranges = Vec::new();
+    for (span, run) in &code {
+        ranges.push(span.start..span.start + run);
+        ranges.push(span.end - run..span.end);
+    }
+
+    let spans: Vec<Range<usize>> = code.iter().map(|(span, _)| span.clone()).collect();
+    ranges.extend(delimiters(&chars, &spans));
+    ranges.extend(links(&chars, &spans));
+    ranges.sort_by_key(|range| range.start);
+    ranges
+}
+
+/// Whether the byte `offset` sits inside any of `ranges`.
+fn within(offset: usize, ranges: &[Range<usize>]) -> bool {
+    ranges.iter().any(|range| range.contains(&offset))
+}
+
+/// Whether the character at `index` is escaped by a preceding backslash.
+fn escaped(chars: &[(usize, char)], index: usize) -> bool {
+    index > 0 && chars[index - 1].1 == '\\'
+}
+
+fn is_whitespace(character: char) -> bool {
+    character.is_whitespace()
+}
+
+/// Markdown treats everything that is neither a letter, a digit, nor
+/// whitespace as punctuation — including its own marker characters.
+fn is_punctuation(character: char) -> bool {
+    !character.is_alphanumeric() && !character.is_whitespace()
+}
+
+fn is_punctuation_or_whitespace(character: char) -> bool {
+    is_punctuation(character) || is_whitespace(character)
+}
+
+/// A delimiter run is left-flanking when it could open emphasis: not
+/// followed by whitespace, and not followed by punctuation unless it also
+/// follows whitespace or punctuation.
+fn flanks_left(before: Option<char>, after: Option<char>) -> bool {
+    match after {
+        Some(next) if !is_whitespace(next) => {
+            !is_punctuation(next) || before.is_none_or(is_punctuation_or_whitespace)
+        }
+        _ => false,
+    }
+}
+
+/// A delimiter run is right-flanking when it could close emphasis: not
+/// preceded by whitespace, and not preceded by punctuation unless it also
+/// precedes whitespace or punctuation.
+fn flanks_right(before: Option<char>, after: Option<char>) -> bool {
+    match before {
+        Some(previous) if !is_whitespace(previous) => {
+            !is_punctuation(previous) || after.is_none_or(is_punctuation_or_whitespace)
+        }
+        _ => false,
+    }
+}
+
+/// The code spans of a line, as `(span, run)` pairs: `span` covers the
+/// whole span — delimiters and content, so later scans can leave it
+/// alone — while `run` is the backtick length, identifying the dimmed
+/// delimiter stretches at the span's ends. An opening run pairs with the
+/// next run of the same length; the code between the delimiters stays
+/// prose-colored, being content rather than syntax.
+fn code_spans(chars: &[(usize, char)]) -> Vec<(Range<usize>, usize)> {
+    let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].1 != '`' {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < chars.len() && chars[index].1 == '`' {
+            index += 1;
+        }
+
+        if !escaped(chars, start) {
+            runs.push((chars[start].0, chars[index - 1].0 + 1, index - start));
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut pending: Vec<usize> = Vec::new();
+
+    for (index, run) in runs.iter().enumerate() {
+        if let Some(open) = pending.iter().position(|&pending| runs[pending].2 == run.2) {
+            let open = pending.remove(open);
+            spans.push((runs[open].0..run.1, run.2));
+        } else {
+            pending.push(index);
+        }
+    }
+
+    spans
+}
+
+/// The delimiter runs of emphasis, strong emphasis, and strikethrough —
+/// runs of one to three `*` or `_`, or exactly two `~` — paired into
+/// dimmed opener/closer ranges.
+///
+/// Pairing follows CommonMark's flanking rules in a simplified form:
+/// `*` and `~~` open when left-flanking and close when right-flanking,
+/// while `_` additionally refuses to open or close between word
+/// characters, so `file_name_here` never dims. An opener pairs with the
+/// nearest later closer of the same character and length.
+fn delimiters(chars: &[(usize, char)], code: &[Range<usize>]) -> Vec<Range<usize>> {
+    struct Delimiter {
+        start: usize,
+        end: usize,
+        marker: char,
+        len: usize,
+        opens: bool,
+        closes: bool,
+    }
+
+    let mut runs: Vec<Delimiter> = Vec::new();
+
+    let mut index = 0;
+    while index < chars.len() {
+        let (offset, character) = chars[index];
+
+        if !matches!(character, '*' | '_' | '~') || within(offset, code) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < chars.len() && chars[index].1 == character {
+            index += 1;
+        }
+
+        let len = index - start;
+
+        if !((character != '~' && (1..=3).contains(&len)) || (character == '~' && len == 2)) {
+            continue;
+        }
+
+        if escaped(chars, start) {
+            continue;
+        }
+
+        let before = start.checked_sub(1).map(|previous| chars[previous].1);
+        let after = chars.get(index).map(|&(_, character)| character);
+        let left = flanks_left(before, after);
+        let right = flanks_right(before, after);
+
+        let (opens, closes) = match character {
+            '*' | '~' => (left, right),
+            '_' => (
+                left && (!right || before.is_some_and(is_punctuation)),
+                right && (!left || after.is_some_and(is_punctuation)),
+            ),
+            _ => unreachable!("only markdown delimiter characters reach pairing"),
+        };
+
+        runs.push(Delimiter {
+            start: offset,
+            end: chars[index - 1].0 + 1,
+            marker: character,
+            len,
+            opens,
+            closes,
+        });
+    }
+
+    let mut ranges = Vec::new();
+    let mut pending: Vec<usize> = Vec::new();
+
+    for (index, run) in runs.iter().enumerate() {
+        if run.closes {
+            if let Some(open) = pending.iter().position(|pending| {
+                runs[*pending].marker == run.marker && runs[*pending].len == run.len
+            }) {
+                let open = pending.remove(open);
+                ranges.push(runs[open].start..runs[open].end);
+                ranges.push(run.start..run.end);
+                continue;
+            }
+        }
+
+        if run.opens {
+            pending.push(index);
+        }
+    }
+
+    ranges
+}
+
+/// The punctuation of inline links, reference links, and images: `[`,
+/// `](` or `][`, `)`, and the `!` that marks an image. The address and
+/// the bracketed text stay prose-colored — only the syntax dims.
+fn links(chars: &[(usize, char)], code: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let (offset, character) = chars[index];
+
+        if character != '[' || within(offset, code) || escaped(chars, index) {
+            index += 1;
+            continue;
+        }
+
+        let Some(close) = (index + 1..chars.len()).find(|&candidate| {
+            chars[candidate].1 == ']' && !escaped(chars, candidate)
+        }) else {
+            break;
+        };
+
+        let following = chars.get(close + 1).map(|&(_, character)| character);
+
+        // The separator (`](` or `][`) and the terminator that ends the
+        // address or label — a `)` for inline links, a `]` for reference
+        // ones.
+        let terminator = match following {
+            Some('(') => (close + 2..chars.len())
+                .find(|&candidate| chars[candidate].1 == ')' && !escaped(chars, candidate)),
+            Some('[') => (close + 2..chars.len())
+                .find(|&candidate| chars[candidate].1 == ']' && !escaped(chars, candidate)),
+            _ => None,
+        };
+
+        match terminator {
+            Some(end) => {
+                let start = if index > 0 && chars[index - 1].1 == '!' {
+                    chars[index - 1].0
+                } else {
+                    offset
+                };
+
+                ranges.push(start..chars[index].0 + 1);
+                ranges.push(chars[close].0..chars[close + 1].0 + 1);
+                ranges.push(chars[end].0..chars[end].0 + 1);
+
+                index = end + 1;
+            }
+            None => index = close + 1,
         }
     }
 
@@ -229,7 +571,10 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
 mod tests {
     use super::dimmed as dimmed_color;
     use super::Highlight::{FindMatch, Marker};
-    use super::{format, line_highlights, marker_ranges};
+    use super::{
+        closing_fence, fence_after, format, line_highlights, marker_ranges, Fence,
+        Highlighter as _, MarkdownMarkers,
+    };
     use crate::theme::Palette;
     use iced::{Color, Font};
 
@@ -324,11 +669,67 @@ mod tests {
     }
 
     #[test]
+    fn dims_emphasis_delimiters() {
+        assert_eq!(dimmed("*emphasis*"), ["*", "*"]);
+        assert_eq!(dimmed("**strong**"), ["**", "**"]);
+        assert_eq!(dimmed("***all***"), ["***", "***"]);
+        assert_eq!(dimmed("_under_"), ["_", "_"]);
+        assert_eq!(dimmed("__dunder__"), ["__", "__"]);
+        assert_eq!(dimmed("mix *mid* word"), ["*", "*"]);
+        assert_eq!(dimmed("a*b*c intraword"), ["*", "*"]);
+        assert_eq!(dimmed("**bold** and *em*"), ["**", "**", "*", "*"]);
+
+        // Intraword underscores are identifiers, not emphasis.
+        assert_eq!(dimmed("file_name_here").len(), 0);
+        // Unpaired delimiters are not emphasis; "* dangling" is a list
+        // bullet and belongs to the block markers instead.
+        assert_eq!(dimmed("*italic").len(), 0);
+        assert_eq!(dimmed("x * spaced *").len(), 0);
+        // Escaped delimiters are literal characters.
+        assert_eq!(dimmed("\\*literal\\*").len(), 0);
+    }
+
+    #[test]
+    fn dims_strikethrough_tildes() {
+        assert_eq!(dimmed("~~gone~~"), ["~~", "~~"]);
+        assert_eq!(dimmed("a ~~b~~ c"), ["~~", "~~"]);
+        // A single tilde is not a strikethrough.
+        assert_eq!(dimmed("~single~").len(), 0);
+    }
+
+    #[test]
+    fn dims_code_span_backticks() {
+        assert_eq!(dimmed("`code`"), ["`", "`"]);
+        assert_eq!(dimmed("say `hi` twice"), ["`", "`"]);
+        assert_eq!(dimmed("``two`` and `one`"), ["``", "``", "`", "`"]);
+        // Unclosed backticks pair with nothing.
+        assert_eq!(dimmed("unclosed `tick").len(), 0);
+        // The code between the delimiters stays prose-colored.
+        let ranges = marker_ranges("`*not emphasis*`");
+        assert_eq!(ranges.len(), 2);
+    }
+
+    #[test]
+    fn dims_link_punctuation() {
+        assert_eq!(dimmed("[label](https://agma.dev)"), ["[", "](", ")"]);
+        assert_eq!(dimmed("![image](photo.png)"), ["![", "](", ")"]);
+        assert_eq!(dimmed("see [ref][1] here"), ["[", "][", "]"]);
+        assert_eq!(dimmed("[**bold**](url)"), ["[", "**", "**", "](", ")"]);
+
+        // Brackets without an address are not links.
+        assert_eq!(dimmed("see [1] in the text").len(), 0);
+        assert_eq!(dimmed("[unclosed").len(), 0);
+        // Escaped brackets are literal.
+        assert_eq!(dimmed("\\[not a link\\]").len(), 0);
+    }
+
+    #[test]
     fn plain_text_dims_nothing() {
         assert_eq!(dimmed("just text").len(), 0);
         assert_eq!(dimmed("").len(), 0);
         assert_eq!(dimmed("   ").len(), 0);
         assert_eq!(dimmed("text with # hash inside").len(), 0);
+        assert_eq!(dimmed("2 * 3 * 4 = x").len(), 0);
     }
 
     /// Find matches tint their range amber, and a match overlapping a
@@ -337,7 +738,7 @@ mod tests {
     #[test]
     fn find_matches_tint_and_win_over_markers() {
         let highlights = |line, query| {
-            line_highlights(line, query)
+            line_highlights(line, query, None)
                 .into_iter()
                 .map(|(range, kind)| (line[range].to_owned(), kind))
                 .collect::<Vec<_>>()
@@ -375,5 +776,202 @@ mod tests {
 
         // No query: markers only, exactly as before find existed.
         assert_eq!(highlights("- item", ""), vec![("-".to_owned(), Marker)]);
+    }
+
+    /// A fenced code block opens with a backtick or tilde run and closes
+    /// with a same-character run at least as long; other lines leave the
+    /// state untouched.
+    #[test]
+    fn fences_open_close_and_ignore_strangers() {
+        let backtick = Fence {
+            marker: '`',
+            len: 3,
+        };
+
+        assert_eq!(
+            fence_after("```rust", None),
+            Some(backtick),
+            "an opening fence remembers its character and length"
+        );
+        assert_eq!(
+            fence_after("code *inside*", Some(backtick)),
+            Some(backtick),
+            "content lines keep the fence open"
+        );
+        assert_eq!(
+            fence_after("```", Some(backtick)),
+            None,
+            "an equal run closes the fence"
+        );
+        assert_eq!(
+            fence_after("````", Some(backtick)),
+            None,
+            "a longer run closes the fence too"
+        );
+        assert_eq!(
+            fence_after("``", Some(backtick)),
+            Some(backtick),
+            "a shorter run does not"
+        );
+        assert_eq!(
+            fence_after("~~~", Some(backtick)),
+            Some(backtick),
+            "a tilde run does not close a backtick fence"
+        );
+
+        let tilde = Fence { marker: '~', len: 4 };
+        assert_eq!(fence_after("~~~~ md", None), Some(tilde));
+        assert_eq!(fence_after("plain text", Some(tilde)), Some(tilde));
+    }
+
+    /// Inside a fence only the closing marker and find matches highlight:
+    /// code is content, so its asterisks and brackets stay prose-colored.
+    #[test]
+    fn fenced_lines_dim_only_their_closing_marker() {
+        let fence = Fence {
+            marker: '`',
+            len: 3,
+        };
+
+        let inside = |line, query| {
+            line_highlights(line, query, Some(fence))
+                .into_iter()
+                .map(|(range, kind)| (&line[range], kind))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            inside("* not emphasis", ""),
+            vec![],
+            "code content never dims"
+        );
+        assert_eq!(
+            inside("# not a heading", ""),
+            vec![],
+            "block prefixes do not apply inside code"
+        );
+        assert_eq!(inside("```", ""), vec![("```", Marker)]);
+
+        // Find matches still tint inside fences.
+        assert_eq!(
+            inside("let value = x;", "value"),
+            vec![("value", FindMatch)]
+        );
+
+        // A tilde run never closes a backtick fence.
+        assert_eq!(inside("~~~", ""), vec![]);
+
+        assert_eq!(
+            line_highlights("```rust", "", None),
+            vec![(0..3, Marker)]
+        );
+        assert_eq!(
+            closing_fence("not a fence", fence),
+            None,
+            "ordinary lines do not close"
+        );
+    }
+
+    /// The highlighter follows the editor's feeding protocol: lines arrive
+    /// in order, `current_line` reports the next one expected,
+    /// `change_line` rewinds to an edit, and settings changes restart the
+    /// scan from the top.
+    #[test]
+    fn tracks_the_line_the_editor_will_feed_next() {
+        let settings = String::new();
+        let mut highlighter = MarkdownMarkers::new(&settings);
+        assert_eq!(highlighter.current_line(), 0);
+
+        highlighter.highlight_line("# heading");
+        highlighter.highlight_line("plain");
+        assert_eq!(highlighter.current_line(), 2);
+
+        highlighter.change_line(1);
+        assert_eq!(highlighter.current_line(), 1);
+        highlighter.highlight_line("edited");
+        assert_eq!(highlighter.current_line(), 2);
+
+        // Rewinding past the fed lines still leaves a consistent state.
+        highlighter.change_line(9);
+        assert_eq!(highlighter.current_line(), 9);
+        highlighter.highlight_line("far below");
+        assert_eq!(highlighter.current_line(), 10);
+
+        highlighter.update(&settings);
+        assert_eq!(highlighter.current_line(), 0);
+    }
+
+    /// Feeding a document in order dims fence markers and leaves the code
+    /// between them alone; a rewind into the block restores the same
+    /// highlights.
+    #[test]
+    fn tracks_fences_across_fed_lines() {
+        let settings = String::new();
+        let mut highlighter = MarkdownMarkers::new(&settings);
+
+        let opening: Vec<_> = highlighter.highlight_line("```rust").collect();
+        assert_eq!(opening, vec![(0..3, Marker)]);
+
+        let content: Vec<_> = highlighter.highlight_line("let x = a * b;").collect();
+        assert!(content.is_empty(), "code content stays prose-colored");
+
+        let closing: Vec<_> = highlighter.highlight_line("```").collect();
+        assert_eq!(closing, vec![(0..3, Marker)]);
+
+        let after: Vec<_> = highlighter.highlight_line("*emphasis* again").collect();
+        assert_eq!(after, vec![(0..1, Marker), (9..10, Marker)]);
+
+        // Rewinding into the block replays the same fence state.
+        highlighter.change_line(1);
+        let replay: Vec<_> = highlighter.highlight_line("let y = c * d;").collect();
+        assert!(replay.is_empty());
+    }
+
+    /// The real editor drives the highlighter through iced's protocol:
+    /// `update` lays the text out, `highlight` feeds lines in order, and
+    /// blank lines come out taller — the paragraph gap. This is the
+    /// end-to-end guard for the bug that kept `current_line` at
+    /// `usize::MAX`, which made the editor skip highlighting entirely.
+    #[test]
+    fn the_editor_feeds_lines_and_spaces_paragraphs() {
+        use iced::advanced::graphics::text::Editor as RenderEditor;
+        use iced::advanced::text::editor::Editor as _;
+        use iced::advanced::text::Highlighter as _;
+        use iced::advanced::text::{LineHeight, Wrapping};
+        use iced::{Font, Pixels, Size};
+
+        // Three paragraphs — five lines, two of them blank separators.
+        let mut editor =
+            RenderEditor::with_text("# title\n\nparagraph one\n\nparagraph two");
+        let mut highlighter = MarkdownMarkers::new(&String::new());
+
+        editor.update(
+            Size::new(600.0, 400.0),
+            Font::MONOSPACE,
+            Pixels(20.0),
+            LineHeight::Relative(1.8),
+            Wrapping::default(),
+            &mut highlighter,
+        );
+
+        // Ordinary lines: 5 x 36px, blanks included until highlighted.
+        assert_eq!(highlighter.current_line(), 0);
+        assert!((editor.min_bounds().height - 180.0).abs() < 0.5);
+
+        let theme = Palette::default().runtime_theme();
+        editor.highlight(Font::MONOSPACE, &mut highlighter, |highlight| {
+            format(highlight, &theme)
+        });
+
+        // The editor fed the visible lines through the highlighter.
+        assert!(
+            highlighter.current_line() >= 5,
+            "every line of the document was fed, got {}",
+            highlighter.current_line()
+        );
+
+        // The paragraph gap: blank lines now lay out 1.5x taller,
+        // 3 x 36px + 2 x 54px.
+        assert!((editor.min_bounds().height - 216.0).abs() < 0.5);
     }
 }

@@ -19,6 +19,12 @@ pub enum DocumentCommand {
     Open,
     Save,
     CancelUnsaved,
+    /// Accepts the unsaved-changes prompt by saving the document.
+    ConfirmUnsaved,
+    /// Moves the prompt's focused button forward (to the right).
+    UnsavedNext,
+    /// Moves the prompt's focused button backward (to the left).
+    UnsavedPrevious,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

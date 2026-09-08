@@ -172,7 +172,9 @@ fn is_help_chord(key: &keyboard::Key<&str>, modifiers: &keyboard::Modifiers) -> 
         && matches!(key, keyboard::Key::Character("?" | "/"))
 }
 
-/// Routes the Unsaved modal, which owns all key presses and input methods.
+/// Routes the Unsaved modal, which owns all key presses and input
+/// methods: `Esc` returns to the editor, `Enter` saves the document, and
+/// `j`/`k` move the focused button.
 fn route_unsaved(event: &iced::Event) -> Decision {
     let help = route_help(false, event);
     if help != Decision::Pass {
@@ -185,6 +187,7 @@ fn route_unsaved(event: &iced::Event) -> Decision {
 
     let iced::Event::Keyboard(keyboard::Event::KeyPressed {
         modified_key,
+        modifiers,
         repeat,
         ..
     }) = event
@@ -192,13 +195,26 @@ fn route_unsaved(event: &iced::Event) -> Decision {
         return Decision::Pass;
     };
 
-    if matches!(
-        modified_key.as_ref(),
-        keyboard::Key::Named(keyboard::key::Named::Escape)
-    ) {
-        one_shot(*repeat, Command::Document(DocumentCommand::CancelUnsaved))
-    } else {
-        Decision::Capture
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return Decision::Capture;
+    }
+
+    match modified_key.as_ref() {
+        keyboard::Key::Named(keyboard::key::Named::Escape) => {
+            one_shot(*repeat, Command::Document(DocumentCommand::CancelUnsaved))
+        }
+        keyboard::Key::Named(keyboard::key::Named::Enter) => {
+            one_shot(*repeat, Command::Document(DocumentCommand::ConfirmUnsaved))
+        }
+        // Held navigation keeps cycling through the buttons, like held
+        // motions elsewhere.
+        keyboard::Key::Character("j" | "J") => {
+            execute(Command::Document(DocumentCommand::UnsavedNext))
+        }
+        keyboard::Key::Character("k" | "K") => {
+            execute(Command::Document(DocumentCommand::UnsavedPrevious))
+        }
+        _ => Decision::Capture,
     }
 }
 
@@ -690,6 +706,44 @@ mod tests {
         for (name, state, event, expected) in cases {
             assert_eq!(route(&state, &event), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn unsaved_modal_routes_keyboard_navigation() {
+        let mut state = find(note(editable_preview(false)));
+        state.open_unsaved(UnsavedAction::OpenFile);
+
+        // Enter saves, j/k move the focused button.
+        assert_eq!(
+            route(&state, &named(key::Named::Enter, Modifiers::default(), false)),
+            dispatch(Command::Document(DocumentCommand::ConfirmUnsaved))
+        );
+        assert_eq!(
+            route(&state, &character("j")),
+            dispatch(Command::Document(DocumentCommand::UnsavedNext))
+        );
+        assert_eq!(
+            route(&state, &character("K")),
+            dispatch(Command::Document(DocumentCommand::UnsavedPrevious))
+        );
+
+        // Held navigation keeps cycling; a held Enter must not re-confirm.
+        assert_eq!(
+            route(&state, &character_with("j", Modifiers::default(), true)),
+            dispatch(Command::Document(DocumentCommand::UnsavedNext))
+        );
+        assert_eq!(
+            route(&state, &named(key::Named::Enter, Modifiers::default(), true)),
+            Decision::Capture
+        );
+
+        // Chords and stray characters stay captured — only the help chord
+        // escapes the prompt.
+        assert_eq!(
+            route(&state, &character_with("s", Modifiers::CTRL, false)),
+            Decision::Capture
+        );
+        assert_eq!(route(&state, &character("x")), Decision::Capture);
     }
 
     #[test]

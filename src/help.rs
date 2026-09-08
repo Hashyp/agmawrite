@@ -72,6 +72,14 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Ctrl + S",
         "Save the document; save the note when its popup is open.",
     ),
+    (
+        "j / k",
+        "Move the focused button while the unsaved-changes dialog is open.",
+    ),
+    (
+        "Enter",
+        "In the unsaved-changes dialog: save the document and proceed.",
+    ),
     ("Ctrl + F", "Open find in the document."),
     (
         "/",

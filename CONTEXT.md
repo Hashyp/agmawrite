@@ -72,7 +72,22 @@ preview and anchored comments.
 - **Unsaved dialog** — the modal asking what to do with unsaved changes
   before opening another file or closing the window: Cancel, Save
   (save, then proceed), Discard. The guarded action waits in
-  `Editor::pending_unsaved` until the save lands.
+  `Editor::pending_unsaved` until the save lands. Keyboard-driven:
+  `Esc` cancels back to the editor, `Enter` saves, `j`/`k` move the
+  focused button (the accent-outlined one); the focus lives in the
+  document (`State::unsaved_focus`) and resets to Save whenever the
+  prompt is requested.
+- **Marker** — a byte range the write-mode highlighter dims: Markdown's
+  block prefixes and inline punctuation, colored as the theme's
+  foreground eased toward its background (`highlight::Marker`). Fenced
+  code is content — inside a fence only the closing fence marker and
+  find matches highlight. The highlighter tracks how far the editor has
+  fed it and which fence is open, rewinding on edits
+  (`highlight::MarkdownMarkers`).
+- **Paragraph gap** — the taller line height a blank source line gets
+  (1.5× an ordinary line) in the forked `iced_graphics` under `vendor/`:
+  blank lines separate Markdown paragraphs, so they render as visible
+  breathing room between blocks of prose.
 - **Palette** — the Omarchy color scheme the interface paints with,
   loaded from the current theme and reloaded when it changes
   (`theme::Palette`).

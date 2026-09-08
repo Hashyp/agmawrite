@@ -2,6 +2,8 @@
 
 A deliberately minimal Markdown editor: black canvas, blinking cursor, a writing area with roughly 10% top and side margins, generous line spacing, and a folder icon for opening Markdown files. Text uses the bundled iA Writer Mono S font.
 
+While writing, the Markdown syntax itself stays quiet: every marker — heading hashes, list bullets and checkboxes, ordered numbers, blockquote bars, code fences and thematic breaks, but also the inline punctuation of emphasis (`*`/`_`), strikethroughs (`~~`), code spans, and links or images — renders dimmer than the prose, its color the theme's foreground eased toward the background, so the words stand out and the syntax fades. Paragraphs breathe: the blank line separating two paragraphs is laid out taller than an ordinary line, so new paragraphs visibly part from the previous ones. Code inside fenced blocks is left alone — it is content, not syntax.
+
 ## Run
 
 ```sh
@@ -25,7 +27,7 @@ A badge in the bottom bar, next to the icons, names the current mode: `WRITE` wh
 
 The whole interface follows the current Omarchy color scheme and re-paints live when `omarchy theme set` changes it.
 
-Opening another file (`Ctrl + O`) or closing the window over unsaved changes asks first: a dialog offers Cancel, Save (write the document, then proceed), and Discard; `Esc` cancels.
+Opening another file (`Ctrl + O`) or closing the window over unsaved changes asks first: a dialog offers Cancel, Save (write the document, then proceed), and Discard. The dialog is fully keyboard-driven: `Esc` returns to the editor, `Enter` saves, and `j`/`k` move the accent-outlined focus between the buttons (which stay clickable).
 
 In preview, a caret marks the current rendered text element. Navigation supports the arrow keys and vim motions: `h`/`l` (←/→) move the caret one character, crossing to the neighbouring element at its edges; `w`/`b` jump between word starts and `e`/`ge` between word ends; `j`/`k` (↓/↑) move between elements, keeping vim's sticky column; `0` returns to the element's start; `gg`/`G` jump to the first/last element. A count repeats any motion like vim — `3j`, `10k`, `2h`, `3l`, `3w`, `5G`, `3gg` — and shows beside the mode badge while pending. `Ctrl + D`/`Ctrl + U` scroll half a page down/up and PageDown/PageUp a full page; `zz`/`zt`/`zb` scroll the caret to the viewport's middle, top, or bottom. Fenced code blocks are elements like any other: the caret moves through their code and comments can anchor on them. `v` toggles visual mode: while it is active every motion extends the selection from the anchor to the caret, highlighted with the theme's own selection color — the same role write-mode selections use — so it follows the current omarchy theme (text stays readable); `v` or `Esc` leaves it. Inside a table, `j`/`k` move between rows of the same column and exit the table at its top and bottom edges. Press `c` to open a note popup with a text area; save the note as a comment with `Ctrl + S` (or the Save button), close it with `Esc`, the Close button, or a click on the backdrop — closing discards the draft, so the next note starts fresh. In visual mode, `c` comments exactly the selected text: the anchor is the selection, the preview highlights the selected span, and the sidebar card quotes it. Saved comments frame the text they were written for with a subtle amber rectangle — a border only, with no fill of its own, so every background underneath stays as it was; the currently active comment is framed in cyan instead, plus a faint tint over its element, and its card in the sidebar is highlighted the same way. `Ctrl + N` cycles to the next comment, scrolling it into view.
 
@@ -37,4 +39,4 @@ The sidebar sits flush against the window's right edge, leaving the editor's mar
 
 Press `Ctrl + ?` at any time to open a centered keyboard shortcuts help window with incremental search: typing filters the list live to the shortcuts and descriptions matching the query (case-insensitive), and the query clears when the window closes so every search starts fresh. It captures input without changing the editor underneath; `Esc` closes it — as does `Ctrl + ?` again — and restores the previous mode, cursor, selection, and popup state.
 
-Built on iced 0.14 and its `markdown` widget. The iA Writer Mono S font is bundled under the SIL Open Font License; see `fonts/OFL.txt`.
+Built on iced 0.14 and its `markdown` widget. The iA Writer Mono S font is bundled under the SIL Open Font License; see `fonts/OFL.txt`. A forked copy of `iced_graphics` 0.14.0 lives under `vendor/` — the only change is in `src/text/editor.rs`, where blank lines receive a taller line height so Markdown paragraphs separate visually; `[patch.crates-io]` in `Cargo.toml` pins the app to it.
