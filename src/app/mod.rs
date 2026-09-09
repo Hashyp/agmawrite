@@ -42,6 +42,7 @@ pub(crate) enum Message {
     Find(find::Message),
     Help(help::Message),
     Input(InputMessage),
+    Toolbar(ui::toolbar::Message),
     StatusBar(ui::status_bar::Message),
     Theme(theme::Event),
     StatusMetadata(ui::status_bar::metadata::Metadata),
@@ -153,7 +154,8 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.interaction.push_count_digit(digit);
             return Task::none();
         }
-        Message::StatusBar(ui::status_bar::Message::Toolbar(message)) => {
+        Message::Toolbar(message)
+        | Message::StatusBar(ui::status_bar::Message::Toolbar(message)) => {
             message_for_toolbar(message)
         }
         Message::StatusBar(ui::status_bar::Message::ToggleComments) => {
@@ -326,7 +328,7 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.help.update(message);
             Task::none()
         }
-        Message::Input(_) | Message::StatusBar(_) => {
+        Message::Input(_) | Message::Toolbar(_) | Message::StatusBar(_) => {
             unreachable!("boundary messages are translated before delegation")
         }
     }
@@ -413,6 +415,19 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
     )
     .map(Message::Comments);
     let base = shell::layout(editing_area, toolbar, sidebar, palette.background);
+    // The document controls float at the window's top-left corner, over
+    // the body's empty top margin — but only in an editable session: a
+    // preview-only one (`--preview`) shows no corner controls at all.
+    let base = if interaction.can_toggle_preview() {
+        let controls = ui::toolbar::view(ui::toolbar::Model::new(
+            editor.document.is_modified(),
+            palette,
+        ))
+        .map(Message::Toolbar);
+        shell::with_corner_controls(base, controls)
+    } else {
+        base
+    };
     let base = shell::with_status_bar(
         base,
         ui::status_bar::view(status::model(editor, &source)).map(Message::StatusBar),

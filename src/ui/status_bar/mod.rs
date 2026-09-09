@@ -189,25 +189,9 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 false,
             ));
         }
-        segments.push(action(
-            "Open",
-            "Open a document · Ctrl + O",
-            Message::Toolbar(toolbar::Message::Open),
-            colors,
-            model.palette,
-        ));
-        segments.push(segment("", colors.base, colors.raised, false));
-        segments.push(action(
-            "Save",
-            "Save document · Ctrl + S",
-            Message::Toolbar(toolbar::Message::Save),
-            colors,
-            model.palette,
-        ));
         // The surface switch names its destination: Preview while writing,
         // Write while previewing. Preview-only sessions offer no switch.
         if let Some(toggle) = model.interaction.toolbar().preview_toggle() {
-            segments.push(segment("", colors.base, colors.raised, false));
             let (label, hint) = match toggle {
                 PreviewToggle::Preview => ("Preview", "Open the preview · Ctrl + P"),
                 PreviewToggle::Write => ("Write", "Return to writing · Ctrl + P"),

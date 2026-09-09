@@ -95,6 +95,34 @@ pub(crate) fn with_status_bar<'a, Message: 'a>(
     .into()
 }
 
+/// Floats the corner controls over the body's top-left corner. The overlay
+/// paints only: `Stack` passes events on unless a child captures them, so
+/// clicks and scrolls reach the editor beneath everywhere outside the
+/// buttons themselves.
+pub(crate) fn with_corner_controls<'a, Message: 'a>(
+    body: Element<'a, Message>,
+    controls: Element<'a, Message>,
+) -> Element<'a, Message> {
+    use iced::alignment::{Horizontal, Vertical};
+
+    stack![
+        body,
+        container(controls)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Horizontal::Left)
+            .align_y(Vertical::Top)
+            .padding(iced::Padding {
+                top: 4.0,
+                left: 4.0,
+                ..iced::Padding::new(0.0)
+            }),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn root_background(background: Color) -> container::Style {
     container::Style {
         background: Some(Background::Color(background)),
@@ -105,8 +133,9 @@ fn root_background(background: Color) -> container::Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        layout, root_background, stack_layers, EDITOR_AREA_PORTION, MAIN_AREA_PORTION,
-        SIDE_MARGIN_PORTION, TOOLBAR_PORTION, TOP_MARGIN_PORTION,
+        layout, root_background, stack_layers, with_corner_controls, with_status_bar,
+        EDITOR_AREA_PORTION, MAIN_AREA_PORTION, SIDE_MARGIN_PORTION, TOOLBAR_PORTION,
+        TOP_MARGIN_PORTION,
     };
     use iced::widget::Space;
     use iced::{Background, Color, Element};
@@ -133,5 +162,8 @@ mod tests {
             root_background(Color::BLACK).background,
             Some(Background::Color(Color::BLACK))
         );
+
+        // The corner overlay and the status bar wrap any body generically.
+        let _dressed = with_status_bar(with_corner_controls(element(), element()), element());
     }
 }
