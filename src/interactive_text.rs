@@ -8,7 +8,7 @@ use iced::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-const PARAGRAPH_PADDING: f32 = 4.0;
+pub(crate) const PARAGRAPH_PADDING: f32 = 4.0;
 
 /// Corner rounding of outlined ranges, so a framing rectangle reads as a
 /// deliberate marker rather than a stray box.
@@ -97,7 +97,7 @@ pub fn paragraph<'a, M: 'a>(
         spans,
         decorations,
         size: settings.text_size,
-        line_height: iced::advanced::text::LineHeight::default(),
+        line_height: iced::advanced::text::LineHeight::Relative(crate::typography::LINE_HEIGHT),
         font: settings.style.font,
         color,
         _message: std::marker::PhantomData,
@@ -119,7 +119,7 @@ pub fn code<'a, M: 'a>(
         spans: vec![span],
         decorations,
         size: settings.code_size,
-        line_height: iced::advanced::text::LineHeight::default(),
+        line_height: iced::advanced::text::LineHeight::Relative(crate::typography::LINE_HEIGHT),
         font: settings.style.code_block_font,
         color,
         _message: std::marker::PhantomData,

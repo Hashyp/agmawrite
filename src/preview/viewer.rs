@@ -5,6 +5,9 @@
 //! find, and palette collaborators and maps the resulting preview-local
 //! messages at the composition boundary.
 
+#[cfg(test)]
+mod layout_tests;
+
 use std::ops::Range;
 
 use super::decorations::{self, Config, Pipeline};
@@ -12,7 +15,7 @@ use super::scroll::{anchor_id, caret_id, scrollable_id};
 use super::{Message, PreviewElement, State};
 use crate::{comments, interactive_text, theme::Palette};
 
-use iced::widget::{column, container, markdown, rich_text, scrollable};
+use iced::widget::{checkbox, column, container, markdown, rich_text, row, rule, scrollable, text};
 use iced::{border, Background, Color, Element, Font, Length};
 
 const PREVIEW_FONT: Font = Font::with_name("iA Writer Mono S");
@@ -53,10 +56,8 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a
     let palette = context.palette;
 
     scrollable(
-        container(markdown::view_with(
-            state.markdown().items(),
-            markdown::Settings::with_text_size(20.0, markdown_style(&palette)),
-            &PreviewViewer {
+        container(
+            PreviewViewer {
                 claims: state.claims(),
                 focused_element: position.element,
                 caret_column: position.column,
@@ -65,8 +66,15 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a
                 find_query: context.find_query,
                 current_match: context.current_find_match,
                 palette,
-            },
-        ))
+            }
+            .blocks(
+                markdown::Settings::with_text_size(
+                    crate::typography::TEXT_SIZE,
+                    markdown_style(&palette),
+                ),
+                state.markdown().items(),
+            ),
+        )
         .width(Length::Fill)
         .padding([0, 8]),
     )
@@ -117,6 +125,7 @@ fn plain_code_block<'a>(
                 .on_link_click(Message::LinkClicked)
                 .font(settings.style.code_block_font)
                 .size(settings.code_size)
+                .line_height(crate::typography::LINE_HEIGHT)
                 .into()
         })))
         .padding(settings.code_size),
@@ -181,6 +190,34 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
         self.text_element(settings, text)
     }
 
+    fn quote(
+        &self,
+        settings: markdown::Settings,
+        contents: &'a [markdown::Item],
+    ) -> Element<'a, Message> {
+        row![rule::vertical(4), self.blocks(settings, contents)]
+            .height(Length::Shrink)
+            .spacing(settings.spacing)
+            .into()
+    }
+
+    fn ordered_list(
+        &self,
+        settings: markdown::Settings,
+        start: u64,
+        bullets: &'a [markdown::Bullet],
+    ) -> Element<'a, Message> {
+        self.list(settings, Some(start), bullets)
+    }
+
+    fn unordered_list(
+        &self,
+        settings: markdown::Settings,
+        bullets: &'a [markdown::Bullet],
+    ) -> Element<'a, Message> {
+        self.list(settings, None, bullets)
+    }
+
     fn image(
         &self,
         settings: markdown::Settings,
@@ -237,6 +274,68 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
 }
 
 impl<'a> PreviewViewer<'a> {
+    fn blocks(
+        &self,
+        settings: markdown::Settings,
+        items: &'a [markdown::Item],
+    ) -> Element<'a, Message> {
+        // Settings.spacing also controls table padding and horizontal gutters.
+        // Keep paragraph spacing separate, including the text widgets' insets
+        // in (not on top of) the shared content-to-content gap.
+        column(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| markdown::item(self, settings, item, index)),
+        )
+        .spacing(crate::typography::PARAGRAPH_GAP - 2.0 * interactive_text::PARAGRAPH_PADDING)
+        .into()
+    }
+
+    fn list(
+        &self,
+        settings: markdown::Settings,
+        start: Option<u64>,
+        bullets: &'a [markdown::Bullet],
+    ) -> Element<'a, Message> {
+        let marker_width = start.map_or(settings.text_size.0, |start| {
+            let last = start.saturating_add(bullets.len().saturating_sub(1) as u64);
+            (last.to_string().len() as f32 + 1.0) * settings.text_size.0 * 0.6
+        });
+        // Iced's default list multiplies settings.spacing for both indentation
+        // and every bullet. Paragraph gaps belong between blocks, not between
+        // tight items; keep a separate, font-sized marker gutter instead.
+        column(bullets.iter().enumerate().map(|(index, bullet)| {
+            let (markdown::Bullet::Point { items } | markdown::Bullet::Task { items, .. }) = bullet;
+            let marker: Element<'a, Message> =
+                if let (None, markdown::Bullet::Task { done, .. }) = (start, bullet) {
+                    container(checkbox(*done).size(settings.text_size))
+                        .center_y(settings.text_size * crate::typography::LINE_HEIGHT)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .width(marker_width)
+                        .into()
+                } else {
+                    text(start.map_or_else(
+                        || "•".to_owned(),
+                        |start| format!("{}.", start.saturating_add(index as u64)),
+                    ))
+                    .font(settings.style.font)
+                    .size(settings.text_size)
+                    .line_height(crate::typography::LINE_HEIGHT)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .width(marker_width)
+                    .into()
+                };
+            row![
+                container(marker).padding([interactive_text::PARAGRAPH_PADDING, 0.0]),
+                self.blocks(settings, items),
+            ]
+            .spacing(settings.text_size * 0.5)
+            .into()
+        }))
+        .into()
+    }
+
     /// Assembles the ordered producer pipeline shared by paragraphs and code
     /// blocks. Producers append generic primitives; this viewer only supplies
     /// their read-only collaborators and registration order.

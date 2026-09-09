@@ -10,6 +10,7 @@ mod input;
 mod interactive_text;
 mod preview;
 mod theme;
+mod typography;
 mod ui;
 mod watch;
 

@@ -84,10 +84,17 @@ preview and anchored comments.
   find matches highlight. The highlighter tracks how far the editor has
   fed it and which fence is open, rewinding on edits
   (`highlight::MarkdownMarkers`).
-- **Paragraph gap** — the taller line height a blank source line gets
-  (1.5× an ordinary line) in the forked `iced_graphics` under `vendor/`:
-  blank lines separate Markdown paragraphs, so they render as visible
-  breathing room between blocks of prose.
+- **Paragraph gap** — shared write/preview typography (`typography`):
+  20px body text, 1.8× line height (36px), and a 1.5× separator (54px).
+  Write mode applies it to blank source lines (empty or spaces/tabs)
+  outside fenced code through Iced's opt-in line-height hook; shaped heights
+  drive caret, selection, and visibility geometry (`vendor/README.md`).
+  Preview applies the same content-to-content gap between rendered blocks,
+  counting decoration insets inside the gap, not on top. Tight lists and
+  code interiors do not receive paragraph gaps; heading sizes remain semantic.
+  Preview follows Markdown's blank-line collapsing, while consecutive,
+  leading, and trailing source blanks keep individual heights in write mode.
+  The source text is unchanged.
 - **Palette** — the Omarchy color scheme the interface paints with,
   loaded from the current theme and reloaded when it changes
   (`theme::Palette`).

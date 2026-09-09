@@ -13,11 +13,6 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::{self, Arc, RwLock};
 
-/// agmawrite fork: blank lines — the paragraph breaks of a Markdown
-/// source — are laid out taller than ordinary lines, so paragraphs read as
-/// visibly separated without spacing every line of prose.
-const PARAGRAPH_BREAK_SCALE: f32 = 1.5;
-
 /// A multi-line text editor.
 #[derive(Debug, PartialEq)]
 pub struct Editor(Option<Arc<Internal>>);
@@ -155,44 +150,18 @@ impl editor::Editor for Editor {
 
         let cursor = match internal.editor.selection_bounds() {
             Some((start, end)) => {
-                let line_height = buffer.metrics().line_height;
-                let selected_lines = end.line - start.line + 1;
-
-                let visual_lines_offset =
-                    visual_lines_offset(start.line, buffer);
-
+                // Use the same shaped runs as painting and hit testing. Counting
+                // visual lines loses the extra height of paragraph separators.
                 let regions = buffer
-                    .lines
-                    .iter()
-                    .skip(start.line)
-                    .take(selected_lines)
-                    .enumerate()
-                    .flat_map(|(i, line)| {
-                        highlight_line(
-                            line,
-                            if i == 0 { start.index } else { 0 },
-                            if i == selected_lines - 1 {
-                                end.index
-                            } else {
-                                line.text().len()
-                            },
-                        )
-                    })
-                    .enumerate()
-                    .filter_map(|(visual_line, (x, width))| {
-                        if width > 0.0 {
-                            Some(Rectangle {
-                                x,
-                                width,
-                                y: (visual_line as i32 + visual_lines_offset)
-                                    as f32
-                                    * line_height
-                                    - buffer.scroll().vertical,
-                                height: line_height,
-                            })
-                        } else {
-                            None
-                        }
+                    .layout_runs()
+                    .filter_map(|run| {
+                        let (x, width) = run.highlight(start, end)?;
+                        (width > 0.0).then_some(Rectangle {
+                            x,
+                            width,
+                            y: run.line_top,
+                            height: run.line_height,
+                        })
                     })
                     .collect();
 
@@ -200,9 +169,12 @@ impl editor::Editor for Editor {
             }
             _ => {
                 let line_height = buffer.metrics().line_height;
-
-                let visual_lines_offset =
-                    visual_lines_offset(cursor.line, buffer);
+                // A scrolled-away cursor may have no cached layout (for
+                // example after a font change). Keep its caret clipped out.
+                if !buffer.layout_runs().any(|run| run.line_i == cursor.line) {
+                    return Selection::Caret(Point::new(0.0, -line_height));
+                }
+                let line_top = line_top(cursor.line, buffer);
 
                 let line = buffer
                     .lines
@@ -266,9 +238,13 @@ impl editor::Editor for Editor {
 
                 Selection::Caret(Point::new(
                     offset,
-                    (visual_lines_offset + visual_line as i32) as f32
-                        * line_height
-                        - buffer.scroll().vertical,
+                    line_top
+                        + layout[..visual_line]
+                            .iter()
+                            .map(|line| {
+                                line.line_height_opt.unwrap_or(line_height)
+                            })
+                            .sum::<f32>(),
                 ))
             }
         };
@@ -595,6 +571,9 @@ impl editor::Editor for Editor {
             {
                 log::trace!("Updating `Metrics` of `Editor`...");
 
+                // Per-line overrides contain absolute cosmic-text metrics.
+                // Re-feed them using the new base size and line height.
+                internal.topmost_line_changed = Some(0);
                 buffer.set_metrics(
                     font_system.raw(),
                     cosmic_text::Metrics::new(new_size.0, new_line_height.0),
@@ -642,104 +621,97 @@ impl editor::Editor for Editor {
         highlighter: &mut H,
         format_highlight: impl Fn(&H::Highlight) -> highlighter::Format<Self::Font>,
     ) {
-        let internal = self.internal();
-        let buffer = buffer_from_editor(&internal.editor);
-
-        let scroll = buffer.scroll();
-        let mut window = (internal.bounds.height / buffer.metrics().line_height)
-            .ceil() as i32;
-
-        let last_visible_line = buffer.lines[scroll.line..]
-            .iter()
-            .enumerate()
-            .find_map(|(i, line)| {
-                // agmawrite fork: paragraph breaks lay out taller than the
-                // uniform estimate above assumes, so the shaped region can
-                // end before the estimate does. The first line without a
-                // cached layout marks that end — everything past it is
-                // below the shaped viewport, so stop there instead of
-                // expecting a layout that was never computed.
-                let Some(layout) = line.layout_opt() else {
-                    return Some(scroll.line + i);
-                };
-
-                let visible_lines = layout.len() as i32;
-
-                if window > visible_lines {
-                    window -= visible_lines;
-                    None
-                } else {
-                    Some(scroll.line + i)
-                }
-            })
-            .unwrap_or(buffer.lines.len().saturating_sub(1));
-
-        let current_line = highlighter.current_line();
-
-        if current_line > last_visible_line {
+        let mut current_line = highlighter.current_line();
+        if self
+            .buffer()
+            .layout_runs()
+            .last()
+            .is_none_or(|run| current_line > run.line_i)
+        {
             return;
         }
 
-        let metrics = buffer.metrics();
+        // Highlighting can change geometry as well as color, so invalidate the
+        // cached selection exactly as update/perform do.
+        self.with_internal_mut(|internal| {
+            let mut font_system =
+                text::font_system().write().expect("Write font system");
+            let attributes = text::to_attributes(font);
+            let keep_cursor_visible =
+                internal.editor.cursor_position().is_some();
 
-        let editor =
-            self.0.take().expect("Editor should always be initialized");
-
-        let mut internal = Arc::try_unwrap(editor)
-            .expect("Editor cannot have multiple strong references");
-
-        let mut font_system =
-            text::font_system().write().expect("Write font system");
-
-        let attributes = text::to_attributes(font);
-
-        // agmawrite fork: a blank line separates Markdown paragraphs, so it
-        // is laid out taller than an ordinary line — the source editor shows
-        // a wider gap between paragraphs without spacing every line.
-        let paragraph_break = cosmic_text::Attrs {
-            metrics_opt: Some(
-                cosmic_text::Metrics::new(
-                    metrics.font_size,
-                    metrics.line_height * PARAGRAPH_BREAK_SCALE,
-                )
-                .into(),
-            ),
-            ..attributes.clone()
-        };
-
-        for line in &mut buffer_mut_from_editor(&mut internal.editor).lines
-            [current_line..=last_visible_line]
-        {
-            let mut list = if line.text().is_empty() {
-                cosmic_text::AttrsList::new(&paragraph_break)
-            } else {
-                cosmic_text::AttrsList::new(&attributes)
-            };
-
-            for (range, highlight) in highlighter.highlight_line(line.text()) {
-                let format = format_highlight(&highlight);
-
-                if format.color.is_some() || format.font.is_some() {
-                    list.add_span(
-                        range,
-                        &cosmic_text::Attrs {
-                            color_opt: format.color.map(text::to_color),
-                            ..if let Some(font) = format.font {
-                                text::to_attributes(font)
-                            } else {
-                                attributes.clone()
-                            }
-                        },
-                    );
+            loop {
+                let buffer = buffer_mut_from_editor(&mut internal.editor);
+                let Some(last_visible_line) =
+                    buffer.layout_runs().last().map(|run| run.line_i)
+                else {
+                    break;
+                };
+                if current_line > last_visible_line {
+                    break;
                 }
+                let metrics = buffer.metrics();
+
+                for line in &mut buffer.lines[current_line..=last_visible_line]
+                {
+                    let scale = highlighter.line_height_scale(line.text());
+                    let height = metrics.line_height * scale;
+                    let line_attributes = cosmic_text::Attrs {
+                        metrics_opt: (height.is_finite()
+                            && height > 0.0
+                            && scale != 1.0)
+                            .then(|| {
+                                cosmic_text::Metrics::new(
+                                    metrics.font_size,
+                                    height,
+                                )
+                                .into()
+                            }),
+                        ..attributes.clone()
+                    };
+                    let mut list =
+                        cosmic_text::AttrsList::new(&line_attributes);
+
+                    for (range, highlight) in
+                        highlighter.highlight_line(line.text())
+                    {
+                        let format = format_highlight(&highlight);
+                        if format.color.is_some() || format.font.is_some() {
+                            list.add_span(
+                                range,
+                                &cosmic_text::Attrs {
+                                    color_opt: format.color.map(text::to_color),
+                                    ..if let Some(font) = format.font {
+                                        cosmic_text::Attrs {
+                                            metrics_opt: line_attributes
+                                                .metrics_opt,
+                                            ..text::to_attributes(font)
+                                        }
+                                    } else {
+                                        line_attributes.clone()
+                                    }
+                                },
+                            );
+                        }
+                    }
+                    let _ = line.set_attrs_list(list);
+                }
+                current_line = last_visible_line + 1;
+
+                if keep_cursor_visible {
+                    // Reflow must not push the active caret below the viewport.
+                    // Do not do this when the user has scrolled away from it.
+                    let cursor = internal.editor.cursor();
+                    buffer_mut_from_editor(&mut internal.editor)
+                        .shape_until_cursor(font_system.raw(), cursor, false);
+                } else {
+                    internal.editor.shape_as_needed(font_system.raw(), false);
+                }
+                // Smaller line heights (or rewrapping) can reveal more lines.
+                // Feed those in this draw too, using actual runs, not a uniform
+                // height estimate or the presence of stale offscreen caches.
             }
-
-            let _ = line.set_attrs_list(list);
-        }
-
-        internal.editor.shape_as_needed(font_system.raw(), false);
-
-        self.0 = Some(Arc::new(internal));
+        });
     }
 }
 
@@ -809,66 +781,21 @@ impl PartialEq for Weak {
     }
 }
 
-fn highlight_line(
-    line: &cosmic_text::BufferLine,
-    from: usize,
-    to: usize,
-) -> impl Iterator<Item = (f32, f32)> + '_ {
-    let layout = line.layout_opt().map(Vec::as_slice).unwrap_or_default();
-
-    layout.iter().map(move |visual_line| {
-        let start = visual_line
-            .glyphs
-            .first()
-            .map(|glyph| glyph.start)
-            .unwrap_or(0);
-        let end = visual_line
-            .glyphs
-            .last()
-            .map(|glyph| glyph.end)
-            .unwrap_or(0);
-
-        let range = start.max(from)..end.min(to);
-
-        if range.is_empty() {
-            (0.0, 0.0)
-        } else if range.start == start && range.end == end {
-            (0.0, visual_line.w)
-        } else {
-            let first_glyph = visual_line
-                .glyphs
-                .iter()
-                .position(|glyph| range.start <= glyph.start)
-                .unwrap_or(0);
-
-            let mut glyphs = visual_line.glyphs.iter();
-
-            let x =
-                glyphs.by_ref().take(first_glyph).map(|glyph| glyph.w).sum();
-
-            let width: f32 = glyphs
-                .take_while(|glyph| range.end > glyph.start)
-                .map(|glyph| glyph.w)
-                .sum();
-
-            (x, width)
-        }
-    })
-}
-
-fn visual_lines_offset(line: usize, buffer: &cosmic_text::Buffer) -> i32 {
+// Source lines may contain several wrapped runs, each with its own height.
+fn line_top(line: usize, buffer: &cosmic_text::Buffer) -> f32 {
     let scroll = buffer.scroll();
-
     let start = scroll.line.min(line);
     let end = scroll.line.max(line);
-
-    let visual_lines_offset: usize = buffer.lines[start..]
+    let height: f32 = buffer.lines[start..end]
         .iter()
-        .take(end - start)
-        .map(|line| line.layout_opt().map(Vec::len).unwrap_or_default())
+        .filter_map(|line| line.layout_opt())
+        .flatten()
+        .map(|line| {
+            line.line_height_opt.unwrap_or(buffer.metrics().line_height)
+        })
         .sum();
 
-    visual_lines_offset as i32 * if scroll.line < line { 1 } else { -1 }
+    height * if scroll.line < line { 1.0 } else { -1.0 } - scroll.vertical
 }
 
 fn to_motion(motion: Motion) -> cosmic_text::Motion {

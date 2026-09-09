@@ -330,10 +330,10 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
             .id(Id::new(SOURCE_EDITOR_ID))
             .on_action(|action| Message::Document(document::Message::Edit(action)))
             .font(EDITOR_FONT)
-            .size(20)
+            .size(crate::typography::TEXT_SIZE)
             .height(Length::Fill)
             .padding(0)
-            .line_height(1.8)
+            .line_height(crate::typography::LINE_HEIGHT)
             .highlight_with::<highlight::MarkdownMarkers>(
                 editor.find.query().to_owned(),
                 highlight::format,

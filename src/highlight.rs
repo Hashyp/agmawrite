@@ -5,6 +5,9 @@
 //! images — render in a dimmer grey than the text, so the writing stands
 //! out from the syntax.
 
+#[cfg(test)]
+mod layout_tests;
+
 use std::ops::Range;
 
 use iced::advanced::text::highlighter::{Format, Highlighter};
@@ -96,20 +99,20 @@ impl Highlighter for MarkdownMarkers {
     }
 
     fn change_line(&mut self, line: usize) {
-        // Snapshots up to the changed line stay valid — an edit cannot
-        // alter the fence state of the lines above it. Lines beyond the
-        // ones fed so far have never been scanned; their state is guessed
-        // as the latest known one until they are fed for real.
-        if line < self.fences.len() {
-            self.fences.truncate(line + 1);
-        } else {
-            let last = self.fences.last().copied().flatten();
-            while self.fences.len() < line + 1 {
-                self.fences.push(last);
-            }
-        }
+        // Never skip unvisited lines: an edit far below the viewport still
+        // needs the intervening fences replayed before its layout is known.
+        self.next_line = line.min(self.next_line);
+        self.fences.truncate(self.next_line + 1);
+    }
 
-        self.next_line = line;
+    fn line_height_scale(&self, line: &str) -> f32 {
+        if line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+            && self.fences.last().copied().flatten().is_none()
+        {
+            crate::typography::PARAGRAPH_GAP_SCALE
+        } else {
+            1.0
+        }
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
@@ -129,21 +132,22 @@ impl Highlighter for MarkdownMarkers {
 /// at least three backticks or tildes opens a fence, and a later run of
 /// the same character at least as long closes it.
 fn fence_after(line: &str, entering: Option<Fence>) -> Option<Fence> {
-    let rest = line.trim_start_matches([' ', '\t']);
+    if let Some(fence) = entering {
+        return closing_fence(line, fence).is_none().then_some(fence);
+    }
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
 
     for marker in ['`', '~'] {
         let run = rest.chars().take_while(|&c| c == marker).count();
-
-        if run >= 3 {
-            return match entering {
-                Some(fence) if fence.marker == marker && run >= fence.len => None,
-                Some(fence) => Some(fence),
-                None => Some(Fence { marker, len: run }),
-            };
+        if run >= 3 && (marker != '`' || !rest[run..].contains('`')) {
+            return Some(Fence { marker, len: run });
         }
     }
 
-    entering
+    None
 }
 
 /// The highlights of a source line: the byte ranges holding Markdown
@@ -185,14 +189,15 @@ fn line_highlights(
 /// The marker range of the line closing `fence`, if it does: a run of the
 /// fence's own character at least as long as the opening one.
 fn closing_fence(line: &str, fence: Fence) -> Option<Range<usize>> {
-    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let indent = line.len() - line.trim_start_matches(' ').len();
     let rest = &line[indent..];
-    let run = rest
-        .chars()
-        .take_while(|&c| c == fence.marker)
-        .count();
+    let run = rest.chars().take_while(|&c| c == fence.marker).count();
 
-    (run >= fence.len && run >= 3).then(|| indent..indent + run)
+    (indent <= 3
+        && run >= fence.len
+        && run >= 3
+        && rest[run..].bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+    .then(|| indent..indent + run)
 }
 
 /// Removes `cuts` from `range`, returning the leftover sub-ranges in
@@ -527,9 +532,9 @@ fn links(chars: &[(usize, char)], code: &[Range<usize>]) -> Vec<Range<usize>> {
             continue;
         }
 
-        let Some(close) = (index + 1..chars.len()).find(|&candidate| {
-            chars[candidate].1 == ']' && !escaped(chars, candidate)
-        }) else {
+        let Some(close) = (index + 1..chars.len())
+            .find(|&candidate| chars[candidate].1 == ']' && !escaped(chars, candidate))
+        else {
             break;
         };
 
@@ -819,7 +824,10 @@ mod tests {
             "a tilde run does not close a backtick fence"
         );
 
-        let tilde = Fence { marker: '~', len: 4 };
+        let tilde = Fence {
+            marker: '~',
+            len: 4,
+        };
         assert_eq!(fence_after("~~~~ md", None), Some(tilde));
         assert_eq!(fence_after("plain text", Some(tilde)), Some(tilde));
     }
@@ -861,10 +869,7 @@ mod tests {
         // A tilde run never closes a backtick fence.
         assert_eq!(inside("~~~", ""), vec![]);
 
-        assert_eq!(
-            line_highlights("```rust", "", None),
-            vec![(0..3, Marker)]
-        );
+        assert_eq!(line_highlights("```rust", "", None), vec![(0..3, Marker)]);
         assert_eq!(
             closing_fence("not a fence", fence),
             None,
@@ -891,11 +896,11 @@ mod tests {
         highlighter.highlight_line("edited");
         assert_eq!(highlighter.current_line(), 2);
 
-        // Rewinding past the fed lines still leaves a consistent state.
+        // An edit beyond the fed lines must not skip unknown fence context.
         highlighter.change_line(9);
-        assert_eq!(highlighter.current_line(), 9);
-        highlighter.highlight_line("far below");
-        assert_eq!(highlighter.current_line(), 10);
+        assert_eq!(highlighter.current_line(), 2);
+        highlighter.highlight_line("first unvisited line");
+        assert_eq!(highlighter.current_line(), 3);
 
         highlighter.update(&settings);
         assert_eq!(highlighter.current_line(), 0);
@@ -941,8 +946,7 @@ mod tests {
         use iced::{Font, Pixels, Size};
 
         // Three paragraphs — five lines, two of them blank separators.
-        let mut editor =
-            RenderEditor::with_text("# title\n\nparagraph one\n\nparagraph two");
+        let mut editor = RenderEditor::with_text("# title\n\nparagraph one\n\nparagraph two");
         let mut highlighter = MarkdownMarkers::new(&String::new());
 
         editor.update(
