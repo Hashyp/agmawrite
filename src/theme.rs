@@ -13,6 +13,13 @@ use iced::futures::channel::mpsc::Sender;
 use iced::{Color, Subscription};
 use std::path::PathBuf;
 
+/// The contrast a heading tint must hold against the background before it
+/// may replace ordinary text.
+const MIN_HEADING_CONTRAST: f32 = 4.5;
+
+/// How finely the heading tint search backs off toward the foreground.
+const CONTRAST_SEARCH_STEPS: u8 = 32;
+
 /// A filesystem event indicating that the current palette may have changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
@@ -85,7 +92,7 @@ fn forward_change(sender: &mut Sender<Event>) -> bool {
 /// The palette the interface paints with: surfaces, text, and the accent
 /// colors. [`Palette::current`] reads it from omarchy; [`Palette::default`]
 /// is the fallback look, matching the original hardcoded colors.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
     /// Whether the omarchy theme is a light one — the markdown renderer
     /// and iced's theme follow it.
@@ -267,6 +274,33 @@ impl Palette {
         }
     }
 
+    /// Resolves a heading level (1–6) to an active-theme role, softened
+    /// toward the theme's foreground. If that tint is too faint on the
+    /// current background, progressively less of the role is used until
+    /// ordinary-text contrast holds. The preview and the write mode tint
+    /// headings with the same resolution.
+    pub fn heading_color(&self, level: usize) -> Color {
+        let (role, strength) = match level {
+            1 => (self.magenta, 0.65),
+            2 => (self.blue, 0.60),
+            3 => (self.cyan, 0.55),
+            4 => (self.green, 0.45),
+            5 => (self.yellow, 0.30),
+            _ => (self.magenta, 0.12),
+        };
+
+        for step in 0..=CONTRAST_SEARCH_STEPS {
+            let role_weight = strength * (1.0 - f32::from(step) / f32::from(CONTRAST_SEARCH_STEPS));
+            let candidate = mix(role, self.foreground, role_weight);
+
+            if candidate.relative_contrast(self.background) >= MIN_HEADING_CONTRAST {
+                return candidate;
+            }
+        }
+
+        self.foreground
+    }
+
     /// The omarchy palette mapped onto iced's theme roles, so the runtime
     /// theme and every default-styled widget follow omarchy colors.
     pub fn iced(&self) -> iced::theme::Palette {
@@ -286,6 +320,17 @@ impl Palette {
     pub fn runtime_theme(&self) -> iced::Theme {
         iced::Theme::custom("omarchy", self.iced())
     }
+}
+
+/// Mixes `role_weight` of a semantic role with the theme foreground.
+fn mix(role: Color, foreground: Color, role_weight: f32) -> Color {
+    let foreground_weight = 1.0 - role_weight;
+
+    Color::from_rgb(
+        role.r * role_weight + foreground.r * foreground_weight,
+        role.g * role_weight + foreground.g * foreground_weight,
+        role.b * role_weight + foreground.b * foreground_weight,
+    )
 }
 
 fn home() -> PathBuf {
@@ -322,7 +367,7 @@ fn hex(value: &str) -> Option<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{forward_change, hex, Palette};
+    use super::{forward_change, hex, Palette, MIN_HEADING_CONTRAST};
     use iced::Color;
 
     fn close(a: Color, b: Color) -> bool {
@@ -455,6 +500,72 @@ broken = \"nope\"
 
         assert!(close(palette.background, Palette::default().background));
         assert!(close(palette.accent, Palette::default().accent));
+    }
+
+    /// Heading levels take distinct semantic roles from the palette,
+    /// softened by progressively smaller amounts toward its foreground —
+    /// the tints the preview and the write mode both paint headings with.
+    #[test]
+    fn heading_colors_use_level_specific_palette_roles() {
+        let palette = Palette {
+            background: Color::BLACK,
+            foreground: Color::WHITE,
+            magenta: Color::from_rgb(1.0, 0.0, 0.0),
+            blue: Color::from_rgb(0.0, 1.0, 0.0),
+            cyan: Color::from_rgb(0.0, 0.0, 1.0),
+            green: Color::from_rgb(1.0, 1.0, 0.0),
+            yellow: Color::from_rgb(1.0, 0.0, 1.0),
+            ..Palette::default()
+        };
+
+        let colors = [
+            palette.heading_color(1),
+            palette.heading_color(2),
+            palette.heading_color(3),
+            palette.heading_color(4),
+            palette.heading_color(5),
+            palette.heading_color(6),
+        ];
+
+        let expected = [
+            Color::from_rgb(1.0, 0.35, 0.35),
+            Color::from_rgb(0.4, 1.0, 0.4),
+            Color::from_rgb(0.45, 0.45, 1.0),
+            Color::from_rgb(1.0, 1.0, 0.55),
+            Color::from_rgb(1.0, 0.7, 1.0),
+            Color::from_rgb(1.0, 0.88, 0.88),
+        ];
+        let close = colors.into_iter().zip(expected).all(|(actual, expected)| {
+            (actual.r - expected.r).abs() < 1e-6
+                && (actual.g - expected.g).abs() < 1e-6
+                && (actual.b - expected.b).abs() < 1e-6
+        });
+
+        assert!(close, "unexpected heading colors: {colors:?}");
+    }
+
+    /// A role that disappears into a light background is pulled toward the
+    /// theme foreground until it reaches ordinary-text WCAG contrast.
+    #[test]
+    fn heading_colors_guard_contrast_on_light_themes() {
+        let palette = Palette {
+            background: Color::WHITE,
+            foreground: Color::BLACK,
+            magenta: Color::WHITE,
+            blue: Color::WHITE,
+            cyan: Color::WHITE,
+            green: Color::WHITE,
+            yellow: Color::WHITE,
+            ..Palette::default()
+        };
+
+        let colors = (1..=6)
+            .map(|level| palette.heading_color(level))
+            .collect::<Vec<_>>();
+
+        assert!(colors
+            .into_iter()
+            .all(|color| { color.relative_contrast(palette.background) >= MIN_HEADING_CONTRAST }));
     }
 
     /// A queued theme-change event already causes the latest palette to be

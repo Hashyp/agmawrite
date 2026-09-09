@@ -1,9 +1,11 @@
-//! Syntax dimming for the write-mode editor: Markdown's own markers —
-//! block prefixes like heading hashes, list bullets, checkboxes, ordered
-//! numbers, blockquote bars, code fences, and thematic breaks, plus the
-//! inline punctuation of emphasis, code spans, strikethroughs, links, and
-//! images — render in a dimmer grey than the text, so the writing stands
-//! out from the syntax.
+//! Syntax dimming and heading tints for the write-mode editor: Markdown's
+//! own markers — block prefixes like heading hashes, list bullets,
+//! checkboxes, ordered numbers, blockquote bars, code fences, and thematic
+//! breaks, plus the inline punctuation of emphasis, code spans,
+//! strikethroughs, links, and images — render in a dimmer grey than the
+//! text, so the writing stands out from the syntax. Heading text goes the
+//! other way: each level takes the same palette-role tint the preview
+//! paints it with, softened to stay legible.
 
 #[cfg(test)]
 mod layout_tests;
@@ -13,28 +15,50 @@ use std::ops::Range;
 use iced::advanced::text::highlighter::{Format, Highlighter};
 use iced::{Color, Font, Theme};
 
+use crate::theme::Palette;
+
 /// The marker grey: the theme's foreground eased toward its background —
 /// between the omarchy foreground and muted roles, dimmed but legible.
 const MARKER_DIM_FACTOR: f32 = 0.45;
 
-/// A highlighted stretch of a source line: a Markdown syntax marker, or
-/// a find match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The write-mode highlighter's settings: the find query and the active
+/// omarchy palette. A changed setting restarts the scan, so new matches
+/// tint and theme-switched heading tints re-resolve.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Settings {
+    /// The find query whose matches tint amber.
+    pub query: String,
+    /// The palette resolving heading tints.
+    pub palette: Palette,
+}
+
+/// A highlighted stretch of a source line: a Markdown syntax marker, a
+/// heading's tinted text, or a find match.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Highlight {
+    /// Markdown punctuation, dimmed.
     Marker,
+    /// Heading text, tinted with its level's palette role — the same
+    /// resolution the preview paints the heading with, resolved against
+    /// the settings' palette when the line was highlighted.
+    Heading(Color),
+    /// A match of the find query, in the theme's warning yellow — the
+    /// same amber family the preview tints them with.
     FindMatch,
 }
 
 /// Turns a highlight into its text format. The runtime theme carries the
 /// omarchy palette: markers dim toward its background, find matches paint
-/// in its warning yellow — the same amber family the preview tints them
-/// with.
+/// in its warning yellow. Headings arrive pre-resolved against the
+/// palette the settings carried — the theme's five roles cannot recover
+/// the omarchy ones, and the format hook is a plain function.
 pub fn format(highlight: &Highlight, theme: &Theme) -> Format<Font> {
     let roles = theme.palette();
 
     Format {
         color: match highlight {
             Highlight::Marker => dimmed(roles.text, roles.background),
+            Highlight::Heading(color) => *color,
             Highlight::FindMatch => roles.warning,
         }
         .into(),
@@ -60,17 +84,19 @@ struct Fence {
     len: usize,
 }
 
-/// The write-mode highlighter, driven by the find query: Markdown markers
-/// dim, and every match of the query tints amber.
+/// The write-mode highlighter, driven by its settings: Markdown markers
+/// dim, heading text takes its level's palette tint, and every match of
+/// the find query tints amber.
 ///
 /// The editor feeds lines in document order and rewinds with
 /// [`change_line`] after an edit, so the highlighter tracks how far it has
 /// read and which fence is open — only that way can a line know whether it
-/// sits inside a code block. Settings changes (the find query) restart the
-/// scan, because every already-highlighted line must be re-fed with the
-/// new matches.
+/// sits inside a code block. Settings changes (the find query or the
+/// palette) restart the scan, because every already-highlighted line must
+/// be re-fed with the new matches and tints.
 pub struct MarkdownMarkers {
     query: String,
+    palette: Palette,
     /// The index of the next line the editor will feed.
     next_line: usize,
     /// The fence open at the start of each fed line: entry `i` is the
@@ -80,20 +106,22 @@ pub struct MarkdownMarkers {
 }
 
 impl Highlighter for MarkdownMarkers {
-    type Settings = String;
+    type Settings = Settings;
     type Highlight = Highlight;
     type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Highlight)>;
 
     fn new(settings: &Self::Settings) -> Self {
         Self {
-            query: settings.clone(),
+            query: settings.query.clone(),
+            palette: settings.palette,
             next_line: 0,
             fences: vec![None],
         }
     }
 
     fn update(&mut self, new_settings: &Self::Settings) {
-        self.query = new_settings.clone();
+        self.query = new_settings.query.clone();
+        self.palette = new_settings.palette;
         self.next_line = 0;
         self.fences = vec![None];
     }
@@ -117,7 +145,7 @@ impl Highlighter for MarkdownMarkers {
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
         let entering = self.fences.last().copied().flatten();
-        let highlights = line_highlights(line, &self.query, entering);
+        let highlights = line_highlights(line, &self.query, entering, &self.palette);
         self.fences.push(fence_after(line, entering));
         self.next_line += 1;
         highlights.into_iter()
@@ -151,31 +179,58 @@ fn fence_after(line: &str, entering: Option<Fence>) -> Option<Fence> {
 }
 
 /// The highlights of a source line: the byte ranges holding Markdown
-/// markers and find matches, sorted by position. Inside a fenced code
-/// block only the closing fence marker and find matches highlight — code
-/// is prose to the writer, not syntax. A match overlapping a marker wins
-/// the stretch they share — the match is what the eye is looking for.
+/// markers, heading tints, and find matches, sorted by position. Inside a
+/// fenced code block only the closing fence marker and find matches
+/// highlight — code is prose to the writer, not syntax. A match
+/// overlapping a marker or a heading tint wins the stretch they share —
+/// the match is what the eye is looking for.
 fn line_highlights(
     line: &str,
     query: &str,
     fence: Option<Fence>,
+    palette: &Palette,
 ) -> Vec<(Range<usize>, Highlight)> {
     let matches = crate::editing::byte_matches(line, query);
+
+    // The heading tint: the role the preview would paint this heading
+    // with, resolved against the active palette. Code fences have no
+    // headings — code is content, not structure.
+    let heading = match fence {
+        Some(_) => None,
+        None => heading_span(line).map(|(level, span)| (span, palette.heading_color(level))),
+    };
 
     let markers: Vec<Range<usize>> = match fence {
         Some(fence) => closing_fence(line, fence).into_iter().collect(),
         None => marker_ranges(line),
     };
 
-    let mut highlights: Vec<(Range<usize>, Highlight)> = markers
-        .into_iter()
-        .flat_map(|range| {
+    let mut highlights: Vec<(Range<usize>, Highlight)> = Vec::new();
+
+    for range in markers {
+        // Punctuation inside a heading belongs to its tinted text —
+        // like the preview, the heading reads as one colored unit.
+        if heading
+            .as_ref()
+            .is_some_and(|(span, _)| span.contains(&range.start))
+        {
+            continue;
+        }
+
+        highlights.extend(
             subtract(range, &matches)
                 .into_iter()
-                .map(|range| (range, Highlight::Marker))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+                .map(|range| (range, Highlight::Marker)),
+        );
+    }
+
+    if let Some((span, color)) = heading {
+        highlights.extend(
+            subtract(span, &matches)
+                .into_iter()
+                .map(|range| (range, Highlight::Heading(color))),
+        );
+    }
 
     highlights.extend(
         matches
@@ -184,6 +239,54 @@ fn line_highlights(
     );
     highlights.sort_by_key(|(range, _)| range.start);
     highlights
+}
+
+/// The level and text span of a line's heading, if it is one: one to six
+/// `#` after blockquote bars, then a space, then the text to the end of
+/// the line. The hashes dim as markers; the text takes the level's tint,
+/// so the write mode reads like the preview.
+fn heading_span(line: &str) -> Option<(usize, Range<usize>)> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (offset, rest) = after_bars(line, indent, &mut Vec::new());
+
+    let hashes = rest.bytes().take_while(|&byte| byte == b'#').count();
+
+    if !(1..=6).contains(&hashes) || !rest[hashes..].starts_with(' ') {
+        return None;
+    }
+
+    let start =
+        offset + hashes + (rest[hashes..].len() - rest[hashes..].trim_start_matches(' ').len());
+    let end = line.trim_end().len();
+
+    (start < end).then_some((hashes, start..end))
+}
+
+/// Walks a line's blockquote bars, pushing one range per `>` (each
+/// possibly followed by a space), and returning the offset and rest of
+/// the line after them — the remainder can still be a heading or a list
+/// item. Marker dimming and heading tinting share the walk so the two
+/// never disagree about where a line's prefixes end.
+fn after_bars<'a>(
+    line: &'a str,
+    indent: usize,
+    ranges: &mut Vec<Range<usize>>,
+) -> (usize, &'a str) {
+    let mut offset = indent;
+    let mut rest = &line[indent..];
+
+    while let Some(after) = rest.strip_prefix('>') {
+        ranges.push(offset..offset + 1);
+        offset += 1;
+        rest = after;
+
+        if let Some(after) = rest.strip_prefix(' ') {
+            offset += 1;
+            rest = after;
+        }
+    }
+
+    (offset, rest)
 }
 
 /// The marker range of the line closing `fence`, if it does: a run of the
@@ -262,19 +365,7 @@ fn marker_ranges(line: &str) -> Vec<Range<usize>> {
 
     // Blockquote bars, one range per `>`, each possibly followed by a
     // space; the remainder can still be a heading or a list item.
-    let mut offset = indent;
-    let mut rest = rest;
-
-    while let Some(after) = rest.strip_prefix('>') {
-        ranges.push(offset..offset + 1);
-        offset += 1;
-        rest = after;
-
-        if let Some(after) = rest.strip_prefix(' ') {
-            offset += 1;
-            rest = after;
-        }
-    }
+    let (offset, rest) = after_bars(line, indent, &mut ranges);
 
     // Heading hashes: one to six `#` followed by a space.
     let hashes = rest.bytes().take_while(|&byte| byte == b'#').count();
@@ -575,17 +666,26 @@ fn links(chars: &[(usize, char)], code: &[Range<usize>]) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::dimmed as dimmed_color;
-    use super::Highlight::{FindMatch, Marker};
+    use super::Highlight::{FindMatch, Heading, Marker};
     use super::{
-        closing_fence, fence_after, format, line_highlights, marker_ranges, Fence,
-        Highlighter as _, MarkdownMarkers,
+        closing_fence, fence_after, format, heading_span, line_highlights, marker_ranges, Fence,
+        Highlighter as _, MarkdownMarkers, Settings,
     };
     use crate::theme::Palette;
     use iced::{Color, Font};
 
+    /// The test settings: a query with the default palette.
+    fn settings(query: &str) -> Settings {
+        Settings {
+            query: query.to_owned(),
+            palette: Palette::default(),
+        }
+    }
+
     /// Highlight formats paint with omarchy roles: markers dim the
     /// foreground toward the background, find matches take the warning
-    /// yellow — never a hardcoded grey or amber.
+    /// yellow — never a hardcoded grey or amber. Headings carry their
+    /// resolved tint through untouched.
     #[test]
     fn formats_follow_the_runtime_palette() {
         let theme = Palette::default().runtime_theme();
@@ -600,6 +700,11 @@ mod tests {
         let find = format(&FindMatch, &theme);
         assert_eq!(find.color, Some(roles.warning));
         assert_eq!(find.font, None::<Font>);
+
+        let tint = Color::from_rgb(0.2, 0.4, 0.6);
+        let heading = format(&Heading(tint), &theme);
+        assert_eq!(heading.color, Some(tint));
+        assert_eq!(heading.font, None::<Font>);
     }
 
     /// The marker grey eases the foreground toward the background per
@@ -622,6 +727,188 @@ mod tests {
             .into_iter()
             .map(|range| &line[range])
             .collect()
+    }
+
+    /// The highlights of `line`, as slices paired with kinds.
+    fn highlights<'a>(
+        line: &'a str,
+        query: &str,
+        palette: &Palette,
+    ) -> Vec<(&'a str, super::Highlight)> {
+        line_highlights(line, query, None, palette)
+            .into_iter()
+            .map(|(range, kind)| (&line[range], kind))
+            .collect()
+    }
+
+    /// A heading's text takes its level's role color — the same tint the
+    /// preview paints it with — while the hashes keep their dimmed grey.
+    #[test]
+    fn tints_heading_text_with_the_level_role() {
+        let palette = Palette {
+            background: Color::BLACK,
+            foreground: Color::WHITE,
+            magenta: Color::from_rgb(1.0, 0.0, 0.0),
+            blue: Color::from_rgb(0.0, 1.0, 0.0),
+            cyan: Color::from_rgb(0.0, 0.0, 1.0),
+            green: Color::from_rgb(1.0, 1.0, 0.0),
+            yellow: Color::from_rgb(1.0, 0.0, 1.0),
+            ..Palette::default()
+        };
+
+        // The expected tints, mixed by hand from the fixture roles.
+        let h1 = Color::from_rgb(1.0, 0.35, 0.35);
+        let h2 = Color::from_rgb(0.4, 1.0, 0.4);
+        let h6 = Color::from_rgb(1.0, 0.88, 0.88);
+        let close = |a: Color, b: Color| {
+            (a.r - b.r).abs() < 1e-5 && (a.g - b.g).abs() < 1e-5 && (a.b - b.b).abs() < 1e-5
+        };
+
+        // The level tint, extracted from the line's highlights.
+        let tint_of = |line: &str| {
+            line_highlights(line, "", None, &palette)
+                .into_iter()
+                .find_map(|(_, kind)| match kind {
+                    Heading(color) => Some(color),
+                    _ => None,
+                })
+                .unwrap_or(Color::BLACK)
+        };
+
+        assert!(close(tint_of("# Title"), h1));
+        assert!(close(tint_of("###### Deep"), h6));
+        assert!(close(tint_of("  ## Indented"), h2));
+        assert!(close(tint_of("> ## Quoted heading"), h2));
+
+        // Only the hashes dim: the separating spaces and the text beyond
+        // them carry no other highlights, and trailing whitespace stays
+        // outside the tint.
+        assert_eq!(
+            highlights("# Title", "", &palette),
+            vec![("#", Marker), ("Title", Heading(palette.heading_color(1))),]
+        );
+        assert_eq!(
+            highlights("  ## Indented  ", "", &palette),
+            vec![
+                ("##", Marker),
+                ("Indented", Heading(palette.heading_color(2))),
+            ]
+        );
+
+        // Quoted headings tint their text beyond the dimmed bar and
+        // hashes.
+        assert_eq!(
+            highlights("> ## Quoted heading", "", &palette),
+            vec![
+                (">", Marker),
+                ("##", Marker),
+                ("Quoted heading", Heading(palette.heading_color(2))),
+            ]
+        );
+
+        // Not headings: no space after the hashes, or too many of them.
+        assert_eq!(highlights("#tag", "", &palette), vec![]);
+        assert_eq!(highlights("####### Too deep", "", &palette), vec![]);
+        assert_eq!(highlights("# ", "", &palette), vec![("#", Marker)]);
+    }
+
+    /// Punctuation inside a heading belongs to its tinted text — the
+    /// heading reads as one colored unit, like the preview.
+    #[test]
+    fn heading_text_swallows_its_inline_markers() {
+        let palette = Palette::default();
+
+        assert_eq!(
+            highlights("# a *b* `c` d", "", &palette),
+            vec![
+                ("#", Marker),
+                ("a *b* `c` d", Heading(palette.heading_color(1))),
+            ]
+        );
+    }
+
+    /// A find match inside heading text wins the stretch it shares; the
+    /// leftover text keeps its level tint.
+    #[test]
+    fn find_matches_win_over_heading_tints() {
+        let palette = Palette::default();
+
+        assert_eq!(
+            highlights("# Title", "Ti", &palette),
+            vec![
+                ("#", Marker),
+                ("Ti", FindMatch),
+                ("tle", Heading(palette.heading_color(1))),
+            ]
+        );
+    }
+
+    /// Inside a code fence there are no headings: the line is code,
+    /// prose to the writer, so nothing tints.
+    #[test]
+    fn fenced_headings_stay_prose() {
+        let mut highlighter = MarkdownMarkers::new(&settings(""));
+
+        let opening: Vec<_> = highlighter.highlight_line("```").collect();
+        assert_eq!(opening, vec![(0..3, Marker)]);
+
+        let inside: Vec<_> = highlighter.highlight_line("# not a heading").collect();
+        assert!(inside.is_empty());
+    }
+
+    /// A palette change is a settings change: the scan restarts and the
+    /// same heading re-resolves against the new theme.
+    #[test]
+    fn palette_changes_reresolve_heading_tints() {
+        let default = settings("");
+        let mut highlighter = MarkdownMarkers::new(&default);
+
+        let before: Vec<_> = highlighter.highlight_line("# Title").collect();
+        assert_eq!(
+            before,
+            vec![
+                (0..1, Marker),
+                (2..7, Heading(default.palette.heading_color(1))),
+            ]
+        );
+
+        highlighter.update(&Settings {
+            query: String::new(),
+            palette: Palette {
+                foreground: Color::BLACK,
+                ..Palette::default()
+            },
+        });
+
+        let after: Vec<_> = highlighter.highlight_line("# Title").collect();
+        assert_ne!(before, after);
+        assert_eq!(
+            after,
+            vec![(0..1, Marker), (2..7, Heading(Color::BLACK))],
+            "an invisible tint falls back to the foreground"
+        );
+    }
+
+    /// Heading spans give their level and the byte range of the text:
+    /// after the hashes and their separating spaces, before trailing
+    /// whitespace. Quoted headings start past their bars.
+    #[test]
+    fn heading_spans_find_their_level_and_text() {
+        assert_eq!(heading_span("# Title"), Some((1, 2..7)));
+        assert_eq!(heading_span("###### Deep"), Some((6, 7..11)));
+        assert_eq!(heading_span("  ## Indented"), Some((2, 5..13)));
+        assert_eq!(heading_span("> ### Quoted"), Some((3, 6..12)));
+        assert_eq!(heading_span("# Title  "), Some((1, 2..7)));
+
+        // Not headings: no space after the hashes, too many of them, or
+        // a different block prefix in the way.
+        assert_eq!(heading_span("#"), None);
+        assert_eq!(heading_span("# "), None);
+        assert_eq!(heading_span("#\ttitle"), None);
+        assert_eq!(heading_span("#tag"), None);
+        assert_eq!(heading_span("####### Too deep"), None);
+        assert_eq!(heading_span("plain text"), None);
+        assert_eq!(heading_span("- # not nested"), None);
     }
 
     #[test]
@@ -742,8 +1029,9 @@ mod tests {
     /// dimmed. Everything comes out sorted by position.
     #[test]
     fn find_matches_tint_and_win_over_markers() {
+        let palette = Palette::default();
         let highlights = |line, query| {
-            line_highlights(line, query, None)
+            line_highlights(line, query, None, &palette)
                 .into_iter()
                 .map(|(range, kind)| (line[range].to_owned(), kind))
                 .collect::<Vec<_>>()
@@ -755,10 +1043,14 @@ mod tests {
             vec![("text".to_owned(), FindMatch)]
         );
 
-        // A match covering the marker wins outright.
+        // A match covering the marker wins outright; the heading text
+        // beyond the match keeps its level tint.
         assert_eq!(
             highlights("# heading", "#"),
-            vec![("#".to_owned(), FindMatch)]
+            vec![
+                ("#".to_owned(), FindMatch),
+                ("heading".to_owned(), Heading(palette.heading_color(1))),
+            ]
         );
 
         // A marker beside a match: both survive, in order.
@@ -842,7 +1134,7 @@ mod tests {
         };
 
         let inside = |line, query| {
-            line_highlights(line, query, Some(fence))
+            line_highlights(line, query, Some(fence), &Palette::default())
                 .into_iter()
                 .map(|(range, kind)| (&line[range], kind))
                 .collect::<Vec<_>>()
@@ -869,7 +1161,10 @@ mod tests {
         // A tilde run never closes a backtick fence.
         assert_eq!(inside("~~~", ""), vec![]);
 
-        assert_eq!(line_highlights("```rust", "", None), vec![(0..3, Marker)]);
+        assert_eq!(
+            line_highlights("```rust", "", None, &Palette::default()),
+            vec![(0..3, Marker)]
+        );
         assert_eq!(
             closing_fence("not a fence", fence),
             None,
@@ -883,7 +1178,7 @@ mod tests {
     /// scan from the top.
     #[test]
     fn tracks_the_line_the_editor_will_feed_next() {
-        let settings = String::new();
+        let settings = settings("");
         let mut highlighter = MarkdownMarkers::new(&settings);
         assert_eq!(highlighter.current_line(), 0);
 
@@ -911,7 +1206,7 @@ mod tests {
     /// highlights.
     #[test]
     fn tracks_fences_across_fed_lines() {
-        let settings = String::new();
+        let settings = settings("");
         let mut highlighter = MarkdownMarkers::new(&settings);
 
         let opening: Vec<_> = highlighter.highlight_line("```rust").collect();
@@ -947,7 +1242,7 @@ mod tests {
 
         // Three paragraphs — five lines, two of them blank separators.
         let mut editor = RenderEditor::with_text("# title\n\nparagraph one\n\nparagraph two");
-        let mut highlighter = MarkdownMarkers::new(&String::new());
+        let mut highlighter = MarkdownMarkers::new(&settings(""));
 
         editor.update(
             Size::new(600.0, 400.0),

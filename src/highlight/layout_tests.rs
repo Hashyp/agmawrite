@@ -1,5 +1,5 @@
 //! Regression tests at the renderer editor boundary used by the source widget.
-use super::{format, MarkdownMarkers};
+use super::{format, MarkdownMarkers, Settings};
 use crate::theme::Palette;
 use iced::advanced::graphics::text::Editor;
 use iced::advanced::text::editor::{Action, Cursor, Editor as _, Position, Selection};
@@ -66,7 +66,7 @@ fn other_highlighters_keep_uniform_line_heights_by_default() {
 fn moving_to_document_end_keeps_the_caret_visible_after_first_reflow() {
     use iced::advanced::text::editor::Motion;
     let mut editor = Editor::with_text(&format!("{}last", "paragraph\n\n".repeat(60)));
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     let bounds = Size::new(600.0, 180.0);
     layout(&mut editor, &mut highlighter, bounds, 20.0);
     editor.perform(Action::Move(Motion::DocumentEnd));
@@ -82,7 +82,7 @@ fn moving_to_document_end_keeps_the_caret_visible_after_first_reflow() {
 #[test]
 fn a_fence_run_with_trailing_text_does_not_expand_code_blanks() {
     let mut editor = Editor::with_text("```rust\n```not a closing fence\n\ncode\n```\n\nafter");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
 
     assert_eq!(
@@ -100,7 +100,7 @@ fn editing_an_unvisited_line_replays_fence_context_before_spacing_it() {
     use iced::advanced::text::editor::Edit;
     let mut editor =
         Editor::with_text("intro\n\nintro\n\n```rust\ncode\ncode\ncode\ncode\ncode\n\ncode\n\n```");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     let bounds = Size::new(600.0, 126.0);
     layout(&mut editor, &mut highlighter, bounds, 20.0);
     editor.move_to(Cursor {
@@ -124,7 +124,7 @@ fn editing_an_unvisited_line_replays_fence_context_before_spacing_it() {
 #[test]
 fn clicking_after_scrolling_uses_the_shifted_paragraph_position() {
     let mut editor = Editor::with_text("one\n\ntwo\n\nthree\n\nfour\n\nfive");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     let bounds = Size::new(600.0, 126.0);
     layout(&mut editor, &mut highlighter, bounds, 20.0);
     editor.perform(Action::Scroll { lines: 1 });
@@ -141,7 +141,7 @@ fn clicking_after_scrolling_uses_the_shifted_paragraph_position() {
 #[test]
 fn rewrapping_keeps_the_caret_on_the_paragraph_after_the_gap() {
     let mut editor = Editor::with_text("alpha beta gamma delta\n\nlast");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 600.0), 20.0);
     editor.move_to(Cursor {
         position: Position { line: 2, column: 0 },
@@ -162,7 +162,7 @@ fn rewrapping_keeps_the_caret_on_the_paragraph_after_the_gap() {
 fn adding_and_removing_text_on_a_separator_updates_its_height() {
     use iced::advanced::text::editor::Edit;
     let mut editor = Editor::with_text("before\n\nafter");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     let bounds = Size::new(600.0, 400.0);
     layout(&mut editor, &mut highlighter, bounds, 20.0);
     editor.move_to(Cursor {
@@ -182,7 +182,7 @@ fn adding_and_removing_text_on_a_separator_updates_its_height() {
 #[test]
 fn highlighting_invalidates_a_caret_cached_before_reflow() {
     let mut editor = Editor::with_text("title\n\nparagraph one\n\nparagraph two");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     editor.update(
         Size::new(600.0, 400.0),
         Font::MONOSPACE,
@@ -210,7 +210,7 @@ fn highlighting_invalidates_a_caret_cached_before_reflow() {
 #[test]
 fn changing_font_while_scrolled_away_does_not_draw_an_offscreen_caret() {
     let mut editor = Editor::with_text(&"paragraph\n\n".repeat(40));
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     let bounds = Size::new(600.0, 180.0);
     layout(&mut editor, &mut highlighter, bounds, 20.0);
     editor.perform(Action::Scroll { lines: 30 });
@@ -235,7 +235,7 @@ fn changing_font_while_scrolled_away_does_not_draw_an_offscreen_caret() {
 #[test]
 fn highlighting_stops_at_the_actual_viewport_even_with_cached_lines_below_it() {
     let mut editor = Editor::with_text("title\n\nparagraph one\n\nparagraph two");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
     highlighter.change_line(0);
     layout(&mut editor, &mut highlighter, Size::new(600.0, 126.0), 20.0);
@@ -246,7 +246,7 @@ fn highlighting_stops_at_the_actual_viewport_even_with_cached_lines_below_it() {
 #[test]
 fn font_size_changes_recompute_paragraph_gaps() {
     let mut editor = Editor::with_text("before\n\nafter");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 30.0);
 
@@ -263,7 +263,7 @@ fn font_size_changes_recompute_paragraph_gaps() {
 #[test]
 fn spaces_and_tabs_are_blank_paragraph_separators_too() {
     let mut editor = Editor::with_text("before\n \t\nafter");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
 
     assert_eq!(editor.min_bounds().height, 126.0);
@@ -272,7 +272,7 @@ fn spaces_and_tabs_are_blank_paragraph_separators_too() {
 #[test]
 fn blank_lines_in_fenced_code_keep_normal_height() {
     let mut editor = Editor::with_text("before\n\n```rust\n\nlet x = 1;\n\n```\n\nafter");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 600.0), 20.0);
 
     assert_eq!(
@@ -288,7 +288,7 @@ fn blank_lines_in_fenced_code_keep_normal_height() {
 #[test]
 fn clicking_after_two_paragraph_gaps_places_the_caret_on_the_text() {
     let mut editor = Editor::with_text("title\n\nparagraph one\n\nparagraph two");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
     editor.perform(Action::Click(Point::new(1.0, 190.0)));
 
@@ -302,7 +302,7 @@ fn clicking_after_two_paragraph_gaps_places_the_caret_on_the_text() {
 #[test]
 fn selecting_after_paragraph_gaps_highlights_the_rendered_text() {
     let mut editor = Editor::with_text("title\n\nparagraph one\n\nparagraph two");
-    let mut highlighter = MarkdownMarkers::new(&String::new());
+    let mut highlighter = MarkdownMarkers::new(&Settings::default());
     layout(&mut editor, &mut highlighter, Size::new(600.0, 400.0), 20.0);
     editor.move_to(Cursor {
         position: Position { line: 4, column: 4 },

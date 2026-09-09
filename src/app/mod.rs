@@ -335,7 +335,10 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
             .padding(0)
             .line_height(crate::typography::LINE_HEIGHT)
             .highlight_with::<highlight::MarkdownMarkers>(
-                editor.find.query().to_owned(),
+                highlight::Settings {
+                    query: editor.find.query().to_owned(),
+                    palette,
+                },
                 highlight::format,
             )
             .style(move |theme, status| editor_style(&palette, theme, status))
