@@ -3,13 +3,19 @@
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::App;
+use crate::input::Surface;
 use crate::preview::{CaretPosition, PreviewElement};
 use crate::ui::status_bar::{self, Model};
+use iced::widget::text_editor::Position;
 
 pub(super) fn model(app: &App, source: &str) -> Model {
-    let (line, column) = location(source, app.preview.elements(), app.preview.caret());
+    let interaction = app.interaction.view();
+    let (line, column) = match interaction.surface() {
+        Surface::Preview => location(source, app.preview.elements(), app.preview.caret()),
+        Surface::Write => write_location(app.document.content().cursor().position),
+    };
     Model {
-        interaction: app.interaction.view(),
+        interaction,
         filename: status_bar::filename(app.document.path(), app.document.is_modified()),
         full_path: app.document.path().map_or_else(
             || "Unsaved document".to_owned(),
@@ -64,6 +70,12 @@ fn location(source: &str, elements: &[PreviewElement], caret: CaretPosition) -> 
     )
 }
 
+/// The write-mode ruler: the source editor's own caret, one-based like vim
+/// and exact — the editor owns both the line and the column.
+fn write_location(position: Position) -> (usize, usize) {
+    (position.line + 1, position.column + 1)
+}
+
 // Exactly Lualine's progress component: caret line / total source lines,
 // not viewport scroll percentage (mouse scrolling leaves the ruler alone).
 fn progress(line: usize, total: usize) -> String {
@@ -115,6 +127,33 @@ mod tests {
             ),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn write_ruler_reports_the_source_editor_caret() {
+        use iced::widget::text_editor::Cursor;
+
+        let contents = "one\ntwo\nthree\n";
+        let mut app = App {
+            document: crate::document::State::new(contents, None),
+            preview: State::new(contents),
+            interaction: crate::input::InteractionState::editable(),
+            comments: crate::comments::State::new(),
+            find: crate::find::State::new(),
+            help: crate::help::Help::new(),
+            palette: Palette::default(),
+            status_metadata: Default::default(),
+            report: None,
+        };
+        app.document.move_to(Cursor {
+            position: Position { line: 1, column: 2 },
+            selection: None,
+        });
+
+        let ruler = model(&app, contents);
+
+        assert_eq!(ruler.location, "2:3");
+        assert_eq!(ruler.progress, "66%");
     }
 
     #[test]

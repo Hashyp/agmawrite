@@ -139,7 +139,9 @@ fn toolbar_actions_map_to_document_and_preview_interactions() {
 
     let _ = update(
         &mut editor,
-        Message::Toolbar(toolbar::Message::TogglePreview),
+        Message::StatusBar(super::ui::status_bar::Message::Toolbar(
+            toolbar::Message::TogglePreview,
+        )),
     );
     assert!(!is_preview(&editor));
 }
@@ -168,6 +170,13 @@ fn status_bar_keeps_existing_actions_and_metadata_does_not_consume_counts() {
         Message::StatusBar(StatusMessage::Toolbar(toolbar::Message::TogglePreview)),
     );
     assert!(!is_preview(&editor));
+
+    // The write-mode bar's own surface switch returns to the preview.
+    let _ = update(
+        &mut editor,
+        Message::StatusBar(StatusMessage::Toolbar(toolbar::Message::TogglePreview)),
+    );
+    assert!(is_preview(&editor));
 }
 
 #[test]

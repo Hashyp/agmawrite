@@ -23,7 +23,9 @@ pub(crate) struct ViewContext<'a> {
     pub(crate) preview_elements: &'a [PreviewElement],
     pub(crate) palette: Palette,
     pub(crate) font: Font,
-    /// Preview's status bar provides the toggle instead of the icon rail.
+    /// Whether the preview surface's collapsed rail shows: write mode keeps
+    /// its right edge clean — comments are made on the preview, and the
+    /// status bar's Comments toggle is preview-only too.
     pub(crate) collapsed_rail: bool,
 }
 

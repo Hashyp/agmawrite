@@ -443,6 +443,7 @@ impl ViewProjection {
 }
 
 impl ToolbarPresentation {
+    #[cfg(test)]
     pub(crate) fn badge(self) -> ModeBadge {
         self.badge
     }

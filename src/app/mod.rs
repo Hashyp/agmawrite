@@ -42,7 +42,6 @@ pub(crate) enum Message {
     Find(find::Message),
     Help(help::Message),
     Input(InputMessage),
-    Toolbar(ui::toolbar::Message),
     StatusBar(ui::status_bar::Message),
     Theme(theme::Event),
     StatusMetadata(ui::status_bar::metadata::Metadata),
@@ -113,12 +112,9 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
     };
 
     let theme = theme::subscription().map(Message::Theme);
-    let metadata = if ui::status_bar::visible(editor.interaction.view()) {
+    let metadata =
         ui::status_bar::metadata::subscription(editor.document.path().map(ToOwned::to_owned))
-            .map(Message::StatusMetadata)
-    } else {
-        Subscription::none()
-    };
+            .map(Message::StatusMetadata);
     let theme = Subscription::batch([theme, metadata]);
 
     match editor.document.path() {
@@ -157,8 +153,7 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.interaction.push_count_digit(digit);
             return Task::none();
         }
-        Message::Toolbar(message)
-        | Message::StatusBar(ui::status_bar::Message::Toolbar(message)) => {
+        Message::StatusBar(ui::status_bar::Message::Toolbar(message)) => {
             message_for_toolbar(message)
         }
         Message::StatusBar(ui::status_bar::Message::ToggleComments) => {
@@ -331,7 +326,7 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             editor.help.update(message);
             Task::none()
         }
-        Message::Input(_) | Message::Toolbar(_) | Message::StatusBar(_) => {
+        Message::Input(_) | Message::StatusBar(_) => {
             unreachable!("boundary messages are translated before delegation")
         }
     }
@@ -400,13 +395,9 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
         .then(|| comments::composer::view(&editor.comments, palette).map(Message::Comments));
     let editing_area = shell::stack_layers(base_area, note);
 
-    let show_status = ui::status_bar::visible(interaction);
-    let toolbar = if show_status {
-        iced::widget::Space::new().into()
-    } else {
-        ui::toolbar::view(ui::toolbar::Model::new(interaction.toolbar(), palette))
-            .map(Message::Toolbar)
-    };
+    // The status bar spans every surface; the old bottom-toolbar slot
+    // keeps only its 1/8 spacing, like it already did on the preview.
+    let toolbar = iced::widget::Space::new().into();
     let sidebar = comments::sidebar::view(
         &editor.comments,
         comments::sidebar::ViewContext {
@@ -414,19 +405,18 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
             preview_elements: editor.preview.elements(),
             palette,
             font: EDITOR_FONT,
-            collapsed_rail: !show_status,
+            // The comments rail belongs to the preview surface — comments
+            // are made there. Write mode keeps its right edge clean; Ctrl + B
+            // still toggles the sidebar from either surface.
+            collapsed_rail: matches!(interaction.surface(), Surface::Preview),
         },
     )
     .map(Message::Comments);
     let base = shell::layout(editing_area, toolbar, sidebar, palette.background);
-    let base = if show_status {
-        shell::with_status_bar(
-            base,
-            ui::status_bar::view(status::model(editor, &source)).map(Message::StatusBar),
-        )
-    } else {
-        base
-    };
+    let base = shell::with_status_bar(
+        base,
+        ui::status_bar::view(status::model(editor, &source)).map(Message::StatusBar),
+    );
 
     let find = interaction
         .contains(Overlay::Find)

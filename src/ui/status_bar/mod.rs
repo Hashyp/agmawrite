@@ -1,4 +1,6 @@
-//! Preview-only Lualine prototype. Actions reuse the existing toolbar protocol.
+//! The global status bar: a text-only Lualine strip that reports the
+//! workspace on both surfaces, adapting its segments to what each mode
+//! implements. Actions reuse the toolbar protocol.
 
 pub(crate) mod metadata;
 
@@ -17,7 +19,7 @@ pub(crate) enum Message {
     Toolbar(toolbar::Message),
     ToggleComments,
 }
-use crate::input::{Surface, ViewProjection};
+use crate::input::{PreviewToggle, Surface, ViewProjection};
 use crate::theme::Palette;
 use metadata::Metadata;
 
@@ -47,10 +49,6 @@ pub(crate) struct Model {
     pub(crate) report: Option<String>,
 }
 
-pub(crate) fn visible(interaction: ViewProjection) -> bool {
-    matches!(interaction.surface(), Surface::Preview)
-}
-
 pub(crate) fn filename(path: Option<&Path>, modified: bool) -> String {
     let name = path
         .and_then(Path::file_name)
@@ -63,10 +61,10 @@ pub(crate) fn filename(path: Option<&Path>, modified: bool) -> String {
 }
 
 fn mode_label(interaction: ViewProjection) -> &'static str {
-    if interaction.visual() {
-        "VISUAL"
-    } else {
-        "VIEW"
+    match interaction.surface() {
+        Surface::Write => "WRITE",
+        Surface::Preview if interaction.visual() => "VISUAL",
+        Surface::Preview => "VIEW",
     }
 }
 
@@ -80,12 +78,8 @@ struct Colors {
 }
 
 impl Colors {
-    fn new(palette: Palette, visual: bool) -> Self {
-        let mode = if visual {
-            palette.magenta
-        } else {
-            palette.blue
-        };
+    fn new(palette: Palette, interaction: ViewProjection) -> Self {
+        let mode = mode_color(palette, interaction);
         Self {
             base: palette.dark_background,
             raised: Color::from_rgb(
@@ -121,11 +115,21 @@ fn contrast(a: Color, b: Color) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// The badge hue names the surface: WRITE takes the palette's red — the
+/// state that changes the document — VIEW its blue, VISUAL its magenta.
+fn mode_color(palette: Palette, interaction: ViewProjection) -> Color {
+    match interaction.surface() {
+        Surface::Write => palette.red,
+        Surface::Preview if interaction.visual() => palette.magenta,
+        Surface::Preview => palette.blue,
+    }
+}
+
 /// Mirrors installed LazyVim's a/b/c … x/y/z sections and Powerline angles.
 /// Narrow layouts shed metadata before controls; file names never wrap.
 pub(crate) fn view(model: Model) -> Element<'static, Message> {
     responsive(move |size| {
-        let colors = Colors::new(model.palette, model.interaction.visual());
+        let colors = Colors::new(model.palette, model.interaction);
         let compact = size.width < 600.0;
         let mut segments: Vec<Element<'_, Message>> = vec![segment(
             mode_label(model.interaction),
@@ -200,11 +204,17 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
             colors,
             model.palette,
         ));
-        if model.interaction.can_toggle_preview() {
+        // The surface switch names its destination: Preview while writing,
+        // Write while previewing. Preview-only sessions offer no switch.
+        if let Some(toggle) = model.interaction.toolbar().preview_toggle() {
             segments.push(segment("", colors.base, colors.raised, false));
+            let (label, hint) = match toggle {
+                PreviewToggle::Preview => ("Preview", "Open the preview · Ctrl + P"),
+                PreviewToggle::Write => ("Write", "Return to writing · Ctrl + P"),
+            };
             segments.push(action(
-                "Write",
-                "Return to writing · Ctrl + P",
+                label,
+                hint,
                 Message::Toolbar(toolbar::Message::TogglePreview),
                 colors,
                 model.palette,
@@ -220,31 +230,35 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 false,
             ));
         }
-        segments.push(separator(
-            colors.mode,
-            if show_ruler {
-                colors.raised
-            } else {
-                colors.base
-            },
-            true,
-        ));
-        segments.push(action(
-            if compact {
-                "Comments".to_owned()
-            } else {
-                format!("Comments {}", model.comment_count)
-            },
-            "Toggle comments sidebar · Ctrl + B",
-            Message::ToggleComments,
-            Colors {
-                base: colors.mode,
-                raised: Palette::darkened(colors.mode, 0.12),
-                foreground: colors.on_mode,
-                ..colors
-            },
-            model.palette,
-        ));
+        // The comments segment is a preview feature — its composer and
+        // cycling are preview verbs — so the write bar ends at its ruler.
+        if matches!(model.interaction.surface(), Surface::Preview) {
+            segments.push(separator(
+                colors.mode,
+                if show_ruler {
+                    colors.raised
+                } else {
+                    colors.base
+                },
+                true,
+            ));
+            segments.push(action(
+                if compact {
+                    "Comments".to_owned()
+                } else {
+                    format!("Comments {}", model.comment_count)
+                },
+                "Toggle comments sidebar · Ctrl + B",
+                Message::ToggleComments,
+                Colors {
+                    base: colors.mode,
+                    raised: Palette::darkened(colors.mode, 0.12),
+                    foreground: colors.on_mode,
+                    ..colors
+                },
+                model.palette,
+            ));
+        }
         container(row(segments).align_y(alignment::Vertical::Center))
             .width(Length::Fill)
             .height(HEIGHT)
@@ -380,14 +394,17 @@ mod tests {
     use crate::input::InteractionState;
 
     #[test]
-    fn status_bar_only_appears_on_preview_surfaces() {
-        let mut state = InteractionState::editable();
-        assert!(!visible(state.view()));
-        state.toggle_preview();
-        assert!(visible(state.view()));
-        assert!(visible(InteractionState::preview_only().view()));
-        state.toggle_preview();
-        assert!(!visible(state.view()));
+    fn the_badge_names_the_surface_and_the_preview_mode() {
+        let mut write = InteractionState::editable();
+        assert_eq!(mode_label(write.view()), "WRITE");
+        write.open_find();
+        assert_eq!(mode_label(write.view()), "WRITE");
+        let _ = write.close_find();
+
+        assert!(write.toggle_preview());
+        assert_eq!(mode_label(write.view()), "VIEW");
+        write.toggle_visual().unwrap();
+        assert_eq!(mode_label(write.view()), "VISUAL");
     }
 
     #[test]
@@ -418,10 +435,24 @@ mod tests {
     fn mode_sections_follow_each_new_palette() {
         let first = Palette::from_colors("blue = \"#81a1c1\"");
         let second = Palette::from_colors("blue = \"#e68e0d\"");
+        let mut view = InteractionState::editable();
+        assert!(view.toggle_preview());
         assert_ne!(
-            Colors::new(first, false).mode,
-            Colors::new(second, false).mode
+            mode_color(first, view.view()),
+            mode_color(second, view.view())
         );
-        assert_eq!(Colors::new(second, true).mode, second.magenta);
+
+        let mut visual = InteractionState::preview_only();
+        visual.toggle_visual().unwrap();
+        assert_eq!(mode_color(second, visual.view()), second.magenta);
+    }
+
+    #[test]
+    fn write_badge_takes_the_palette_red() {
+        let palette = Palette::from_colors("red = \"#ff0000\"");
+        assert_eq!(
+            mode_color(palette, InteractionState::editable().view()),
+            palette.red
+        );
     }
 }
