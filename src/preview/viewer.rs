@@ -19,6 +19,44 @@ use iced::widget::{checkbox, column, container, markdown, rich_text, row, rule, 
 use iced::{border, Background, Color, Element, Font, Length};
 
 const PREVIEW_FONT: Font = Font::with_name("iA Writer Mono S");
+const MIN_HEADING_CONTRAST: f32 = 4.5;
+const CONTRAST_SEARCH_STEPS: u8 = 32;
+
+/// Resolves a heading level to an active-theme role, softened toward the
+/// theme's foreground. If that tint is too faint on the current background,
+/// progressively less of the role is used until ordinary-text contrast holds.
+fn heading_color(level: &markdown::HeadingLevel, palette: &Palette) -> Color {
+    let (role, strength) = match level {
+        markdown::HeadingLevel::H1 => (palette.magenta, 0.65),
+        markdown::HeadingLevel::H2 => (palette.blue, 0.60),
+        markdown::HeadingLevel::H3 => (palette.cyan, 0.55),
+        markdown::HeadingLevel::H4 => (palette.green, 0.45),
+        markdown::HeadingLevel::H5 => (palette.yellow, 0.30),
+        markdown::HeadingLevel::H6 => (palette.magenta, 0.12),
+    };
+
+    for step in 0..=CONTRAST_SEARCH_STEPS {
+        let role_weight = strength * (1.0 - f32::from(step) / f32::from(CONTRAST_SEARCH_STEPS));
+        let candidate = mix(role, palette.foreground, role_weight);
+
+        if candidate.relative_contrast(palette.background) >= MIN_HEADING_CONTRAST {
+            return candidate;
+        }
+    }
+
+    palette.foreground
+}
+
+/// Mixes `role_weight` of a semantic role with the active theme foreground.
+fn mix(role: Color, foreground: Color, role_weight: f32) -> Color {
+    let foreground_weight = 1.0 - role_weight;
+
+    Color::from_rgb(
+        role.r * role_weight + foreground.r * foreground_weight,
+        role.g * role_weight + foreground.g * foreground_weight,
+        role.b * role_weight + foreground.b * foreground_weight,
+    )
+}
 
 /// Read-only collaborators needed to decorate and style the preview surface.
 ///
@@ -179,7 +217,7 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
             markdown::HeadingLevel::H5 => settings.h5_size,
             markdown::HeadingLevel::H6 => settings.h6_size,
         };
-        self.text_element(settings, text)
+        self.text_element(settings, text, heading_color(level, &self.palette))
     }
 
     fn paragraph(
@@ -187,7 +225,7 @@ impl<'a> markdown::Viewer<'a, Message> for PreviewViewer<'a> {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        self.text_element(settings, text)
+        self.text_element(settings, text, self.palette.foreground)
     }
 
     fn quote(
@@ -405,6 +443,7 @@ impl<'a> PreviewViewer<'a> {
         &self,
         settings: markdown::Settings,
         text: &markdown::Text,
+        color: Color,
     ) -> Element<'a, Message> {
         // The map numbers elements exactly like the viewer numbers items;
         // if they ever disagree the item renders plainly, without caret,
@@ -413,22 +452,23 @@ impl<'a> PreviewViewer<'a> {
             return interactive_text::paragraph(
                 settings,
                 text,
-                self.palette.foreground,
+                color,
                 interactive_text::TextDecorations::default(),
             );
         };
 
         let decorations = self.decorations(element, preview_element);
 
-        interactive_text::paragraph(settings, text, self.palette.foreground, decorations)
+        interactive_text::paragraph(settings, text, color, decorations)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_style, surface_style};
+    use super::{heading_color, markdown_style, surface_style, MIN_HEADING_CONTRAST};
     use crate::theme::Palette;
-    use iced::Background;
+    use iced::widget::markdown::HeadingLevel;
+    use iced::{Background, Color};
 
     /// The markdown style paints with palette roles: links take the accent,
     /// inline code the foreground, and code sits on the raised surface —
@@ -449,6 +489,76 @@ mod tests {
             style.inline_code_highlight.background,
             Background::Color(palette.raised())
         );
+    }
+
+    /// Heading levels take distinct semantic roles from the active palette,
+    /// softened by progressively smaller amounts toward its foreground.
+    #[test]
+    fn heading_colors_use_level_specific_palette_roles() {
+        let palette = Palette {
+            background: Color::BLACK,
+            foreground: Color::WHITE,
+            magenta: Color::from_rgb(1.0, 0.0, 0.0),
+            blue: Color::from_rgb(0.0, 1.0, 0.0),
+            cyan: Color::from_rgb(0.0, 0.0, 1.0),
+            green: Color::from_rgb(1.0, 1.0, 0.0),
+            yellow: Color::from_rgb(1.0, 0.0, 1.0),
+            ..Palette::default()
+        };
+
+        let colors = [
+            heading_color(&HeadingLevel::H1, &palette),
+            heading_color(&HeadingLevel::H2, &palette),
+            heading_color(&HeadingLevel::H3, &palette),
+            heading_color(&HeadingLevel::H4, &palette),
+            heading_color(&HeadingLevel::H5, &palette),
+            heading_color(&HeadingLevel::H6, &palette),
+        ];
+
+        let expected = [
+            Color::from_rgb(1.0, 0.35, 0.35),
+            Color::from_rgb(0.4, 1.0, 0.4),
+            Color::from_rgb(0.45, 0.45, 1.0),
+            Color::from_rgb(1.0, 1.0, 0.55),
+            Color::from_rgb(1.0, 0.7, 1.0),
+            Color::from_rgb(1.0, 0.88, 0.88),
+        ];
+        let close = colors.into_iter().zip(expected).all(|(actual, expected)| {
+            (actual.r - expected.r).abs() < 1e-6
+                && (actual.g - expected.g).abs() < 1e-6
+                && (actual.b - expected.b).abs() < 1e-6
+        });
+
+        assert!(close, "unexpected heading colors: {colors:?}");
+    }
+
+    /// A role that disappears into a light background is pulled toward the
+    /// theme foreground until it reaches ordinary-text WCAG contrast.
+    #[test]
+    fn heading_colors_guard_contrast_on_light_themes() {
+        let palette = Palette {
+            background: Color::WHITE,
+            foreground: Color::BLACK,
+            magenta: Color::WHITE,
+            blue: Color::WHITE,
+            cyan: Color::WHITE,
+            green: Color::WHITE,
+            yellow: Color::WHITE,
+            ..Palette::default()
+        };
+
+        let colors = [
+            heading_color(&HeadingLevel::H1, &palette),
+            heading_color(&HeadingLevel::H2, &palette),
+            heading_color(&HeadingLevel::H3, &palette),
+            heading_color(&HeadingLevel::H4, &palette),
+            heading_color(&HeadingLevel::H5, &palette),
+            heading_color(&HeadingLevel::H6, &palette),
+        ];
+
+        assert!(colors
+            .into_iter()
+            .all(|color| { color.relative_contrast(palette.background) >= MIN_HEADING_CONTRAST }));
     }
 
     /// The shared surface style paints the given color with rounded
