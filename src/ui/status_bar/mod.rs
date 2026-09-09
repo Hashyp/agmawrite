@@ -131,12 +131,29 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
     responsive(move |size| {
         let colors = Colors::new(model.palette, model.interaction);
         let compact = size.width < 600.0;
-        let mut segments: Vec<Element<'_, Message>> = vec![segment(
-            mode_label(model.interaction),
-            colors.mode,
-            colors.on_mode,
-            true,
-        )];
+        // The badge is the surface switch on WRITE and VIEW: click it —
+        // like `Ctrl + P` — to cross surfaces. VISUAL and preview-only
+        // sessions keep a plain badge: visual mode is entered and left
+        // with `v`/`Esc`, and a preview-only session cannot cross at all.
+        let mut segments: Vec<Element<'_, Message>> = vec![if
+            badge_clickable(model.interaction)
+        {
+            action(
+                mode_label(model.interaction),
+                switch_hint(model.interaction.toolbar().preview_toggle().unwrap()),
+                Message::Toolbar(toolbar::Message::TogglePreview),
+                Colors {
+                    base: colors.mode,
+                    raised: Palette::darkened(colors.mode, 0.12),
+                    foreground: colors.on_mode,
+                    ..colors
+                },
+                model.palette,
+                true,
+            )
+        } else {
+            segment(mode_label(model.interaction), colors.mode, colors.on_mode, true)
+        }];
         // The left rail after the badge: the yank report and the git branch
         // share the raised surface, the filename sits on the base — each
         // joined to the last by a wedge, so the chain reads as one section.
@@ -189,21 +206,6 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                 false,
             ));
         }
-        // The surface switch names its destination: Preview while writing,
-        // Write while previewing. Preview-only sessions offer no switch.
-        if let Some(toggle) = model.interaction.toolbar().preview_toggle() {
-            let (label, hint) = match toggle {
-                PreviewToggle::Preview => ("Preview", "Open the preview · Ctrl + P"),
-                PreviewToggle::Write => ("Write", "Return to writing · Ctrl + P"),
-            };
-            segments.push(action(
-                label,
-                hint,
-                Message::Toolbar(toolbar::Message::TogglePreview),
-                colors,
-                model.palette,
-            ));
-        }
         let show_ruler = size.width >= 640.0;
         if show_ruler {
             segments.push(separator(colors.raised, colors.base, true));
@@ -241,6 +243,7 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
                     ..colors
                 },
                 model.palette,
+                false,
             ));
         }
         container(row(segments).align_y(alignment::Vertical::Center))
@@ -296,15 +299,31 @@ fn centered_label(label: impl Into<String>, bold: bool) -> container::Container<
     .align_y(alignment::Vertical::Center)
 }
 
+/// The badge's tooltip names where the crossing goes.
+fn switch_hint(toggle: PreviewToggle) -> &'static str {
+    match toggle {
+        PreviewToggle::Preview => "Open the preview · Ctrl + P",
+        PreviewToggle::Write => "Return to writing · Ctrl + P",
+    }
+}
+
+/// WRITE and VIEW cross surfaces by clicking the badge; VISUAL is a
+/// preview sub-mode entered and left with `v`/`Esc`, and a preview-only
+/// session has no crossing to offer.
+fn badge_clickable(interaction: ViewProjection) -> bool {
+    interaction.toolbar().preview_toggle().is_some() && !interaction.visual()
+}
+
 fn action(
     label: impl Into<String>,
     hint: &'static str,
     message: Message,
     colors: Colors,
     palette: Palette,
+    bold: bool,
 ) -> Element<'static, Message> {
     tooltip(
-        button(centered_label(label, false))
+        button(centered_label(label, bold))
             .padding([0, 6])
             .height(HEIGHT)
             .on_press(message)
@@ -389,6 +408,55 @@ mod tests {
         assert_eq!(mode_label(write.view()), "VIEW");
         write.toggle_visual().unwrap();
         assert_eq!(mode_label(write.view()), "VISUAL");
+    }
+
+    #[test]
+    fn switch_hints_name_the_crossing_from_each_surface() {
+        use crate::input::PreviewToggle;
+
+        let mut write = InteractionState::editable();
+        assert_eq!(
+            write.view().toolbar().preview_toggle(),
+            Some(PreviewToggle::Preview)
+        );
+        assert_eq!(
+            switch_hint(PreviewToggle::Preview),
+            "Open the preview · Ctrl + P"
+        );
+
+        assert!(write.toggle_preview());
+        assert_eq!(
+            write.view().toolbar().preview_toggle(),
+            Some(PreviewToggle::Write)
+        );
+        assert_eq!(
+            switch_hint(PreviewToggle::Write),
+            "Return to writing · Ctrl + P"
+        );
+
+        // A preview-only session has no crossing and no hint.
+        assert_eq!(
+            InteractionState::preview_only()
+                .view()
+                .toolbar()
+                .preview_toggle(),
+            None
+        );
+    }
+
+    #[test]
+    fn badge_clicks_cross_surfaces_except_from_visual_or_preview_only() {
+        let mut write = InteractionState::editable();
+        assert!(badge_clickable(write.view()));
+
+        assert!(write.toggle_preview());
+        assert!(badge_clickable(write.view()), "VIEW is clickable");
+
+        write.toggle_visual().unwrap();
+        assert!(!badge_clickable(write.view()), "VISUAL is not clickable");
+
+        let view = InteractionState::preview_only();
+        assert!(!badge_clickable(view.view()), "preview-only is not clickable");
     }
 
     #[test]
