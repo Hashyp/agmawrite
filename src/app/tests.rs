@@ -65,6 +65,7 @@ fn app_at(contents: &str, position: CaretPosition) -> App {
         help: super::help::Help::new(),
         palette: Palette::default(),
         status_metadata: super::ui::status_bar::metadata::Metadata::default(),
+        report: None,
     }
 }
 
@@ -199,6 +200,7 @@ fn rejected_feature_operations_do_not_transition_interaction_state() {
         help: super::help::Help::new(),
         palette: Palette::default(),
         status_metadata: super::ui::status_bar::metadata::Metadata::default(),
+        report: None,
     };
 
     let _ = update(
@@ -433,6 +435,7 @@ fn help_preserves_underlying_editor_state() {
         help: super::help::Help::new(),
         palette: Palette::default(),
         status_metadata: super::ui::status_bar::metadata::Metadata::default(),
+        report: None,
     };
     source.document.move_to(Cursor {
         position: Position { line: 1, column: 3 },
@@ -768,4 +771,74 @@ fn find_navigation_routes_to_source_and_preview_features() {
     assert_eq!(cursor.position, Position { line: 2, column: 5 });
     assert_eq!(cursor.selection, Some(Position { line: 2, column: 9 }));
     assert_eq!(editor.preview.caret(), preview_caret);
+}
+
+/// Visual-mode `y` yanks like vim: the selection is spent, the text leaves
+/// for the clipboard, the span flashes, and the status bar carries the
+/// yank report until the next interaction clears it, like Neovim's
+/// cmdline message.
+#[test]
+fn yanking_a_visual_selection_spends_it_and_reports_the_count() {
+    let mut editor = app_at(
+        "one two\n\nthree four",
+        CaretPosition {
+            element: 0,
+            column: 4,
+        },
+    );
+    let _ = update(
+        &mut editor,
+        Message::Preview(preview::Message::ToggleVisual),
+    );
+    let _ = update(
+        &mut editor,
+        Message::Preview(preview::Message::Move(preview::Motion::Right, 3)),
+    );
+
+    let _ = update(&mut editor, Message::Preview(preview::Message::Yank));
+
+    assert!(!editor.interaction.view().visual());
+    assert!(editor.preview.visual_selection().is_none());
+    assert!(editor.preview.flash_active());
+    assert_eq!(editor.report.as_deref(), Some("3 characters yanked"));
+
+    // The flash ticker's message only ends the flash — the report reads on.
+    let _ = update(&mut editor, Message::Preview(preview::Message::ClearFlash));
+    assert!(!editor.preview.flash_active());
+    assert_eq!(editor.report.as_deref(), Some("3 characters yanked"));
+
+    // The next interaction clears the report, like Neovim's message area.
+    let _ = update(
+        &mut editor,
+        Message::Preview(preview::Message::Move(preview::Motion::Left, 1)),
+    );
+    assert_eq!(editor.report, None);
+}
+
+/// Yank is a visual-mode verb: dispatched in view mode it does nothing, and
+/// an empty selection yanks nothing at all — the clipboard keeps its
+/// contents and no flash or report appears.
+#[test]
+fn yanking_outside_a_selection_changes_nothing() {
+    let mut editor = app_at(
+        "alpha\n\nbeta",
+        CaretPosition {
+            element: 0,
+            column: 2,
+        },
+    );
+
+    let _ = update(&mut editor, Message::Preview(preview::Message::Yank));
+    assert!(!editor.interaction.view().visual());
+    assert!(editor.preview.visual_selection().is_none());
+    assert_eq!(editor.report, None);
+
+    let _ = update(
+        &mut editor,
+        Message::Preview(preview::Message::ToggleVisual),
+    );
+    let _ = update(&mut editor, Message::Preview(preview::Message::Yank));
+    assert!(!editor.interaction.view().visual());
+    assert_eq!(editor.report, None);
+    assert!(!editor.preview.flash_active());
 }

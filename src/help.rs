@@ -146,6 +146,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("g then g", "Jump to the first preview element."),
     ("G", "Jump to the last preview element."),
     ("v/V", "Toggle visual selection mode in preview."),
+    (
+        "y/Y",
+        "In visual mode: yank — copy the selection to the clipboard.",
+    ),
     ("c/C", "Open a note popup at the preview caret."),
     (
         "Enter",

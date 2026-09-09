@@ -66,6 +66,7 @@ impl<'a> ViewContext<'a> {
 pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a, Message> {
     let position = state.caret();
     let visual = state.visual_selection();
+    let yank_flash = state.yank_flash();
     let palette = context.palette;
 
     scrollable(
@@ -75,6 +76,7 @@ pub(crate) fn view<'a>(state: &'a State, context: ViewContext<'a>) -> Element<'a
                 focused_element: position.element,
                 caret_column: position.column,
                 visual,
+                yank_flash,
                 comments: context.comments,
                 find_query: context.find_query,
                 current_match: context.current_find_match,
@@ -160,6 +162,8 @@ struct PreviewViewer<'a> {
     caret_column: usize,
     /// The `(anchor, caret)` endpoints of the visual-mode selection.
     visual: Option<(super::CaretPosition, super::CaretPosition)>,
+    /// The endpoints of the yanked span still flashing after a `y`.
+    yank_flash: Option<(super::CaretPosition, super::CaretPosition)>,
     /// Saved comments, to know which elements carry one.
     comments: &'a comments::State,
     /// The find popup's query; its matches paint as highlights.
@@ -366,7 +370,7 @@ impl<'a> PreviewViewer<'a> {
         Pipeline::new()
             // Preserve paint order: the current-line band, comment element
             // tint and outlines, span tint, ordinary/current find matches,
-            // visual selection, then caret.
+            // visual selection, yank flash, then caret.
             .append(|output| {
                 decorations::append_current_line(
                     output,
@@ -402,6 +406,15 @@ impl<'a> PreviewViewer<'a> {
                     element,
                     preview_element.len(),
                     self.visual,
+                    &config,
+                )
+            })
+            .append(|output| {
+                decorations::append_yank_flash(
+                    output,
+                    element,
+                    preview_element.len(),
+                    self.yank_flash,
                     &config,
                 )
             })

@@ -7,14 +7,41 @@ mod viewer;
 
 use model::Caret;
 pub(crate) use model::{
-    element_selection, CaretPosition, Claims, ElementMap, Jump, Motion, Page, Placement,
-    PreviewElement, WordMotion,
+    element_selection, selection_text, CaretPosition, Claims, ElementMap, Jump, Motion, Page,
+    Placement, PreviewElement, WordMotion,
 };
 pub(crate) use scroll::{place_caret_in_view, reveal_anchor, reveal_caret, scroll_by, scroll_page};
 pub(crate) use viewer::{view, ViewContext};
 
+use std::time::Duration;
+
 use iced::widget::{markdown, text_editor};
-use iced::Task;
+use iced::{Subscription, Task};
+
+/// How long the yanked span keeps flashing, like the default timeout of
+/// Neovim's `vim.hl.on_yank`.
+pub(crate) const YANK_FLASH: Duration = Duration::from_millis(300);
+
+/// The yank flash's clearing ticker: one [`Message::ClearFlash`],
+/// [`YANK_FLASH`] after the yank that armed it. The runtime's thread-pool
+/// backend offers no timer, so the tick rides a plain thread like the
+/// document watcher's.
+pub(crate) fn flash_subscription() -> Subscription<Message> {
+    Subscription::run_with((), |()| {
+        iced::stream::channel(
+            1,
+            move |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
+                std::thread::spawn(move || {
+                    std::thread::sleep(YANK_FLASH);
+                    let _ = sender.try_send(Message::ClearFlash);
+                });
+                // The tick arrives on the timer thread; this runner only keeps
+                // the stream alive until it lands.
+                std::future::pending::<()>().await;
+            },
+        )
+    })
+}
 
 /// Preview-local navigation and scrolling messages.
 #[derive(Debug, Clone)]
@@ -26,6 +53,10 @@ pub(crate) enum Message {
     Jump(Jump, usize),
     Cancel,
     ToggleVisual,
+    /// Copies the visual selection, like vim's visual-mode `y`.
+    Yank,
+    /// Ends the yanked-span flash once its moment has passed.
+    ClearFlash,
     ScrollBy(f32),
     ScrollPage(Page, usize),
     ScrollCaret(Placement),
@@ -44,6 +75,11 @@ pub(crate) struct Context {
 pub(crate) enum Event {
     ToggleRequested,
     OpenLink(markdown::Uri),
+    /// The visual selection was yanked: its rendered text is the payload,
+    /// ready for the system clipboard and a yank report.
+    Yanked {
+        text: String,
+    },
 }
 
 pub(crate) struct Update {
@@ -77,6 +113,9 @@ pub(crate) struct State {
     elements: ElementMap,
     caret: Caret,
     visual_anchor: Option<CaretPosition>,
+    /// The span of the last yank, flashing over the preview for a moment
+    /// like Neovim's `vim.hl.on_yank` highlight.
+    yank_flash: Option<(CaretPosition, CaretPosition)>,
 }
 
 impl State {
@@ -88,6 +127,7 @@ impl State {
             elements: ElementMap::parse(source),
             caret: Caret::new(),
             visual_anchor: None,
+            yank_flash: None,
         }
     }
 
@@ -105,6 +145,7 @@ impl State {
     pub(crate) fn load_source(&mut self, source: &str) {
         self.replace_source(source);
         self.clear_visual_selection();
+        self.yank_flash = None;
     }
 
     /// Refreshes source edits when entering preview and places the preview
@@ -115,6 +156,7 @@ impl State {
         self.caret
             .move_to_source_cursor(content, self.elements.elements());
         self.clear_visual_selection();
+        self.yank_flash = None;
     }
 
     /// Places the caret for tests: production code moves the caret only
@@ -155,6 +197,17 @@ impl State {
 
     pub(crate) fn visual_selection(&self) -> Option<(CaretPosition, CaretPosition)> {
         self.visual_anchor.map(|anchor| (anchor, self.caret()))
+    }
+
+    /// The flashing span of the last yank, exactly the selection it copied.
+    pub(crate) fn yank_flash(&self) -> Option<(CaretPosition, CaretPosition)> {
+        self.yank_flash
+    }
+
+    /// Whether the yank flash is showing, so the application knows to run
+    /// its clearing ticker.
+    pub(crate) fn flash_active(&self) -> bool {
+        self.yank_flash.is_some()
     }
 }
 
@@ -203,6 +256,30 @@ pub(crate) fn update(state: &mut State, message: Message, context: Context) -> U
         }
         Message::ToggleVisual => {
             state.visual_anchor = context.visual_active.then(|| state.caret());
+            Update::none()
+        }
+        Message::Yank => {
+            // The input mode has already left visual mode when the reducer
+            // runs, so the anchor is spent here, never re-armed — like vim's
+            // visual-mode `y`.
+            let selection = state.visual_selection();
+            state.visual_anchor = None;
+
+            let Some(text) = selection
+                .map(|span| selection_text(state.elements.elements(), span))
+                .filter(|text| !text.is_empty())
+            else {
+                return Update::none();
+            };
+
+            // The yanked span keeps flashing for a moment, like Neovim's
+            // `TextYankPost` highlight; the clipboard write and the yank
+            // report are the application's to do.
+            state.yank_flash = selection;
+            Update::event(Event::Yanked { text })
+        }
+        Message::ClearFlash => {
+            state.yank_flash = None;
             Update::none()
         }
         Message::ScrollBy(y) => Update::task(scroll_by(y)),
@@ -330,5 +407,110 @@ mod tests {
 
         state.place_caret(at(0, 2));
         assert_eq!(state.caret(), at(0, 2));
+    }
+
+    /// Like vim's visual-mode `y`: the selection is spent, its text leaves
+    /// as an event, and the yanked span stays behind as a flash for the
+    /// viewer until the application's ticker clears it.
+    #[test]
+    fn yank_spends_the_selection_and_keeps_its_span_as_a_flash() {
+        let mut state = State::new("one two\n\nthree four");
+        state.place_caret(at(0, 4));
+        update(
+            &mut state,
+            Message::ToggleVisual,
+            Context {
+                visual_active: true,
+            },
+        );
+        update(
+            &mut state,
+            Message::Move(Motion::Right, 3),
+            Context {
+                visual_active: true,
+            },
+        );
+
+        let result = update(
+            &mut state,
+            Message::Yank,
+            Context {
+                visual_active: false,
+            },
+        );
+        match result.event {
+            Some(super::Event::Yanked { text }) => assert_eq!(text, "two"),
+            other => panic!("expected the yanked text, got {other:?}"),
+        }
+        assert_eq!(state.visual_selection(), None);
+        assert_eq!(state.yank_flash(), Some((at(0, 4), at(0, 7))));
+        assert!(state.flash_active());
+
+        update(
+            &mut state,
+            Message::ClearFlash,
+            Context {
+                visual_active: false,
+            },
+        );
+        assert_eq!(state.yank_flash(), None);
+        assert!(!state.flash_active());
+    }
+
+    /// An empty selection yanks nothing — the clipboard keeps its contents
+    /// and no flash appears — but the anchor is still spent, because the
+    /// input mode has already left visual mode when the reducer runs.
+    #[test]
+    fn yanking_an_empty_selection_copies_nothing_and_flashes_nothing() {
+        let mut state = State::new("alpha\n\nbeta");
+        update(
+            &mut state,
+            Message::ToggleVisual,
+            Context {
+                visual_active: true,
+            },
+        );
+
+        let result = update(
+            &mut state,
+            Message::Yank,
+            Context {
+                visual_active: false,
+            },
+        );
+        assert!(result.event.is_none());
+        assert_eq!(state.yank_flash(), None);
+        assert_eq!(state.visual_selection(), None);
+    }
+
+    #[test]
+    fn loading_a_new_document_clears_the_yank_flash() {
+        let mut state = State::new("old\n\nbody");
+        state.place_caret(at(0, 0));
+        update(
+            &mut state,
+            Message::ToggleVisual,
+            Context {
+                visual_active: true,
+            },
+        );
+        update(
+            &mut state,
+            Message::Move(Motion::Right, 3),
+            Context {
+                visual_active: true,
+            },
+        );
+        update(
+            &mut state,
+            Message::Yank,
+            Context {
+                visual_active: false,
+            },
+        );
+        assert!(state.flash_active());
+
+        state.load_source("new");
+        assert!(!state.flash_active());
     }
 }

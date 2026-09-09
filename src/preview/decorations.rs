@@ -33,6 +33,7 @@ pub(crate) struct Config {
     caret: Color,
     current_line: Color,
     visual_selection: Color,
+    yank_flash: Color,
     commented_border: Color,
     active_border: Color,
     active_comment_tint: Color,
@@ -61,6 +62,7 @@ impl Config {
             caret: palette.foreground,
             current_line: palette.tint(palette.lighter_background, 0.4),
             visual_selection: palette.selection,
+            yank_flash: palette.tint(palette.yellow, 0.8),
             commented_border: palette.yellow,
             active_border: palette.accent,
             active_comment_tint: palette.tint(palette.accent, 0.09),
@@ -147,6 +149,25 @@ pub(crate) fn append_visual(
     }
 }
 
+/// Appends this element's slice of the yank flash — the afterglow of the
+/// selection `y` copied, painted like Neovim's `vim.hl.on_yank` highlight.
+pub(crate) fn append_yank_flash(
+    output: &mut TextDecorations,
+    element: usize,
+    element_len: usize,
+    flash: Option<(CaretPosition, CaretPosition)>,
+    config: &Config,
+) {
+    if let Some(range) =
+        flash.and_then(|(anchor, caret)| element_selection(anchor, caret, element, element_len))
+    {
+        output.ranged_backgrounds.push(RangedBackground {
+            range,
+            color: config.yank_flash,
+        });
+    }
+}
+
 /// Appends whole-element, outline, and selected-span primitives for comments:
 /// the commented text is framed by a bordered rectangle — amber when merely
 /// commented, cyan when active — with no fill of its own, so the tints and
@@ -226,8 +247,8 @@ pub(crate) fn append_find(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_caret, append_comments, append_current_line, append_find, append_visual, Config,
-        Pipeline,
+        append_caret, append_comments, append_current_line, append_find, append_visual,
+        append_yank_flash, Config, Pipeline,
     };
     use crate::comments;
     use crate::interactive_text::{
@@ -298,12 +319,39 @@ mod tests {
             config.current_find_match,
             palette.tint(palette.orange, 0.75)
         );
+        // The yank flash is an IncSearch-style highlight: the same yellow
+        // family as find matches, but brighter than any of them.
+        assert_eq!(config.yank_flash, palette.tint(palette.yellow, 0.8));
         // The geometry defaults stay fixed.
         assert_eq!(
             config.commented_border_width,
             defaults.commented_border_width
         );
         assert_eq!(config.active_border_width, defaults.active_border_width);
+    }
+
+    #[test]
+    fn yank_flash_paints_exactly_the_yanked_span() {
+        let preview = State::new("alpha beta");
+        let preview_element = &preview.elements()[0];
+        let config = Config::from_palette(&Palette::default());
+        let mut output = crate::interactive_text::TextDecorations::default();
+
+        append_yank_flash(
+            &mut output,
+            0,
+            preview_element.len(),
+            Some((at(0, 11), at(0, 5))),
+            &config,
+        );
+
+        assert_eq!(
+            output.ranged_backgrounds,
+            vec![RangedBackground {
+                range: 5..10,
+                color: config.yank_flash,
+            }]
+        );
     }
 
     #[test]

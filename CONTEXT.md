@@ -69,6 +69,17 @@ preview and anchored comments.
 - **Count** — the digits pending before a preview motion, like vim's `3`
   of `3j`; it lives in the keymap, repeats the next motion (or page), and
   shows beside the mode badge while pending (`Keymap::pending_count`).
+- **Yank** — visual mode's copy verb, vim's `y`: the rendered selection
+  (the same slices the selection paints, one line per element) copies to
+  the system clipboard and visual mode ends. The span stays behind as a
+  brief IncSearch-style flash (`preview::State::yank_flash`, cleared by
+  the app's ticker) while the clipboard write and the report cross to the
+  application boundary (`preview::Event::Yanked`).
+- **Yank report** — the transient message naming what was yanked — Vim's
+  own wording, `N characters yanked` over graphemes — carried by the app
+  (`App::report`) and shown beside the mode badge until the next
+  interaction clears it, like Neovim's cmdline message; mouse scrolling,
+  theme changes, and the flash ticker leave it alone.
 - **Unsaved dialog** — the modal asking what to do with unsaved changes
   before opening another file or closing the window: Cancel, Save
   (save, then proceed), Discard. The guarded action waits in

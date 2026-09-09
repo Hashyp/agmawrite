@@ -28,6 +28,10 @@ const BOLD: Font = Font {
     weight: iced::font::Weight::Bold,
     ..FONT
 };
+/// The nf-md `content_copy` glyph — the report's "it was copied" mark.
+const COPIED: &str = "󰆏";
+/// Below this width the report yields to the actions, as the ruler does.
+const REPORT_MIN_WIDTH: f32 = 600.0;
 
 pub(crate) struct Model {
     pub(crate) interaction: ViewProjection,
@@ -38,6 +42,9 @@ pub(crate) struct Model {
     pub(crate) metadata: Metadata,
     pub(crate) palette: Palette,
     pub(crate) comment_count: usize,
+    /// The transient yank report, shown where Neovim's message area would
+    /// be: beside the mode badge until the next interaction.
+    pub(crate) report: Option<String>,
 }
 
 pub(crate) fn visible(interaction: ViewProjection) -> bool {
@@ -126,24 +133,34 @@ pub(crate) fn view(model: Model) -> Element<'static, Message> {
             colors.on_mode,
             true,
         )];
+        // The left rail after the badge: the yank report and the git branch
+        // share the raised surface, the filename sits on the base — each
+        // joined to the last by a wedge, so the chain reads as one section.
+        let report = model
+            .report
+            .as_deref()
+            .filter(|_| size.width >= REPORT_MIN_WIDTH)
+            .map(|report| format!("{COPIED} {report}"));
         let branch = model
             .metadata
             .branch
             .as_ref()
-            .filter(|_| size.width >= 1200.0);
-        if let Some(branch) = branch {
-            segments.push(separator(colors.mode, colors.raised, false));
-            segments.push(segment(
-                format!(" {}", shorten(branch, 24)),
-                colors.raised,
-                colors.foreground,
-                false,
-            ));
-            segments.push(separator(colors.raised, colors.base, false));
-        } else {
-            segments.push(separator(colors.mode, colors.base, false));
+            .filter(|_| size.width >= 1200.0)
+            .map(|branch| format!(" {}", shorten(branch, 24)));
+        let mut rail_background = colors.mode;
+        for (label, surface) in [
+            report.map(|label| (label, colors.raised)),
+            branch.map(|label| (label, colors.raised)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            segments.push(separator(rail_background, surface, false));
+            segments.push(segment(label, surface, colors.foreground, false));
+            rail_background = surface;
         }
         if size.width >= 900.0 {
+            segments.push(separator(rail_background, colors.base, false));
             let label = format!(
                 "󰍔 {}",
                 shorten(&model.filename, if size.width < 1200.0 { 18 } else { 32 })

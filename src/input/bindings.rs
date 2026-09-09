@@ -11,7 +11,8 @@ use super::command::{
 };
 use super::pending::{Pending, Prefix};
 use super::state::{
-    EditableWorkspace, HelpResume, InteractionState, PreviewState, RootState, Workspace, WriteState,
+    EditableWorkspace, HelpResume, InteractionState, PreviewMode, PreviewState, RootState,
+    Workspace, WriteState,
 };
 use crate::preview::{Jump, Motion, Page, Placement, WordMotion};
 
@@ -78,11 +79,11 @@ fn route_workspace(workspace: Workspace, event: &iced::Event) -> Decision {
                 route_global(GlobalContext::EditableWriteFind, event)
             })
         }
-        Workspace::Editable(EditableWorkspace::Preview(PreviewState::Canvas {
-            pending, ..
-        })) => fallback(route_preview(pending, event), || {
-            route_global(GlobalContext::EditablePreview(pending), event)
-        }),
+        Workspace::Editable(EditableWorkspace::Preview(PreviewState::Canvas { mode, pending })) => {
+            fallback(route_preview(mode, pending, event), || {
+                route_global(GlobalContext::EditablePreview(pending), event)
+            })
+        }
         Workspace::Editable(EditableWorkspace::Preview(PreviewState::Note { .. })) => {
             route_note(event)
         }
@@ -91,8 +92,8 @@ fn route_workspace(workspace: Workspace, event: &iced::Event) -> Decision {
                 route_global(GlobalContext::EditablePreviewFind, event)
             })
         }
-        Workspace::PreviewOnly(PreviewState::Canvas { pending, .. }) => {
-            fallback(route_preview(pending, event), || {
+        Workspace::PreviewOnly(PreviewState::Canvas { mode, pending }) => {
+            fallback(route_preview(mode, pending, event), || {
                 route_global(GlobalContext::PreviewOnly(pending), event)
             })
         }
@@ -280,7 +281,7 @@ fn route_find(event: &iced::Event) -> Decision {
 }
 
 /// Routes Vim-like preview motions and sequence parser input.
-fn route_preview(pending: Pending, event: &iced::Event) -> Decision {
+fn route_preview(mode: PreviewMode, pending: Pending, event: &iced::Event) -> Decision {
     let iced::Event::Keyboard(keyboard::Event::KeyPressed {
         modified_key,
         modifiers,
@@ -393,6 +394,10 @@ fn route_preview(pending: Pending, event: &iced::Event) -> Decision {
         ))),
         keyboard::Key::Character("v" | "V") => {
             one_shot(*repeat, Command::Preview(PreviewCommand::ToggleVisual))
+        }
+        // `y` is a visual-mode verb, like vim: it yanks the selection.
+        keyboard::Key::Character("y" | "Y") if matches!(mode, PreviewMode::Visual) => {
+            one_shot(*repeat, Command::Preview(PreviewCommand::Yank))
         }
         keyboard::Key::Character("c" | "C") => {
             one_shot(*repeat, Command::Comments(CommentsCommand::OpenNote))
@@ -715,7 +720,10 @@ mod tests {
 
         // Enter saves, j/k move the focused button.
         assert_eq!(
-            route(&state, &named(key::Named::Enter, Modifiers::default(), false)),
+            route(
+                &state,
+                &named(key::Named::Enter, Modifiers::default(), false)
+            ),
             dispatch(Command::Document(DocumentCommand::ConfirmUnsaved))
         );
         assert_eq!(
@@ -733,7 +741,10 @@ mod tests {
             dispatch(Command::Document(DocumentCommand::UnsavedNext))
         );
         assert_eq!(
-            route(&state, &named(key::Named::Enter, Modifiers::default(), true)),
+            route(
+                &state,
+                &named(key::Named::Enter, Modifiers::default(), true)
+            ),
             Decision::Capture
         );
 
@@ -966,6 +977,45 @@ mod tests {
             assert_eq!(route(&state, &event), expected, "{name}");
             assert_eq!(state, before, "{name}: routing must be pure");
         }
+    }
+
+    #[test]
+    fn yank_is_a_visual_only_verb_on_every_preview_canvas() {
+        for base in [editable_preview(false), preview_only(false)] {
+            // In view mode `y` is unbound, like an unmapped normal-mode key;
+            // yank is a verb of visual mode.
+            assert_eq!(route(&base, &character("y")), Decision::Pass);
+            assert_eq!(route(&base, &character("Y")), Decision::Pass);
+
+            let mut visual = base;
+            visual.toggle_visual().unwrap();
+            for key in ["y", "Y"] {
+                assert_eq!(
+                    route(&visual, &character(key)),
+                    dispatch(Command::Preview(PreviewCommand::Yank))
+                );
+            }
+
+            // Held y does not re-yank.
+            assert_eq!(
+                route(&visual, &character_with("y", Modifiers::default(), true)),
+                Decision::Capture
+            );
+        }
+
+        // Write mode and focused fields keep `y` as text.
+        assert_eq!(
+            route(&InteractionState::editable(), &character("y")),
+            Decision::Pass
+        );
+        assert_eq!(
+            route(&note(editable_preview(true)), &character("y")),
+            Decision::Pass
+        );
+        assert_eq!(
+            route(&find(preview_only(true)), &character("y")),
+            Decision::Pass
+        );
     }
 
     #[test]

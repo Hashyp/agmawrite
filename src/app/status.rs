@@ -20,6 +20,19 @@ pub(super) fn model(app: &App, source: &str) -> Model {
         metadata: app.status_metadata.clone(),
         palette: app.palette,
         comment_count: app.comments.len(),
+        report: app.report.clone(),
+    }
+}
+
+/// Neovim's own yank report wording for a charwise yank: the grapheme count
+/// of what was yanked — counting like the editor does, one character per
+/// grapheme cluster — with Vim's singular form for one.
+pub(super) fn yank_report(text: &str) -> String {
+    let characters = text.graphemes(true).count();
+    if characters == 1 {
+        "1 character yanked".to_owned()
+    } else {
+        format!("{characters} characters yanked")
     }
 }
 
@@ -67,6 +80,7 @@ fn progress(line: usize, total: usize) -> String {
 mod tests {
     use super::*;
     use crate::preview::State;
+    use crate::theme::Palette;
 
     #[test]
     fn location_maps_block_start_with_approximate_grapheme_column() {
@@ -109,5 +123,36 @@ mod tests {
         assert_eq!(progress(1, 10), "Top");
         assert_eq!(progress(5, 10), "50%");
         assert_eq!(progress(10, 10), "Bot");
+    }
+
+    #[test]
+    fn yank_report_counts_graphemes_with_vims_singular() {
+        // `v` + `l` + `l` + `y` over two astral characters.
+        assert_eq!(yank_report("👩‍💻"), "1 character yanked");
+        assert_eq!(yank_report("ab👩‍💻"), "3 characters yanked");
+        assert_eq!(yank_report(""), "0 characters yanked");
+    }
+
+    #[test]
+    fn status_model_carries_the_yank_report() {
+        let mut app = App {
+            document: crate::document::State::new("body", None),
+            preview: State::new("body"),
+            interaction: crate::input::InteractionState::preview_only(),
+            comments: crate::comments::State::new(),
+            find: crate::find::State::new(),
+            help: crate::help::Help::new(),
+            palette: Palette::default(),
+            status_metadata: Default::default(),
+            report: Some("3 characters yanked".to_owned()),
+        };
+
+        assert_eq!(
+            model(&app, "body").report.as_deref(),
+            Some("3 characters yanked")
+        );
+
+        app.report = None;
+        assert_eq!(model(&app, "body").report, None);
     }
 }

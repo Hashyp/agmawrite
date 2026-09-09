@@ -29,6 +29,9 @@ pub(crate) struct App {
     help: help::Help,
     palette: Palette,
     status_metadata: ui::status_bar::metadata::Metadata,
+    /// The transient yank report, like Neovim's `N characters yanked`
+    /// cmdline message: shown by the status bar until the next interaction.
+    report: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +65,7 @@ fn message_for_command(command: Command) -> Message {
             PreviewCommand::Jump(jump, count) => preview::Message::Jump(jump, count),
             PreviewCommand::Cancel => preview::Message::Cancel,
             PreviewCommand::ToggleVisual => preview::Message::ToggleVisual,
+            PreviewCommand::Yank => preview::Message::Yank,
             PreviewCommand::ScrollPage(page, count) => preview::Message::ScrollPage(page, count),
             PreviewCommand::ScrollCaret(placement) => preview::Message::ScrollCaret(placement),
         }),
@@ -101,6 +105,13 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
         .map(document::Message::CloseRequested)
         .map(Message::Document);
 
+    // The yanked span flashes for its moment, then one tick ends it.
+    let flash = if editor.preview.flash_active() {
+        preview::flash_subscription().map(Message::Preview)
+    } else {
+        Subscription::none()
+    };
+
     let theme = theme::subscription().map(Message::Theme);
     let metadata = if ui::status_bar::visible(editor.interaction.view()) {
         ui::status_bar::metadata::subscription(editor.document.path().map(ToOwned::to_owned))
@@ -115,12 +126,27 @@ pub(crate) fn subscription(editor: &App) -> Subscription<Message> {
             close,
             document::subscription(path).map(Message::Document),
             theme,
+            flash,
         ]),
-        None => Subscription::batch([close, theme]),
+        None => Subscription::batch([close, theme, flash]),
     }
 }
 
 pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
+    // The yank report is a cmdline message: it survives background events
+    // and the flash ticker, and the next interaction replaces it — the
+    // yank itself writes the new one.
+    if !matches!(
+        message,
+        Message::StatusMetadata(_)
+            | Message::Theme(_)
+            | Message::Preview(preview::Message::Yank)
+            | Message::Preview(preview::Message::ClearFlash)
+            | Message::Preview(preview::Message::ScrollBy(_))
+    ) {
+        editor.report = None;
+    }
+
     let message = match message {
         Message::Input(InputMessage::Execute(command)) => message_for_command(command),
         Message::Input(InputMessage::ArmPrefix(prefix)) => {
@@ -214,6 +240,30 @@ pub(crate) fn update(editor: &mut App, message: Message) -> Task<Message> {
             debug_assert!(event.is_none());
             editor.interaction = accepted;
             task.map(Message::Preview)
+        }
+        Message::Preview(message @ preview::Message::Yank) => {
+            // `y` is a visual-mode verb, like vim: it yanks the selection
+            // and immediately leaves visual mode, spending any pending
+            // count like any completed command.
+            if !editor.interaction.view().visual() {
+                return Task::none();
+            }
+
+            let mut accepted = editor.interaction;
+            if accepted.toggle_visual().is_err() {
+                return Task::none();
+            }
+            accepted.activity();
+
+            let context = preview::Context {
+                visual_active: accepted.view().visual(),
+            };
+            let preview::Update { task, event } =
+                preview::update(&mut editor.preview, message, context);
+            editor.interaction = accepted;
+            let event_task =
+                event.map_or_else(Task::none, |event| handle_preview_event(editor, event));
+            Task::batch([task.map(Message::Preview), event_task])
         }
         Message::Preview(message) => {
             let toggles_surface = matches!(message, preview::Message::Toggle);
@@ -381,12 +431,10 @@ pub(crate) fn view(editor: &App) -> Element<'_, Message> {
     let find = interaction
         .contains(Overlay::Find)
         .then(|| find::view(&editor.find, find_surface, palette).map(Message::Find));
-    let unsaved = interaction
-        .unsaved_action()
-        .map(|action| {
-            document::unsaved_view::view(action, editor.document.unsaved_focus(), palette)
-                .map(Message::Document)
-        });
+    let unsaved = interaction.unsaved_action().map(|action| {
+        document::unsaved_view::view(action, editor.document.unsaved_focus(), palette)
+            .map(Message::Document)
+    });
     let help = interaction
         .contains(Overlay::Help)
         .then(|| help::view(&editor.help, palette).map(Message::Help));
@@ -423,6 +471,7 @@ pub(crate) fn boot(args: &Args) -> (App, Task<Message>) {
         help: help::Help::new(),
         palette: Palette::current(),
         status_metadata: ui::status_bar::metadata::Metadata::default(),
+        report: None,
     };
 
     let task = if args.preview {

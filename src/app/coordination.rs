@@ -77,6 +77,13 @@ pub(super) fn handle_preview_event(editor: &mut App, event: preview::Event) -> T
             ])
         }
         preview::Event::OpenLink(_uri) => Task::none(),
+        preview::Event::Yanked { text } => {
+            // Like `clipboard=unnamedplus` with Neovim's yank report: the
+            // text lands on the system clipboard and the status bar reports
+            // the count until the next key press replaces it.
+            editor.report = Some(super::status::yank_report(&text));
+            iced::clipboard::write(text)
+        }
     }
 }
 

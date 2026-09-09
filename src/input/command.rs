@@ -35,6 +35,8 @@ pub enum PreviewCommand {
     Jump(Jump, usize),
     Cancel,
     ToggleVisual,
+    /// Copies the visual selection, like vim's visual-mode `y`.
+    Yank,
     ScrollPage(Page, usize),
     ScrollCaret(Placement),
 }

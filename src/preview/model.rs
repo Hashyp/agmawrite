@@ -766,11 +766,50 @@ pub fn element_selection(
     (end > start).then_some(start..end)
 }
 
+/// The rendered text a visual selection covers — what `y` yanks.
+/// Each element contributes the same grapheme slice the selection paints:
+/// partial at the endpoints, whole in between, regardless of direction.
+/// The slices join with one newline per element boundary, so multi-element
+/// yanks paste as the rendered lines they came from.
+pub fn selection_text(
+    elements: &[PreviewElement],
+    (anchor, caret): (CaretPosition, CaretPosition),
+) -> String {
+    let (lo, hi) = if anchor <= caret {
+        (anchor, caret)
+    } else {
+        (caret, anchor)
+    };
+
+    let mut text = String::new();
+    for (index, element) in elements
+        .iter()
+        .enumerate()
+        .take(hi.element + 1)
+        .skip(lo.element)
+    {
+        let Some(range) = element_selection(lo, hi, index, element.len()) else {
+            continue;
+        };
+        let slice: String = element
+            .text()
+            .graphemes(true)
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect();
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&slice);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        element_selection, parse, Caret, CaretPosition, ElementKind, ElementMap, Jump, Motion,
-        WordMotion,
+        element_selection, parse, selection_text, Caret, CaretPosition, ElementKind, ElementMap,
+        Jump, Motion, WordMotion,
     };
 
     fn at(element: usize, column: usize) -> CaretPosition {
@@ -1202,5 +1241,34 @@ outro
         // Columns beyond an element's length clamp away.
         assert_eq!(selection(at(1, 9), at(1, 10), 1, 2), None);
         assert_eq!(selection(at(0, 0), at(0, 0), 0, 4), None);
+    }
+
+    /// The yanked text is exactly what the selection paints: partial
+    /// elements at the endpoints, whole elements between, one rendered
+    /// line per element — in either direction, and empty when nothing
+    /// is selected.
+    #[test]
+    fn selection_text_matches_the_painted_selection() {
+        // Elements: "# Title", "alpha beta", "gamma", "code\nlines".
+        let elements =
+            ElementMap::parse("# Title\n\nalpha beta\n\ngamma\n\n```\ncode\nlines\n```\n")
+                .elements()
+                .to_vec();
+
+        // Part of one element.
+        assert_eq!(selection_text(&elements, (at(1, 6), at(1, 10))), "beta");
+
+        // Across elements, backwards: partials at the ends, whole elements
+        // between, one line per element.
+        assert_eq!(selection_text(&elements, (at(2, 2), at(1, 6))), "beta\nga");
+
+        // Code blocks yank their interior text like any element.
+        assert_eq!(
+            selection_text(&elements, (at(3, 0), at(3, 9))),
+            "code\nline"
+        );
+
+        // Nothing selected — an anchor the caret never moved away from.
+        assert_eq!(selection_text(&elements, (at(1, 3), at(1, 3))), "");
     }
 }
