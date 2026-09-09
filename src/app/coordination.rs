@@ -64,7 +64,17 @@ pub(super) fn handle_preview_event(editor: &mut App, event: preview::Event) -> T
                     preview::reveal_caret().map(Message::Preview)
                 }
                 Surface::Preview => {
+                    // The caret mirrors into the write cursor: leaving the
+                    // preview lands the source cursor exactly where the
+                    // caret read.
                     editor.preview.clear_visual_selection();
+                    let source = editor.document.text();
+                    if let Some(offset) = editor.preview.caret_source_offset(&source) {
+                        editor.document.move_to(text_editor::Cursor {
+                            position: editing::position_at(&source, offset),
+                            selection: None,
+                        });
+                    }
                     Task::none()
                 }
             };
@@ -98,16 +108,23 @@ pub(super) fn handle_comments_event(editor: &mut App, event: comments::Event) ->
                 preview::reveal_anchor().map(Message::Preview)
             } else {
                 let source = editor.document.text();
-                let element = editor.preview.elements().get(anchor.element);
+                // Column 0 of the element aligns onto its first rendered
+                // character, so the cursor lands on the text, not on the
+                // markup before it — the same place the caret mirrors to.
+                let caret = preview::CaretPosition {
+                    element: anchor.element,
+                    column: 0,
+                };
 
-                if let Some(element) = element {
-                    editor.document.move_to(text_editor::Cursor {
-                        position: editing::position_at(&source, element.source().start),
-                        selection: None,
-                    });
-                    focus(Id::new(SOURCE_EDITOR_ID))
-                } else {
-                    Task::none()
+                match preview::caret_source_offset(&source, editor.preview.elements(), caret) {
+                    Some(offset) => {
+                        editor.document.move_to(text_editor::Cursor {
+                            position: editing::position_at(&source, offset),
+                            selection: None,
+                        });
+                        focus(Id::new(SOURCE_EDITOR_ID))
+                    }
+                    None => Task::none(),
                 }
             }
         }

@@ -422,11 +422,51 @@ fn entering_preview_policy_projects_edits_and_places_caret_from_source() {
         editor.preview.caret(),
         CaretPosition {
             element: 2,
-            column: 0,
+            column: 2,
         }
     );
     assert!(editor.preview.visual_selection().is_none());
     assert_eq!(editor.comments.len(), 1);
+}
+
+/// Leaving the preview mirrors the caret into the write cursor: the bar
+/// that stood on rendered text lands on the same character in the source,
+/// markup included, with no selection left over.
+#[test]
+fn leaving_preview_mirrors_the_caret_into_the_write_cursor() {
+    use iced::widget::text_editor::Position;
+
+    let source = "# Head\n\nsome *emphasis* here\n\ntail\n";
+    // Grapheme 5 of the paragraph is the `e` of `emphasis`.
+    let mut editor = app_at(
+        source,
+        CaretPosition {
+            element: 1,
+            column: 5,
+        },
+    );
+
+    let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
+
+    assert!(matches!(
+        editor.interaction.view().surface(),
+        Surface::Write
+    ));
+    let cursor = editor.document.content().cursor();
+    // Line 3 (1-based), just before `emphasis` — after `some *`.
+    assert_eq!(cursor.position, Position { line: 2, column: 6 });
+    assert_eq!(cursor.selection, None);
+
+    // The mirror survives a round trip: toggling back places the caret on
+    // the same rendered column.
+    let _ = update(&mut editor, Message::Preview(preview::Message::Toggle));
+    assert_eq!(
+        editor.preview.caret(),
+        CaretPosition {
+            element: 1,
+            column: 5,
+        }
+    );
 }
 
 /// Help does not move the source cursor/selection or the preview

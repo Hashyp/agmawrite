@@ -7,8 +7,8 @@ mod viewer;
 
 use model::Caret;
 pub(crate) use model::{
-    element_selection, selection_text, CaretPosition, Claims, ElementMap, Jump, Motion, Page,
-    Placement, PreviewElement, WordMotion,
+    caret_source_offset, element_selection, selection_text, CaretPosition, Claims, ElementMap,
+    Jump, Motion, Page, Placement, PreviewElement, WordMotion,
 };
 pub(crate) use scroll::{place_caret_in_view, reveal_anchor, reveal_caret, scroll_by, scroll_page};
 pub(crate) use viewer::{view, ViewContext};
@@ -149,12 +149,12 @@ impl State {
     }
 
     /// Refreshes source edits when entering preview and places the preview
-    /// caret at the source editor cursor.
+    /// caret where the source editor's cursor sits.
     pub(crate) fn refresh_from_source(&mut self, source: &str, content: &text_editor::Content) {
         self.markdown = markdown::Content::parse(source);
         self.elements = ElementMap::parse(source);
         self.caret
-            .move_to_source_cursor(content, self.elements.elements());
+            .move_to_source_cursor(source, content, self.elements.elements());
         self.clear_visual_selection();
         self.yank_flash = None;
     }
@@ -193,6 +193,12 @@ impl State {
 
     pub(crate) fn caret(&self) -> CaretPosition {
         self.caret.position()
+    }
+
+    /// The source byte offset the caret mirrors onto — where the write
+    /// cursor should land after leaving the preview.
+    pub(crate) fn caret_source_offset(&self, source: &str) -> Option<usize> {
+        caret_source_offset(source, self.elements.elements(), self.caret())
     }
 
     pub(crate) fn visual_selection(&self) -> Option<(CaretPosition, CaretPosition)> {
@@ -343,7 +349,7 @@ mod tests {
         state.refresh_from_source(source, &content);
 
         assert_projection(&state, source);
-        assert_eq!(state.caret(), at(2, 0));
+        assert_eq!(state.caret(), at(2, 2));
         assert_eq!(content.cursor(), source_cursor);
         assert!(state.visual_selection().is_none());
     }

@@ -413,17 +413,21 @@ impl Caret {
         true
     }
 
-    /// Places the caret on the element containing the source editor's
-    /// cursor, at column 0 — used when switching from write mode into the
-    /// preview.
+    /// Places the caret where the source editor's cursor sits — on the
+    /// element containing it (or the nearest one before it), at the
+    /// rendered column its source offset aligns to — used when switching
+    /// from write mode into the preview.
     pub fn move_to_source_cursor(
         &mut self,
+        source: &str,
         content: &text_editor::Content,
         elements: &[PreviewElement],
     ) {
-        self.element = element_for_source_cursor(content, elements);
-        self.column = 0;
-        self.column_target = 0;
+        self.place(caret_for_source_offset(
+            source,
+            source_cursor_offset(content),
+            elements,
+        ));
     }
 }
 
@@ -604,13 +608,8 @@ fn parse(markdown: &str) -> Vec<PreviewElement> {
     elements
 }
 
-/// The index of the preview element containing the source editor's cursor,
-/// or the nearest element before it.
-fn element_for_source_cursor(content: &text_editor::Content, elements: &[PreviewElement]) -> usize {
-    if elements.is_empty() {
-        return 0;
-    }
-
+/// The byte offset of the source editor's cursor.
+fn source_cursor_offset(content: &text_editor::Content) -> usize {
     let cursor = content.cursor().position;
     let mut offset = 0;
 
@@ -628,15 +627,133 @@ fn element_for_source_cursor(content: &text_editor::Content, elements: &[Preview
             .map_or(line.text.len(), |(index, _)| index);
     }
 
-    elements
+    offset
+}
+
+/// The caret position mirroring a source byte offset: the element
+/// containing it — or the nearest one before it — and the rendered column
+/// its offset aligns to, so switching surfaces keeps the reading spot.
+///
+/// An offset before every element maps onto the first; one between
+/// elements maps onto the end of the element before it, the rendered
+/// position closest to where the cursor rests.
+pub fn caret_for_source_offset(
+    source: &str,
+    offset: usize,
+    elements: &[PreviewElement],
+) -> CaretPosition {
+    let Some(index) = elements
         .iter()
-        .position(|element| element.source.contains(&offset))
-        .unwrap_or_else(|| {
-            elements
-                .iter()
-                .rposition(|element| element.source.start <= offset)
-                .unwrap_or(0)
-        })
+        .rposition(|element| element.source().start <= offset)
+    else {
+        return CaretPosition {
+            element: 0,
+            column: 0,
+        };
+    };
+
+    let element = &elements[index];
+    let markup = source.get(element.source()).unwrap_or_default();
+    let within = offset
+        .saturating_sub(element.source().start)
+        .min(markup.len());
+    let column = align_boundaries(markup, element.text())
+        .iter()
+        .filter(|boundary| **boundary < within)
+        .count()
+        .min(element.len());
+
+    CaretPosition {
+        element: index,
+        column,
+    }
+}
+
+/// The source byte offset mirroring a caret position: the boundary its
+/// column marks, aligned back onto the element's Markdown source — where
+/// the write-mode cursor should land after leaving the preview.
+pub fn caret_source_offset(
+    source: &str,
+    elements: &[PreviewElement],
+    caret: CaretPosition,
+) -> Option<usize> {
+    let element = elements.get(caret.element)?;
+    let markup = source.get(element.source())?;
+    let boundary = align_boundaries(markup, element.text())
+        .get(caret.column.min(element.len()))
+        .copied()
+        .unwrap_or(0);
+
+    Some(element.source().start + boundary)
+}
+
+/// The source byte offsets of an element's rendered grapheme boundaries,
+/// one per boundary — `graphemes + 1` entries — each relative to the
+/// element's source slice. Boundary `i` is where the caret bar sits, `i`
+/// graphemes into the rendered text.
+///
+/// Rendered text differs from Markdown source: block and inline markers
+/// are stripped, soft breaks become spaces. The alignment walks the
+/// element's source against its rendered text, matching every rendered
+/// grapheme to the next source characters that stand for it and skipping
+/// whatever lies between as markup. Boundaries that find no match repeat
+/// the last matched offset, and the whole source after the last match is
+/// trailing markup (closing fences, emphasis closers).
+fn align_boundaries(markup: &str, rendered: &str) -> Vec<usize> {
+    let mut boundaries = Vec::new();
+    let mut source = markup.char_indices().peekable();
+    // The offset just past the last matched character — the end boundary.
+    let mut end = 0;
+
+    for grapheme in rendered.graphemes(true) {
+        let Some(first) = grapheme.chars().next() else {
+            continue;
+        };
+
+        // Skip the markup before the grapheme: its boundary is where its
+        // first character appears in the source.
+        let start = loop {
+            match source.peek() {
+                Some((offset, character)) if stands_for(*character, first) => break Some(*offset),
+                Some(_) => {
+                    source.next();
+                }
+                None => break None,
+            }
+        };
+
+        let Some(start) = start else {
+            boundaries.push(end);
+            continue;
+        };
+
+        boundaries.push(start);
+
+        // Consume the source characters the grapheme matches.
+        for character in grapheme.chars() {
+            let matched = source
+                .peek()
+                .copied()
+                .filter(|(_, next)| stands_for(*next, character));
+
+            if let Some((offset, next)) = matched {
+                source.next();
+                end = offset + next.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+
+    boundaries.push(end);
+    boundaries
+}
+
+/// Whether a source character can stand for a rendered one. A soft break
+/// is the one substitution the renderer makes inside element text: its
+/// newline renders as a space.
+fn stands_for(source: char, rendered: char) -> bool {
+    source == rendered || (source == '\n' && rendered == ' ')
 }
 
 /// Resolves a vertical caret [`Motion`] (`j`/`k`) from the element at
@@ -808,8 +925,8 @@ pub fn selection_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        element_selection, parse, selection_text, Caret, CaretPosition, ElementKind, ElementMap,
-        Jump, Motion, WordMotion,
+        caret_for_source_offset, caret_source_offset, element_selection, parse, selection_text,
+        Caret, CaretPosition, ElementKind, ElementMap, Jump, Motion, WordMotion,
     };
 
     fn at(element: usize, column: usize) -> CaretPosition {
@@ -1215,6 +1332,83 @@ outro
         caret.place(at(3, 9));
         assert!(caret.jump(&elements, Jump::Last, 2));
         assert_eq!(caret.position(), at(1, 1));
+    }
+
+    /// The rendered↔source alignment is the seam that mirrors the caret
+    /// between surfaces: heading hashes, list markers, and fences are
+    /// skipped as markup, soft breaks match the spaces they render as,
+    /// and every caret column maps to the source offset of the character
+    /// it stands before.
+    #[test]
+    fn caret_columns_align_with_source_offsets() {
+        let markdown =
+            "# Head\n\nsome *emphasis* here\n\n- item two\n\n```rust\nfn main() {}\n```\n";
+        let elements = parse(markdown);
+
+        // The heading's caret starts after `# ` and stops at the line's end.
+        assert_eq!(caret_source_offset(markdown, &elements, at(0, 0)), Some(2));
+        assert_eq!(caret_source_offset(markdown, &elements, at(0, 4)), Some(6));
+
+        // Emphasis delimiters are markup: the caret skips both pairs, and
+        // the end column stops before trailing markup only when there is
+        // some.
+        assert_eq!(caret_source_offset(markdown, &elements, at(1, 0)), Some(8));
+        assert_eq!(caret_source_offset(markdown, &elements, at(1, 5)), Some(14));
+        assert_eq!(
+            caret_source_offset(markdown, &elements, at(1, 18)),
+            Some(28)
+        );
+
+        // The list marker is skipped like the heading hashes.
+        assert_eq!(caret_source_offset(markdown, &elements, at(2, 0)), Some(32));
+
+        // The code block's caret starts inside the opening fence and stops
+        // before the closing one.
+        assert_eq!(caret_source_offset(markdown, &elements, at(3, 0)), Some(50));
+        assert_eq!(
+            caret_source_offset(markdown, &elements, at(3, 12)),
+            Some(62)
+        );
+    }
+
+    /// Mapping a caret to its source offset and back lands on the same
+    /// column — the mirror is stable across repeated surface switches —
+    /// and a soft break aligns to the space it renders as, keeping the
+    /// line of a column on the line of its character.
+    #[test]
+    fn source_offsets_round_trip_to_their_caret_columns() {
+        let markdown =
+            "# Head\n\nsome *emphasis* here\n\n- item two\n\n```rust\nfn main() {}\n```\n";
+        let elements = parse(markdown);
+
+        for (element, column) in [
+            (0, 0),
+            (0, 4),
+            (1, 0),
+            (1, 5),
+            (1, 13),
+            (1, 18),
+            (2, 0),
+            (2, 8),
+            (3, 0),
+            (3, 12),
+        ] {
+            let offset = caret_source_offset(markdown, &elements, at(element, column));
+            assert_eq!(
+                offset.map(|offset| caret_for_source_offset(markdown, offset, &elements)),
+                Some(at(element, column)),
+                "column {column} of element {element} does not round trip"
+            );
+        }
+
+        // A source cursor resting between elements maps onto the end of
+        // the element before it — the nearest rendered position.
+        assert_eq!(caret_for_source_offset(markdown, 7, &elements), at(0, 4));
+
+        // A soft break: the second line's character keeps its line.
+        let soft = parse("alpha\nbeta");
+        assert_eq!(caret_source_offset("alpha\nbeta", &soft, at(0, 6)), Some(6));
+        assert_eq!(caret_for_source_offset("alpha\nbeta", 6, &soft), at(0, 6));
     }
 
     /// Visual mode anchors one end and the caret forms the other; motions

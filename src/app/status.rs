@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::App;
 use crate::input::Surface;
-use crate::preview::{CaretPosition, PreviewElement};
+use crate::preview::{caret_source_offset, CaretPosition, PreviewElement};
 use crate::ui::status_bar::{self, Model};
 use iced::widget::text_editor::Position;
 
@@ -42,32 +42,14 @@ pub(super) fn yank_report(text: &str) -> String {
     }
 }
 
-/// Source line plus approximate rendered grapheme column: inline Markdown
-/// delimiters are stripped in preview, so this is not an exact source offset.
+/// The caret's source line and column, via the rendered-to-source
+/// alignment — the same mirroring a surface switch lands the write cursor
+/// on, so the ruler reports exactly where writing would resume.
 fn location(source: &str, elements: &[PreviewElement], caret: CaretPosition) -> (usize, usize) {
-    let Some(element) = elements.get(caret.element) else {
-        return (1, 1);
-    };
-    let start = crate::editing::position_at(source, element.source().start);
-    let prefix: String = element.text().graphemes(true).take(caret.column).collect();
-    let extra_lines = prefix.matches('\n').count();
-    let line = start.line + extra_lines;
-    let rendered_column = prefix
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .graphemes(true)
-        .count();
-    let source_width = source
-        .lines()
-        .nth(line)
-        .unwrap_or_default()
-        .graphemes(true)
-        .count();
-    (
-        (line + 1).min(source.lines().count().max(1)),
-        rendered_column.min(source_width) + 1,
-    )
+    caret_source_offset(source, elements, caret).map_or((1, 1), |offset| {
+        let position = crate::editing::position_at(source, offset);
+        (position.line + 1, position.column + 1)
+    })
 }
 
 /// The write-mode ruler: the source editor's own caret, one-based like vim
@@ -95,10 +77,11 @@ mod tests {
     use crate::theme::Palette;
 
     #[test]
-    fn location_maps_block_start_with_approximate_grapheme_column() {
+    fn location_maps_the_carets_exact_source_position() {
         let source = "# Title\n\né👩‍💻\nlast\n";
         let preview = State::new(source);
         let element = &preview.elements()[1];
+        // The `l` of `last`: grapheme 3 of the soft-broken paragraph.
         let column = element
             .text()
             .graphemes(true)
@@ -110,7 +93,7 @@ mod tests {
                 preview.elements(),
                 CaretPosition { element: 1, column }
             ),
-            (3, 3)
+            (4, 1)
         );
     }
 

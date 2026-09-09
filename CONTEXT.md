@@ -12,6 +12,13 @@ preview and anchored comments.
 - **Caret position** — an `(element, column)` position in the preview: the
   element index plus a grapheme column within its rendered text. Where the
   preview caret sits. (`CaretPosition`)
+- **Mirror** — the rendered↔source alignment that carries the caret
+  between surfaces: entering the preview places the caret on the element
+  the write cursor rests in, at the rendered column its byte offset
+  aligns to; leaving it lands the write cursor on the source character
+  that column stands before (`align_boundaries`). Markdown markup is
+  skipped as markup, a soft break matches the space it renders as, and
+  the preview ruler reports the mirrored position exactly.
 - **Comment** — a saved note: its text plus the anchor it was written for.
 - **Anchor** — what a comment is attached to: a caret position, or nothing
   for a **global comment** (labeled "Global", skipped by `Ctrl+N`). The
