@@ -1,0 +1,63 @@
+# Release workflow: push a tag like v0.1.0 to build and publish.
+# See CHANGELOG.md — the release notes are taken from the matching section.
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags:
+      - v[0-9]+.*
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # for taiki-e/create-gh-release-action
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # Release notes come from the CHANGELOG.md section matching the tag.
+          # Fails if that section is missing — keeps tags and notes in sync.
+          changelog: CHANGELOG.md
+          # Draft until you review the assets, then publish from the Releases page.
+          draft: true
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          # glibc 2.17 baseline: the binary runs on any x86_64 Linux distro
+          # from ~2014 on. cargo-zigbuild is installed by the action itself.
+          - target: x86_64-unknown-linux-gnu.2.17
+            os: ubuntu-latest
+            build-tool: cargo-zigbuild
+          # One universal binary covering both Intel and Apple Silicon Macs.
+          - target: universal-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # for taiki-e/upload-rust-binary-action
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          # Binary name from [[bin]] / package name in Cargo.toml.
+          bin: agmawrite
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.build-tool }}
+          # Build exactly what Cargo.lock pins (fails if the lockfile is stale).
+          locked: true
+          # Versioned archive names, e.g. agmawrite-v0.1.0-x86_64-pc-windows-msvc.zip
+          archive: $bin-$tag-$target
+          # tar.gz for Linux/macOS, zip for Windows (these are the defaults,
+          # restated for clarity). SHA256 checksums ship alongside each archive.
+          tar: unix
+          zip: windows
+          checksum: sha256
+          include: README.md
